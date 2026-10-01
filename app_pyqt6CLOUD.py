@@ -96,15 +96,33 @@ SHEETS_ENABLED = True
 # Excel Live munkalap automatikus mentési késleltetése (ms) - ennyi idő után indul a mentés/nyomtatás
 AUTO_SAVE_INTERVAL_MS = 4000
 
-# A törölt / kiürített termékek teljes adatai ide kerülnek (ugyanabban a táblázatban, külön munkalapon)
+# -------------------------------------------------------------------
+# TÖRÖLT SOROK FIGYELÉSE
+# A program a FIGYELT (élő) táblázatot CSAK OLVASSA (a Google felé is csak olvasási joggal
+# kapcsolódik, így véletlenül sem módosíthatja). Ha onnan eltűnik egy R18-as termék sora,
+# vagy kiürítik a Márka/Típus/Cikkszám mezőit, a korábbi teljes adatai a ToroltSor munkalapra kerülnek.
+# -------------------------------------------------------------------
+# A figyelt (élő) táblázat ID-ja: a docs.google.com/spreadsheets/d/<EZ>/edit részből.
+# Üresen hagyva a figyelés KI van kapcsolva.
+DELETED_WATCH_SPREADSHEET_ID = ""
+# A figyelt munkalap (fül) neve - üresen hagyva a táblázat ELSŐ munkalapja
+DELETED_WATCH_WORKSHEET = ""
+# Milyen gyakran nézze meg a figyelt táblázatot (másodperc)
+DELETED_WATCH_INTERVAL_SEC = 60
+
+# A ToroltSor munkalap helye (ide ÍR a program) - NEM lehet ugyanaz a táblázat, mint a figyelt!
+DELETED_SHEET_SPREADSHEET_ID = TEST_SHEETS_ID
 DELETED_SHEET_NAME = "ToroltSor"
 DELETED_SHEET_HEADER = ["A: F-Kód", "B: Vonalkód", "C: Márka", "D: Típus", "E: Cikkszám", "F: DB",
                         "G: Állapot", "H: Ár", "I: Páter", "J: Szabad", "K: Polc", "L: Raklap",
                         "M: Súly", "N: eBay ID", "O: Megjegyzés", "P: Állapot részlet",
                         "Q: Törlés ideje", "R: Honnan törölték"]
-# Ha egy letöltéskor ennél több kitöltött termék hiányzik egyszerre a Sheets-ből, az valószínűleg
+# Ha egy ellenőrzéskor ennél több kitöltött termék tűnik el egyszerre a figyelt táblázatból, az valószínűleg
 # nem kézi törlés (hanem pl. hibás letöltés / szűrés) - ilyenkor nem archivál automatikusan.
 DELETED_MISSING_SAFETY_LIMIT = 20
+# A programon BELÜLI törlés / eladás / visszavonás / Excel Live kiürítés is a ToroltSor lapra írja a
+# termék adatait (ez a program saját táblázatára vonatkozik, nem a figyeltre). False = kikapcsolva.
+ARCHIVE_PROGRAM_DELETIONS = True
 
 def get_deleted_sheet():
     """A 'ToroltSor' munkalap (ha nincs, létrehozza; üres lapra fejlécet ír)."""
@@ -114,8 +132,11 @@ def get_deleted_sheet():
     from google.oauth2.service_account import Credentials
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+    if DELETED_WATCH_SPREADSHEET_ID and DELETED_SHEET_SPREADSHEET_ID.strip() == DELETED_WATCH_SPREADSHEET_ID.strip():
+        # Biztonsági zár: a figyelt (élő) táblázatba SOHA nem írunk
+        raise RuntimeError("A ToroltSor nem lehet a figyelt (élő) táblázatban - állíts be másik DELETED_SHEET_SPREADSHEET_ID-t!")
     client = gspread.authorize(creds)
-    book = client.open_by_key(TEST_SHEETS_ID)
+    book = client.open_by_key(DELETED_SHEET_SPREADSHEET_ID)
     try:
         ws = book.worksheet(DELETED_SHEET_NAME)
     except gspread.exceptions.WorksheetNotFound:
@@ -123,6 +144,91 @@ def get_deleted_sheet():
     if not ws.row_values(1):
         ws.update(range_name="A1:R1", values=[DELETED_SHEET_HEADER])
     return ws
+
+def _read_watched_sheet_values():
+    """A figyelt (élő) táblázat összes cellája - KIZÁRÓLAG OLVASÁSI JOGGAL (spreadsheets.readonly),
+    így a program semmilyen módon nem tudja módosítani."""
+    import gspread
+    from google.oauth2.service_account import Credentials
+    scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+    book = gspread.authorize(creds).open_by_key(DELETED_WATCH_SPREADSHEET_ID.strip())
+    ws = book.worksheet(DELETED_WATCH_WORKSHEET) if DELETED_WATCH_WORKSHEET.strip() else book.sheet1
+    return ws.get_all_values()
+
+_watch_lock = threading.Lock()
+
+def check_watched_sheet_for_deletions(log=print):
+    """Összeveti a figyelt táblázat mostani állapotát az előző ellenőrzéskor eltárolt pillanatképpel
+    (helyi 'figyelt_snapshot' tábla - így a program bezárása alatt történt törléseket is észreveszi).
+    Ami eltűnt / kiürült, annak a KORÁBBI teljes adata a ToroltSor munkalapra kerül.
+    Visszaadja az új archív bejegyzések számát."""
+    if not DELETED_WATCH_SPREADSHEET_ID.strip() or not SHEETS_ENABLED:
+        return 0
+    if not _watch_lock.acquire(blocking=False):
+        return 0
+    try:
+        try:
+            values = _read_watched_sheet_values()
+        except Exception as e:
+            log(f"⚠️ Figyelt táblázat nem olvasható (később újra próbálja): {e}", "ERROR")
+            return 0
+
+        current = {}
+        for r in values:
+            r = (list(r) + [""] * 16)[:16]
+            code = str(r[0]).strip().upper()
+            if code.startswith("R18-"):
+                current[code] = {c: str(v).strip() for c, v in zip(ROW_COLS, r)}
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        watch_key = f"{DELETED_WATCH_SPREADSHEET_ID.strip()}|{DELETED_WATCH_WORKSHEET.strip()}"
+        cursor.execute("SELECT code, payload FROM figyelt_snapshot WHERE forras = ?", (watch_key,))
+        previous = {row["code"]: json.loads(row["payload"]) for row in cursor.fetchall()}
+
+        # Hibás / üres letöltés elleni védelem: ilyenkor se nem archivál, se nem írja felül a pillanatképet
+        if previous and len(current) < len(previous) * 0.5:
+            log(f"⚠️ Figyelt táblázat: csak {len(current)} sor jött le (előzőleg {len(previous)}) - "
+                f"valószínűleg hibás letöltés, kihagyva.", "ERROR")
+            conn.close()
+            return 0
+
+        gone = []
+        for code, old_row in previous.items():
+            if not _row_has_product_data(old_row):
+                continue
+            new_row = current.get(code)
+            if new_row is None:
+                gone.append((old_row, "Élő tábla: sor törölve"))
+            elif not _row_has_product_data(new_row):
+                gone.append((old_row, "Élő tábla: kiürítve"))
+
+        archived = 0
+        if len(gone) > DELETED_MISSING_SAFETY_LIMIT:
+            log(f"⚠️ Figyelt táblázat: {len(gone)} termék tűnt el egyszerre - túl sok, automatikus "
+                f"archiválás kihagyva (ellenőrizd a táblázatot!)", "ERROR")
+        else:
+            for old_row, forras in gone:
+                if archive_deleted_row(old_row, forras, cursor, force=True):
+                    archived += 1
+
+        # Új pillanatkép mentése
+        cursor.execute("DELETE FROM figyelt_snapshot WHERE forras = ?", (watch_key,))
+        cursor.executemany("INSERT INTO figyelt_snapshot (forras, code, payload) VALUES (?, ?, ?)",
+                           [(watch_key, c, json.dumps(r, ensure_ascii=False)) for c, r in current.items()])
+        conn.commit()
+        conn.close()
+
+        if archived:
+            log(f"🗃️ Figyelt táblázat: {archived} törölt termék teljes adatai a '{DELETED_SHEET_NAME}' munkalapra kerülnek", "INFO")
+            flush_outbox_async()
+        return archived
+    except Exception as e:
+        log(f"❌ Törölt sorok figyelési hiba: {e}", "ERROR")
+        return 0
+    finally:
+        _watch_lock.release()
 
 def get_sheet():
     """Google Sheets munkalap (csak ha SHEETS_ENABLED = True)"""
@@ -275,6 +381,16 @@ def get_db_connection():
         )
     """)
 
+    # A figyelt (élő) táblázat utolsó ismert állapota - ebből derül ki, mi tűnt el azóta
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS figyelt_snapshot (
+            forras TEXT NOT NULL,
+            code TEXT NOT NULL,
+            payload TEXT,
+            PRIMARY KEY (forras, code)
+        )
+    """)
+
     # Eladások (PDA / Eladás fül 3 gombja) - az Eladottak fül ebből dolgozik, és innen megy ki
     # a 3 eladási munkalapra. valtozat: minden szerkesztés növeli (a szinkron csak a legutolsó
     # állapotot jelöli késznek); synced_platform: melyik munkalapon van most fent.
@@ -383,10 +499,12 @@ def _row_has_product_data(row_data):
     """Van-e a sorban valódi termékadat (Márka / Típus / Cikkszám)."""
     return any(safe_str(row_data.get(c, "")).strip() for c in ("C", "D", "E"))
 
-def archive_deleted_row(row_data, forras, cursor=None):
+def archive_deleted_row(row_data, forras, cursor=None, force=False):
     """Egy törölt / kiürített termék TELJES (A-P) adatait elmenti a helyi archívumba és
     sorba állítja a Sheets 'ToroltSor' munkalapjára (offline-biztos, az outboxon át).
     Ugyanazt a tartalmat csak egyszer archiválja. True, ha új archív bejegyzés készült."""
+    if not force and not ARCHIVE_PROGRAM_DELETIONS:
+        return False
     data = {c: safe_str(row_data.get(c, "")).strip() for c in ROW_COLS}
     code = data["A"].upper()
     if not code or not _row_has_product_data(data):
@@ -706,7 +824,7 @@ def _flush_sync_outbox_locked():
 
         def do_sheets():
             nonlocal sheets_ok
-            if not sheets_ok and not is_conflict and sheet is not None:
+            if not sheets_ok and not is_conflict and (sheet is not None or op == "archive"):
                 sheets_ok = _send_outbox_to_sheets(op, row_data, sheet, all_a, deleted_ws_holder)
 
         # Törlésnél előbb a Sheets-ből töröljük: így mire a másik gép a VPS-től megtudja
@@ -1734,10 +1852,6 @@ class AutoRowSyncWorker(QThread):
         self.sync_finished_signal.emit(f"✅ {len(self.dirty_data_list)} sor mentve: {target_txt}!")
 
 class FastCopyLiveToTestWorker(QThread):
-    # Az előző letöltéskor a Raktar lapon látott R18-kódok. Csak az számít "Sheets-ből törölt" sornak,
-    # ami korábban OTT VOLT és most eltűnt - így egy másik gépről épp érkező, a Sheets-be még fel nem
-    # töltött új termék sosem kerül tévesen a ToroltSor munkalapra.
-    _last_cloud_codes = None
     # Az előző letöltött CSV ujjlenyomata: ha a táblázat azóta nem változott, nincs mit feldolgozni
     _last_csv_hash = None
     finished_signal = pyqtSignal(bool, str, float, list) # Szignál kiegészítve a konfliktusos kódok listájával
@@ -1776,8 +1890,6 @@ class FastCopyLiveToTestWorker(QThread):
             cursor.execute(f"SELECT {', '.join(ROW_COLS)} FROM termekek")
             db_full = {safe_str(row["A"]): {c: safe_str(row[c]) for c in ROW_COLS} for row in cursor.fetchall() if row["A"]}
             db_existing = db_full
-            cloud_codes = set()
-            archived_count = 0
             # A még fel nem töltött (outboxban váró) tételeket a Sheets régebbi állapota nem írhatja
             # felül - és egy helyben törölt tételt sem hozhat vissza, amíg a törlés ki nem ment.
             pending_outbox = get_pending_outbox_codes(cursor)
@@ -1795,7 +1907,6 @@ class FastCopyLiveToTestWorker(QThread):
                     vals.append("")
 
                 cloud_c, cloud_d, cloud_e = vals[2], vals[3], vals[4]
-                cloud_codes.add(code.upper())
 
                 # ÜTKÖZÉS-VIZSGÁLAT: Ha a felhasználónál pending (szerkesztés alatti) módosítás van erre a sorra
                 if code in self.pending_rows_data:
@@ -1811,35 +1922,12 @@ class FastCopyLiveToTestWorker(QThread):
                     # Ha nem szerkesztés alatti sor, frissítjük a helyit a felhőből
                     # (a színjelölést - szin - nem bántjuk, az a CSV-ben nincs benne)
                     if code not in self.pending_rows_data:
-                        # A Sheets-ben KIÜRÍTETTÉK a terméket (Márka/Típus/Cikkszám eltűnt), helyben még
-                        # megvan: felülírás ELŐTT a teljes régi adat a ToroltSor munkalapra kerül
                         local_row = db_full[code]
-                        if not (cloud_c or cloud_d or cloud_e) and _row_has_product_data(local_row):
-                            if archive_deleted_row(local_row, "Sheets: kiürítve", cursor):
-                                archived_count += 1
                         # Csak a ténylegesen megváltozott sorokat írjuk (nem mind a több ezret 15 mp-enként)
                         if [local_row[c] for c in ROW_COLS] != vals[:16]:
                             update_data.append((*vals[:16], code, code))
                 else:
                     insert_data.append((*vals[:16], 'FEHÉR'))
-
-            # A Sheets-ből TELJESEN TÖRÖLT sorok (az R18-kód már nincs a Raktar lapon), amelyek helyben
-            # még kitöltve megvannak és nem várnak feltöltésre: teljes adataik a ToroltSor munkalapra
-            prev_cloud = FastCopyLiveToTestWorker._last_cloud_codes
-            if cloud_codes and prev_cloud:
-                missing = [r for c, r in db_full.items()
-                           if c.upper().startswith("R18-") and c.upper() in prev_cloud
-                           and c.upper() not in cloud_codes
-                           and c.upper() not in pending_outbox and c not in self.pending_rows_data
-                           and _row_has_product_data(r)]
-                if len(missing) > DELETED_MISSING_SAFETY_LIMIT:
-                    self.process_log_signal.emit(
-                        f"⚠️ {len(missing)} kitöltött termék hiányzik a Sheets-ből - túl sok egyszerre, "
-                        f"automatikus archiválás kihagyva (ellenőrizd a táblázatot!)", "ERROR")
-                else:
-                    for r in missing:
-                        if archive_deleted_row(r, "Sheets: sor törölve", cursor):
-                            archived_count += 1
 
             if update_data:
                 cursor.executemany("""
@@ -1856,13 +1944,7 @@ class FastCopyLiveToTestWorker(QThread):
             conn.commit()
             conn.close()
 
-            if cloud_codes:
-                FastCopyLiveToTestWorker._last_cloud_codes = cloud_codes
             FastCopyLiveToTestWorker._last_csv_hash = csv_hash
-
-            if archived_count:
-                self.process_log_signal.emit(f"🗃️ {archived_count} törölt termék teljes adatai a '{DELETED_SHEET_NAME}' munkalapra kerülnek", "INFO")
-                flush_outbox_async()
 
             elapsed = round(time.perf_counter() - start_time, 2)
             self.finished_signal.emit(True, f"✔ Háttér szinkron kész ({elapsed} mp)!", elapsed, conflicts)
@@ -2673,6 +2755,18 @@ class RaktarApp(QMainWindow):
         self.tabs.setCurrentIndex(0)
         # Elhalasztott (nem látható fülre szóló) frissítések elvégzése fülváltáskor
         self.tabs.currentChanged.connect(self.on_tab_changed)
+
+        # TÖRÖLT SOROK FIGYELÉSE a figyelt (élő) táblázatban - háttérszálon, csak olvasással
+        if DELETED_WATCH_SPREADSHEET_ID.strip() and SHEETS_ENABLED:
+            def _watch_log(msg, log_type="INFO"):
+                self.process_log_signal.emit(msg)
+            self.deleted_watch_timer = QTimer()
+            self.deleted_watch_timer.setInterval(DELETED_WATCH_INTERVAL_SEC * 1000)
+            self.deleted_watch_timer.timeout.connect(
+                lambda: threading.Thread(target=check_watched_sheet_for_deletions, args=(_watch_log,), daemon=True).start())
+            self.deleted_watch_timer.start()
+            QTimer.singleShot(5000, lambda: threading.Thread(target=check_watched_sheet_for_deletions,
+                                                             args=(_watch_log,), daemon=True).start())
 
         self.update_app_stylesheet()
 
