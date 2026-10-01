@@ -16,6 +16,9 @@ Hasznalat:
   venv/bin/python torolt_visszakereso.py <regi .xlsx fajl VAGY regi tablazat ID>              (proba)
   venv/bin/python torolt_visszakereso.py <regi .xlsx fajl VAGY regi tablazat ID> --irj        (beiras)
   Opcio: --munkalap "Lap neve"   (a regi forras munkalapja; alapbol az elso)
+  Pl. a teszt tablazat "Regi resz" fule:
+  venv/bin/python torolt_visszakereso.py 1ZoB2yl_GvaY0kiICQN10dEKghAE7b9Z3hDlwtv9nMdc --munkalap "Regi r\u00e9sz"
+  (a fulnev ekezettel is beirhato a parancssorba)
 """
 import datetime
 import os
@@ -30,8 +33,8 @@ def rows_to_dict(values):
     out = {}
     for r in values:
         r = ["" if v is None else str(v).strip() for v in (list(r) + [""] * 16)[:16]]
-        code = r[0].upper()
-        if code.startswith("R18-"):
+        code = tf.normalize_code(r[0])   # R18/1 es R18-1 ugyanaz
+        if code:
             out[code] = dict(zip(ROW_COLS, r))
     return out
 
@@ -58,7 +61,7 @@ def read_old_source(source, worksheet):
         sys.exit(f"A tablazat nem talalhato vagy nincs hozza hozzaferes: {source}\n"
                  f"Ellenorizd az ID-t, es oszd meg a tablazatot ezzel a cimmel (Megtekinto joggal):\n  {email}")
     ws = book.worksheet(worksheet) if worksheet else book.sheet1
-    return ws.get_all_values(), book.title
+    return ws.get_all_values(), f"{book.title} / {ws.title}"
 
 
 def main():
@@ -75,7 +78,9 @@ def main():
         sys.exit("Ez az ELO tablazat ID-ja, nem a regi masolate. Elobb keszits masolatot egy regi verziobol\n"
                  "(Fajl -> Verzioelozmenyek -> regi datum -> Masolat keszitese), es annak az ID-jat add meg.")
     if source.strip() == tf.DELETED_SPREADSHEET_ID.strip():
-        sys.exit("A regi forras nem lehet a ToroltSor tablazata.")
+        # A ToroltSor tablazatanak egy MASIK fule (pl. "Regi resz") lehet forras - csak olvassuk
+        if not worksheet or worksheet == tf.DELETED_WORKSHEET:
+            sys.exit("Ennel a tablazatnal add meg a regi adatok fulet is, pl.:  --munkalap \"Regi r\u00e9sz\"")
 
     print("Regi verzio olvasasa...")
     old_values, old_name = read_old_source(source, worksheet)
@@ -96,7 +101,7 @@ def main():
         elif not tf.has_product_data(now_row):
             found.append((old_row, "Korabbi torles: kiuritve"))
 
-    found.sort(key=lambda x: int(x[0]["A"][4:]) if x[0]["A"][4:].isdigit() else 0)
+    found.sort(key=lambda x: int(tf.normalize_code(x[0]["A"])[4:]))
     print(f"\n{len(found)} korabban torolt / kiuritett termek:")
     for row, forras in found:
         print(f"  {row['A']:<10} | {row['C'][:15]:<15} | {row['D'][:30]:<30} | {row['E'][:25]:<25} | {forras}")

@@ -22,6 +22,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -83,6 +84,15 @@ def db():
     return conn
 
 
+_CODE_RE = re.compile(r"^\s*R18\s*[-/ ]?\s*0*(\d+)\s*$", re.IGNORECASE)
+
+
+def normalize_code(code):
+    """R18-123 / R18/123 / R18 123 -> 'R18-123' (osszehasonlitashoz). Nem R18-kod -> None."""
+    m = _CODE_RE.match(str(code or ""))
+    return f"R18-{int(m.group(1))}" if m else None
+
+
 def has_product_data(row):
     return any(str(row.get(c, "")).strip() for c in ("C", "D", "E"))
 
@@ -119,8 +129,8 @@ def check_once(conn):
     current = {}
     for r in values:
         r = (list(r) + [""] * 16)[:16]
-        code = str(r[0]).strip().upper()
-        if code.startswith("R18-"):
+        code = normalize_code(r[0])
+        if code:
             current[code] = {c: str(v).strip() for c, v in zip(ROW_COLS, r)}
 
     key = f"{WATCH_SPREADSHEET_ID.strip()}|{WATCH_WORKSHEET.strip()}"
