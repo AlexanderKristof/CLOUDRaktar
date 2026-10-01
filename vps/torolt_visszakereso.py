@@ -47,7 +47,16 @@ def read_old_source(source, worksheet):
         return list(ws.iter_rows(values_only=True)), os.path.basename(source)
     # Google tablazat ID - csak olvasas
     import gspread
-    book = gspread.authorize(tf._creds(readonly=True)).open_by_key(source)
+    if source.upper().startswith("REGI-") or len(source) < 30:
+        sys.exit(f"'{source}' nem tablazat-ID. A regi masolat valodi ID-jat ird be: a masolat cimeben\n"
+                 f"a docs.google.com/spreadsheets/d/<EZ A RESZ>/edit kozotti szoveg.")
+    try:
+        book = gspread.authorize(tf._creds(readonly=True)).open_by_key(source)
+    except gspread.exceptions.SpreadsheetNotFound:
+        with open(tf.CREDENTIALS_FILE, encoding="utf-8") as f:
+            email = __import__("json").load(f).get("client_email", "?")
+        sys.exit(f"A tablazat nem talalhato vagy nincs hozza hozzaferes: {source}\n"
+                 f"Ellenorizd az ID-t, es oszd meg a tablazatot ezzel a cimmel (Megtekinto joggal):\n  {email}")
     ws = book.worksheet(worksheet) if worksheet else book.sheet1
     return ws.get_all_values(), book.title
 
