@@ -1,4 +1,4 @@
-from PyQt6.QtCore import Qt, QThread, QObject, pyqtSignal, QUrl, QTimer, QPropertyAnimation, QDate, QEvent
+from PyQt6.QtCore import Qt, QThread, QObject, pyqtSignal, QUrl, QTimer, QPropertyAnimation, QDate, QEvent, QRectF
 import sys
 import io
 import os
@@ -15,6 +15,8 @@ import pandas as pd
 import qrcode
 import requests
 import threading
+import functools
+import hashlib
 from barcode.writer import ImageWriter
 from PIL import Image, ImageDraw, ImageFont, ImageWin
 
@@ -25,9 +27,9 @@ from PyQt6.QtWidgets import (
     QFormLayout, QGroupBox, QSpinBox, QDialog, QScrollArea, QFrame,
     QFileDialog, QCheckBox, QMessageBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QGraphicsOpacityEffect, QTextEdit, QDateEdit, QListWidget, QInputDialog, QAbstractItemView,
-    QStyledItemDelegate, QAbstractItemDelegate, QComboBox, QPlainTextEdit, QAbstractSpinBox
+    QStyledItemDelegate, QAbstractItemDelegate, QComboBox, QPlainTextEdit, QAbstractSpinBox, QStyle
 )
-from PyQt6.QtGui import QColor, QPixmap, QFont, QDesktopServices, QCloseEvent, QShortcut, QKeySequence, QIntValidator
+from PyQt6.QtGui import QColor, QPixmap, QFont, QDesktopServices, QCloseEvent, QShortcut, QKeySequence, QIntValidator, QPainter
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEnginePage
 
@@ -917,6 +919,36 @@ def get_last_processed_info():
     except Exception:
         return "R18-0", 0, []
 
+# "Összesen raktáron" összesítő: korábban MINDEN kártya végigolvasta a teljes adatbázist.
+# Most egyszer épül fel egy index (alkatrészszám -> összes db), és pár másodpercig újrahasznosítjuk.
+_STOCK_SUM_TTL_SEC = 5.0
+_stock_sum_cache = {"ts": 0.0, "by_clean": {}, "by_upper": {}}
+_stock_sum_lock = threading.Lock()
+
+def get_stock_sum(search_target):
+    """Az azonos (okos) alkatrészszámú tételek összes darabszáma a raktárban."""
+    with _stock_sum_lock:
+        if time.monotonic() - _stock_sum_cache["ts"] > _STOCK_SUM_TTL_SEC:
+            by_clean, by_upper = {}, {}
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT D, E, F FROM termekek WHERE (D IS NOT NULL AND D != '') OR (E IS NOT NULL AND E != '')")
+            for r in cursor.fetchall():
+                r_smart = get_smart_part_number(safe_str(r[0]), safe_str(r[1]))
+                f_match = re.search(r'\d+', safe_str(r[2]).strip())
+                qty = int(f_match.group(0)) if f_match else 1
+                up = r_smart.upper()
+                by_upper[up] = by_upper.get(up, 0) + qty
+                cl = clean_part_number(r_smart)
+                if cl:
+                    by_clean[cl] = by_clean.get(cl, 0) + qty
+            conn.close()
+            _stock_sum_cache.update(ts=time.monotonic(), by_clean=by_clean, by_upper=by_upper)
+        clean_target = clean_part_number(search_target)
+        if clean_target:
+            return _stock_sum_cache["by_clean"].get(clean_target, 0)
+        return _stock_sum_cache["by_upper"].get(search_target.upper(), 0)
+
 def get_next_suggested_r18_code(last_code):
     match = re.search(r'R18-(\d+)', last_code, re.IGNORECASE)
     if match:
@@ -1469,6 +1501,8 @@ class RestoreDialog(QDialog):
 # -------------------------------------------------------------------
 # NYOMTATÁS SEGÉDFÜGGVÉNYEK
 # -------------------------------------------------------------------
+# GYORSÍTÓTÁR: ugyanarra a kódra/szövegre nem rajzolja újra a QR + vonalkód képet (kártyák, előnézetek)
+@functools.lru_cache(maxsize=1024)
 def generate_codes_in_memory(code_text, cikkszam_text="", tipus_text=""):
     if not code_text or code_text in ("ISMERETLEN", "None", "nan", ""):
         return None, None
@@ -1704,12 +1738,15 @@ class FastCopyLiveToTestWorker(QThread):
     # ami korábban OTT VOLT és most eltűnt - így egy másik gépről épp érkező, a Sheets-be még fel nem
     # töltött új termék sosem kerül tévesen a ToroltSor munkalapra.
     _last_cloud_codes = None
+    # Az előző letöltött CSV ujjlenyomata: ha a táblázat azóta nem változott, nincs mit feldolgozni
+    _last_csv_hash = None
     finished_signal = pyqtSignal(bool, str, float, list) # Szignál kiegészítve a konfliktusos kódok listájával
     process_log_signal = pyqtSignal(str, str)
 
     def __init__(self, pending_rows_data=None):
         super().__init__()
         self.pending_rows_data = pending_rows_data or {} # { "R18-12878": {"C": "Márka", ...} }
+        self.unchanged = False
 
     def run(self):
         start_time = time.perf_counter()
@@ -1721,6 +1758,13 @@ class FastCopyLiveToTestWorker(QThread):
 
             if res.status_code != 200:
                 self.finished_signal.emit(False, "❌ Nem sikerült letölteni a Raktár táblázatot!", 0.0, [])
+                return
+
+            csv_hash = hashlib.md5(res.content).hexdigest()
+            if csv_hash == FastCopyLiveToTestWorker._last_csv_hash and not self.pending_rows_data:
+                self.unchanged = True
+                elapsed = round(time.perf_counter() - start_time, 2)
+                self.finished_signal.emit(True, f"✔ Sheets változatlan ({elapsed} mp)", elapsed, [])
                 return
 
             df_test = pd.read_csv(io.StringIO(res.text), header=None, low_memory=False, dtype=str, keep_default_na=False)
@@ -1741,12 +1785,12 @@ class FastCopyLiveToTestWorker(QThread):
             update_data = []
             insert_data = []
 
-            for idx, row in df_test.iterrows():
-                code = safe_str(row.iloc[0]) if len(row) > 0 else ""
+            for row in df_test.itertuples(index=False, name=None):
+                code = safe_str(row[0]) if len(row) > 0 else ""
                 if not code or not code.startswith("R18-"): 
                     continue
 
-                vals = [safe_str(row.iloc[i]) if i < len(row) else "" for i in range(16)]
+                vals = [safe_str(row[i]) if i < len(row) else "" for i in range(16)]
                 while len(vals) < 16: 
                     vals.append("")
 
@@ -1773,7 +1817,9 @@ class FastCopyLiveToTestWorker(QThread):
                         if not (cloud_c or cloud_d or cloud_e) and _row_has_product_data(local_row):
                             if archive_deleted_row(local_row, "Sheets: kiürítve", cursor):
                                 archived_count += 1
-                        update_data.append((*vals[:16], code, code))
+                        # Csak a ténylegesen megváltozott sorokat írjuk (nem mind a több ezret 15 mp-enként)
+                        if [local_row[c] for c in ROW_COLS] != vals[:16]:
+                            update_data.append((*vals[:16], code, code))
                 else:
                     insert_data.append((*vals[:16], 'FEHÉR'))
 
@@ -1812,6 +1858,7 @@ class FastCopyLiveToTestWorker(QThread):
 
             if cloud_codes:
                 FastCopyLiveToTestWorker._last_cloud_codes = cloud_codes
+            FastCopyLiveToTestWorker._last_csv_hash = csv_hash
 
             if archived_count:
                 self.process_log_signal.emit(f"🗃️ {archived_count} törölt termék teljes adatai a '{DELETED_SHEET_NAME}' munkalapra kerülnek", "INFO")
@@ -2269,6 +2316,54 @@ EXCEL_LIVE_HIDDEN_COL_J = 9
 EXCEL_LIVE_ROW_HEIGHT = 46
 
 
+class PrintButtonDelegate(QStyledItemDelegate):
+    """Az Excel Live 🖨️ oszlopának gombjait csak RAJZOLJA. Korábban minden sor (több ezer!) kapott egy
+    valódi QPushButton-t, ami fülváltáskor / görgetéskor / frissítéskor nagyon lassított régebbi gépen.
+    Kattintás: on_click(sor) - pontosan az a sor, amelyikre kattintottak."""
+
+    LABEL = "🖨️ Nyomtatás"
+
+    def __init__(self, on_click, parent=None):
+        super().__init__(parent)
+        self.on_click = on_click
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = option.rect.adjusted(3, 3, -3, -3)
+        hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#039be5" if hover else "#0288d1"))
+        painter.drawRoundedRect(QRectF(rect), 3, 3)
+        font = QFont(option.font)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor("#ffffff"))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.LABEL)
+        painter.restore()
+
+    def createEditor(self, parent, option, index):
+        return None
+
+    def helpEvent(self, event, view, option, index):
+        from PyQt6.QtWidgets import QToolTip
+        QToolTip.showText(event.globalPos(),
+                          "Kattintás: példányszám megadása (alap: 1, Enter) majd nyomtatás | "
+                          "Shift+kattintás: nyomtatási ablak (PNG / előnézet)\nBillentyűvel: Ctrl+P a kijelölt sorra", view)
+        return True
+
+    def editorEvent(self, event, model, option, index):
+        et = event.type()
+        if et == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            if option.rect.contains(event.position().toPoint()):
+                row = index.row()
+                QTimer.singleShot(0, lambda: self.on_click(row))
+            return True
+        if et in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
+            return True
+        return super().editorEvent(event, model, option, index)
+
+
 class ExcelCellDelegate(QStyledItemDelegate):
     """Cellaszerkesztő: a nyilak szerkesztés közben is átléptetnek a szomszéd cellába"""
 
@@ -2422,7 +2517,13 @@ class ExcelTableWidget(QTableWidget):
 # -------------------------------------------------------------------
 # FŐ ABLAK (PYQT6)
 # -------------------------------------------------------------------
+def _normalize_excel_row(row):
+    """Egy A-P adatbázis-sort az Excel Live táblában megjelenő szövegekké alakít (tuple, gyors összevetéshez)."""
+    return tuple(str(v) if v is not None and str(v).lower() != "none" else "" for v in row[:16])
+
+
 class RaktarApp(QMainWindow):
+    excel_rows_signal = pyqtSignal(object)  # háttérszálon beolvasott Excel Live sorok -> fő szál
     server_status_signal = pyqtSignal(bool, str)
     counter_update_signal = pyqtSignal(str, int, list)
     process_log_signal = pyqtSignal(str)
@@ -2570,6 +2671,8 @@ class RaktarApp(QMainWindow):
 
         # GARANTÁLTAN AZ 1. FÜLRE (Excel Live Munkalap) FÓKUSZÁL INDÍTÁSKOR:
         self.tabs.setCurrentIndex(0)
+        # Elhalasztott (nem látható fülre szóló) frissítések elvégzése fülváltáskor
+        self.tabs.currentChanged.connect(self.on_tab_changed)
 
         self.update_app_stylesheet()
 
@@ -2853,6 +2956,10 @@ class RaktarApp(QMainWindow):
             
     def update_cards_only(self):
         """Kizárólag a Gyorskereső kártyáit frissíti újra a Helyi DB táblázat bántása nélkül"""
+        if not self._tab_is_current("tab_search"):
+            self._cards_dirty = True
+            return
+        self._cards_dirty = False
         try:
             self.results_area.setUpdatesEnabled(False)
             while self.results_layout.count():
@@ -3095,6 +3202,9 @@ class RaktarApp(QMainWindow):
         self.fast_copy_worker.start()
 
     def on_fast_copy_finished(self, success, message, elapsed, conflicts):
+        # A Sheets nem változott: nincs mit frissíteni a felületen
+        if success and getattr(self.sender(), "unchanged", False):
+            return
         if success:
             # HA ÜTKÖZÉS VAN A GOOGLE SHEETS ÉS A TE BEÍRÁSOD KÖZÖTT:
             if conflicts:
@@ -3115,96 +3225,74 @@ class RaktarApp(QMainWindow):
             self.refresh_counters()
             
     def silent_update_excel_table(self):
-        """Csendes háttérfrissítés: Frissíti a táblázat adatait a helyi DB-ből anélkül, hogy elvenné a fókuszt vagy megszakítaná a gépelést"""
-        if not hasattr(self, 'excel_table') or not self.excel_table.isVisible():
+        """Csendes háttérfrissítés: az adatbázist HÁTTÉRSZÁLON olvassa, a felületen pedig csak a ténylegesen
+        megváltozott sorokat írja át (nem veszi el a fókuszt, nem szakítja meg a gépelést, nem akaszt)."""
+        if not hasattr(self, 'excel_table'):
+            return
+        if not self.excel_table.isVisible():
+            self._excel_dirty = True      # majd ha a fülre váltanak (on_tab_changed)
+            return
+        if self._excel_loading:
+            return
+        self._excel_loading = True
+        self._excel_dirty = False
+
+        def job():
+            rows = None
+            try:
+                conn = sqlite3.connect(DB_FILE, timeout=10)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P
+                    FROM termekek
+                    WHERE A LIKE 'R18-%'
+                    ORDER BY CAST(SUBSTR(A, 5) AS INTEGER) ASC
+                """)
+                rows = [_normalize_excel_row(r) for r in cursor.fetchall()]
+                conn.close()
+            except Exception as e:
+                print(f"Csendes frissítési hiba: {e}")
+            self.excel_rows_signal.emit(rows)
+
+        threading.Thread(target=job, daemon=True).start()
+
+    def _apply_excel_rows(self, rows):
+        """(fő szál) A háttérben beolvasott sorokat összeveti az előzővel és csak a változást írja ki."""
+        self._excel_loading = False
+        if rows is None:
             return
 
-        # 1. Éppen szerkesztett/kiválasztott sor és oszlop megjegyzése
         current_row = self.excel_table.currentRow()
-        current_col = self.excel_table.currentColumn()
-        
         # Ha a felhasználó éppen aktívan gépel egy cellában, azt a sort NEM bántjuk
         active_dirty_rows = getattr(self, 'pending_dirty_rows', set())
-
-        raw_val = self.input_start_row.text().strip().upper().replace("R18-", "") if hasattr(self, 'input_start_row') else "1"
-        try:
-            start_num = max(1, int(raw_val) - 10)
-        except ValueError:
-            start_num = 1
-
-        try:
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P 
-                FROM termekek 
-                WHERE A LIKE 'R18-%'
-                ORDER BY CAST(SUBSTR(A, 5) AS INTEGER) ASC
-            """)
-            db_rows = cursor.fetchall()
-            conn.close()
-        except Exception as e:
-            print(f"Csendes frissítési hiba: {e}")
-            return
-
-        # Ha megváltozott a sorszám, felvesszük az új sorokat a táblázat aljára
-        if len(db_rows) != self.excel_table.rowCount():
-            self.excel_table.blockSignals(True)
-            self.excel_table.setRowCount(len(db_rows))
-            self.excel_table.blockSignals(False)
+        old = self._excel_rows_cache
 
         self.excel_table.blockSignals(True)
+        if len(rows) != self.excel_table.rowCount():
+            self.excel_table.setRowCount(len(rows))
 
-        for r_idx, row in enumerate(db_rows):
-            # Ha ezt a sort éppen írja a felhasználó, kihagyjuk, hogy ne írjuk felül a gépelését!
-            if r_idx in active_dirty_rows or r_idx == current_row:
+        new_cache = list(rows)
+        for r_idx, row in enumerate(rows):
+            if r_idx < len(old) and old[r_idx] == row:
                 continue
-
+            if r_idx in active_dirty_rows or r_idx == current_row:
+                new_cache[r_idx] = None   # következő körben újra összeveti
+                continue
             for c_idx in range(16):
-                val = str(row[c_idx]) if row[c_idx] is not None and str(row[c_idx]).lower() != "none" else ""
+                val = row[c_idx]
                 item = self.excel_table.item(r_idx, c_idx)
-                
                 if item:
-                    # Csak akkor írjuk át a cellát, ha az adat valóban megváltozott a DB-ben
                     if item.text() != val:
                         item.setText(val)
                 else:
-                    new_item = QTableWidgetItem(val)
-                    self.excel_table.setItem(r_idx, c_idx, new_item)
-
-            # Nyomtatási gomb pótlása ha hiányozna
-            if not self.excel_table.cellWidget(r_idx, 16):
-                self.excel_table.setCellWidget(r_idx, 16, self.create_excel_print_button())
-
+                    self.excel_table.setItem(r_idx, c_idx, QTableWidgetItem(val))
         self.excel_table.blockSignals(False)
 
-    def create_excel_print_button(self):
-        """🖨️ gomb az Excel Live munkalap soraihoz. Kattintáskor abból számolja ki a sort, ahol a gomb
-        ÉPP LÁTSZIK - így sosem nyomtat másik sort, akkor sem, ha a táblázat közben frissült."""
-        btn = QPushButton("🖨️ Nyomtatás")
-        btn.setStyleSheet("""
-            QPushButton {
-                background-color: #0288d1;
-                color: white;
-                font-weight: bold;
-                font-size: 12px;
-                padding: 3px 6px;
-                border-radius: 3px;
-                border: none;
-            }
-            QPushButton:hover {
-                background-color: #039be5;
-            }
-        """)
-        btn.setToolTip("Kattintás: példányszám megadása (alap: 1, Enter) majd nyomtatás | Shift+kattintás: nyomtatási ablak (PNG / előnézet)\n"
-                       "Billentyűvel: Ctrl+P a kijelölt sorra")
-        btn.clicked.connect(lambda ch=False, b=btn: self.print_row_of_button(b))
-        return btn
-
-    def print_row_of_button(self, btn):
-        row = self.excel_table.indexAt(btn.pos()).row()
-        if row >= 0:
-            self.print_row_label(row)
+        if len(new_cache) != len(old) or any(a is None or a[0] != (b[0] if b else None) for a, b in zip(new_cache, old)):
+            self._excel_rows_cache = new_cache
+            self._rebuild_excel_code_index()
+        else:
+            self._excel_rows_cache = new_cache
 
     def update_print_selected_label(self, row, *_):
         if not hasattr(self, "btn_print_selected"):
@@ -3487,20 +3575,8 @@ class RaktarApp(QMainWindow):
         search_target = get_smart_part_number(tipus, cikkszam) or code
         clean_target = clean_part_number(search_target)
         
-        total_db_sum = 0
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT D, E, F FROM termekek WHERE (D IS NOT NULL AND D != '') OR (E IS NOT NULL AND E != '')")
-            all_rows = cursor.fetchall()
-            conn.close()
-
-            for r in all_rows:
-                r_smart = get_smart_part_number(safe_str(r[0]), safe_str(r[1]))
-                if r_smart.upper() == search_target.upper() or (clean_target and clean_part_number(r_smart) == clean_target):
-                    raw_f = safe_str(r[2]).strip()
-                    f_match = re.search(r'\d+', raw_f)
-                    total_db_sum += int(f_match.group(0)) if f_match else 1
+            total_db_sum = get_stock_sum(search_target)
         except Exception:
             total_db_sum = db_val
 
@@ -3833,8 +3909,13 @@ class RaktarApp(QMainWindow):
                     self.trigger_toast(f"❌ Nyomtatási hiba: {msg}")
                 
     def load_latest_200_items(self):
-        self.results_area.setUpdatesEnabled(False)
         self.refresh_local_db_table_view()
+        # A kártyákat csak akkor építjük újra, ha a Gyorskereső fül látszik; különben fülváltáskor
+        if not self._tab_is_current("tab_search"):
+            self._cards_dirty = True
+            return
+        self._cards_dirty = False
+        self.results_area.setUpdatesEnabled(False)
         
         while self.results_layout.count():
             item = self.results_layout.takeAt(0)
@@ -5264,8 +5345,34 @@ class RaktarApp(QMainWindow):
         self.local_filter_color_all.setChecked(True)
         self.refresh_local_db_table_view()
 
+    def _tab_is_current(self, tab_attr):
+        """Igaz, ha a megadott fül látszik (a fülek létrehozása előtt mindig igaz)."""
+        if not hasattr(self, "tabs") or not hasattr(self, tab_attr):
+            return True
+        return self.tabs.currentWidget() is getattr(self, tab_attr)
+
+    def on_tab_changed(self, index):
+        """Fülváltás: a háttérben elhalasztott frissítéseket csak most, a fül megjelenése UTÁN végezzük el."""
+        w = self.tabs.widget(index)
+
+        def later():
+            if w is getattr(self, "tab_search", None) and getattr(self, "_cards_dirty", False):
+                self.update_cards_only()
+            elif w is getattr(self, "tab_local_db", None) and getattr(self, "_local_db_dirty", False):
+                self.refresh_local_db_table_view()
+            elif w is getattr(self, "tab_excel_live", None) and getattr(self, "_excel_dirty", False):
+                self.silent_update_excel_table()
+            elif w is getattr(self, "tab_sold", None):
+                self.refresh_sold_table()
+        QTimer.singleShot(30, later)
+
     def refresh_local_db_table_view(self):
         """Helyi SQLite táblázat frissítése: Legfelül a legutoljára KITÖLTÖTT (C oszlop) legnagyobb R18-as tételek"""
+        # A több ezer soros táblát csak akkor építjük újra, ha a fül látszik; különben fülváltáskor
+        if not self._tab_is_current("tab_local_db"):
+            self._local_db_dirty = True
+            return
+        self._local_db_dirty = False
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
@@ -5356,6 +5463,7 @@ class RaktarApp(QMainWindow):
 
     def setup_excel_style_tab(self):
         """Excel Live Munkalap: Kézi Mentés Gombbal és Automatikus Cellafelismeréssel"""
+        self._excel_dirty = False
         self.tab_excel_live = QWidget()
         layout = QVBoxLayout(self.tab_excel_live)
 
@@ -5493,6 +5601,17 @@ class RaktarApp(QMainWindow):
         self.excel_table.verticalHeader().setDefaultSectionSize(EXCEL_LIVE_ROW_HEIGHT)
         self.excel_table.verticalHeader().setMinimumSectionSize(EXCEL_LIVE_ROW_HEIGHT)
 
+        # 🖨️ oszlop: rajzolt gombok (lásd PrintButtonDelegate) - nem kell soronként widget
+        self.excel_print_delegate = PrintButtonDelegate(self.print_row_label, self.excel_table)
+        self.excel_table.setItemDelegateForColumn(16, self.excel_print_delegate)
+        self.excel_table.setMouseTracking(True)
+
+        # Az Excel Live tábla aktuális tartalma soronként (gyors összehasonlításhoz a háttérfrissítésnél)
+        self._excel_rows_cache = []
+        self._excel_code_index = {}
+        self._excel_loading = False
+        self.excel_rows_signal.connect(self._apply_excel_rows)
+
         self.excel_table.itemChanged.connect(self.on_excel_cell_changed)
         layout.addWidget(self.excel_table)
 
@@ -5554,13 +5673,20 @@ class RaktarApp(QMainWindow):
 
         self.reload_excel_tab_from_num()
 
-    def reload_excel_tab_from_num(self):
-        """Betölti az ÖSSZES régebbi sort az R18-1-től kezdve, és a kiválasztott kódra görget"""
+    def reload_excel_tab_from_num(self, full=False):
+        """A kiválasztott R18-kódra görget. A TELJES (több ezer soros) betöltés csak az első alkalommal fut
+        (vagy full=True); utána a ▲▼ / Ugrás / Auto gombok már csak görgetnek - az adatokat a háttérben
+        futó csendes frissítés (silent_update_excel_table) tartja naprakészen."""
         raw_val = self.input_start_row.text().strip().upper().replace("R18-", "")
         try:
             target_num = int(raw_val)
         except ValueError:
             target_num = 12878
+
+        if not full and self._excel_rows_cache:
+            self._scroll_excel_to_num(target_num)
+            self.silent_update_excel_table()   # közben felvett új sorok behozása (háttérben)
+            return
 
         try:
             conn = sqlite3.connect(DB_FILE)
@@ -5578,27 +5704,20 @@ class RaktarApp(QMainWindow):
             print(f"Hiba az összes sor betöltésekor: {e}")
             rows = []
 
+        rows = [_normalize_excel_row(r) for r in rows]
+
+        self.excel_table.setUpdatesEnabled(False)
         self.excel_table.blockSignals(True)
         self.excel_table.setRowCount(len(rows))
 
-        target_row_in_view = -1
-
         for r_idx, row in enumerate(rows):
-            code_a = str(row[0]).strip().upper() if row[0] is not None else ""
-            
-            # Megkeressük a beírt kód (pl. R18-12878) pontos sorszámát
-            if code_a == f"R18-{target_num}" or code_a == str(target_num):
-                target_row_in_view = r_idx
-
             for c_idx in range(16):
-                val = str(row[c_idx]) if row[c_idx] is not None and str(row[c_idx]).lower() != "none" else ""
-                item = QTableWidgetItem(val)
-                self.excel_table.setItem(r_idx, c_idx, item)
-
-            # Nyomtatás gomb
-            self.excel_table.setCellWidget(r_idx, 16, self.create_excel_print_button())
+                self.excel_table.setItem(r_idx, c_idx, QTableWidgetItem(row[c_idx]))
 
         self.excel_table.blockSignals(False)
+        self.excel_table.setUpdatesEnabled(True)
+        self._excel_rows_cache = list(rows)
+        self._rebuild_excel_code_index()
 
         # -----------------------------------------------------------------
         # FIX OSZLOPSZÉLESSÉGEK (Villámgyors töltés, nincs fagyás sok ezres sornál!)
@@ -5607,9 +5726,15 @@ class RaktarApp(QMainWindow):
         for c_idx, w in enumerate(col_widths):
             self.excel_table.setColumnWidth(c_idx, w)
 
-        # -----------------------------------------------------------------
-        # GÖRGETÉS ÉS FÓKUSZ A KÍVÁNT R18-SZÁMRA
-        # -----------------------------------------------------------------
+        self._scroll_excel_to_num(target_num)
+
+    def _rebuild_excel_code_index(self):
+        self._excel_code_index = {row[0].strip().upper(): i for i, row in enumerate(self._excel_rows_cache) if row}
+
+    def _scroll_excel_to_num(self, target_num):
+        """GÖRGETÉS ÉS FÓKUSZ A KÍVÁNT R18-SZÁMRA"""
+        rows = self._excel_rows_cache
+        target_row_in_view = self._excel_code_index.get(f"R18-{target_num}", self._excel_code_index.get(str(target_num), -1))
         if target_row_in_view != -1:
             target_item = self.excel_table.item(target_row_in_view, 2) # C oszlop (Márka)
             if target_item:
