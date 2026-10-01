@@ -71,6 +71,34 @@ SHEETS_ENABLED = True
 # Excel Live munkalap automatikus mentési késleltetése (ms) - ennyi idő után indul a mentés/nyomtatás
 AUTO_SAVE_INTERVAL_MS = 4000
 
+# A törölt / kiürített termékek teljes adatai ide kerülnek (ugyanabban a táblázatban, külön munkalapon)
+DELETED_SHEET_NAME = "ToroltSor"
+DELETED_SHEET_HEADER = ["A: F-Kód", "B: Vonalkód", "C: Márka", "D: Típus", "E: Cikkszám", "F: DB",
+                        "G: Állapot", "H: Ár", "I: Páter", "J: Szabad", "K: Polc", "L: Raklap",
+                        "M: Súly", "N: eBay ID", "O: Megjegyzés", "P: Állapot részlet",
+                        "Q: Törlés ideje", "R: Honnan törölték"]
+# Ha egy letöltéskor ennél több kitöltött termék hiányzik egyszerre a Sheets-ből, az valószínűleg
+# nem kézi törlés (hanem pl. hibás letöltés / szűrés) - ilyenkor nem archivál automatikusan.
+DELETED_MISSING_SAFETY_LIMIT = 20
+
+def get_deleted_sheet():
+    """A 'ToroltSor' munkalap (ha nincs, létrehozza; üres lapra fejlécet ír)."""
+    if not SHEETS_ENABLED:
+        return None
+    import gspread
+    from google.oauth2.service_account import Credentials
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+    client = gspread.authorize(creds)
+    book = client.open_by_key(TEST_SHEETS_ID)
+    try:
+        ws = book.worksheet(DELETED_SHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = book.add_worksheet(title=DELETED_SHEET_NAME, rows=1000, cols=len(DELETED_SHEET_HEADER))
+    if not ws.row_values(1):
+        ws.update(range_name="A1:R1", values=[DELETED_SHEET_HEADER])
+    return ws
+
 def get_sheet():
     """Google Sheets munkalap (csak ha SHEETS_ENABLED = True)"""
     if not SHEETS_ENABLED:
@@ -208,6 +236,20 @@ def get_db_connection():
         )
     """)
 
+    # Törölt / kiürített termékek helyi archívuma: a teljes sor megmarad akkor is, ha a
+    # Sheets-ből vagy a programból törölték. A 'alairas' (teljes A-P tartalom) alapján
+    # ugyanazt a törlést csak egyszer küldjük ki a ToroltSor munkalapra.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS torolt_archiv (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            idopont TEXT,
+            r18_kod TEXT,
+            forras TEXT,
+            alairas TEXT UNIQUE,
+            payload TEXT
+        )
+    """)
+
     conn.commit()
     return conn
 
@@ -295,6 +337,63 @@ def enqueue_color(code, szin, color_dict):
 def enqueue_delete(code):
     enqueue_outbox({"_op": "delete", "A": str(code).strip().upper()})
 
+def _row_has_product_data(row_data):
+    """Van-e a sorban valódi termékadat (Márka / Típus / Cikkszám)."""
+    return any(safe_str(row_data.get(c, "")).strip() for c in ("C", "D", "E"))
+
+def archive_deleted_row(row_data, forras, cursor=None):
+    """Egy törölt / kiürített termék TELJES (A-P) adatait elmenti a helyi archívumba és
+    sorba állítja a Sheets 'ToroltSor' munkalapjára (offline-biztos, az outboxon át).
+    Ugyanazt a tartalmat csak egyszer archiválja. True, ha új archív bejegyzés készült."""
+    data = {c: safe_str(row_data.get(c, "")).strip() for c in ROW_COLS}
+    code = data["A"].upper()
+    if not code or not _row_has_product_data(data):
+        return False
+    alairas = json.dumps(data, ensure_ascii=False, sort_keys=True)
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    own_conn = cursor is None
+    try:
+        if own_conn:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO torolt_archiv (idopont, r18_kod, forras, alairas, payload) VALUES (?, ?, ?, ?, ?)",
+            (now_str, code, forras, alairas, alairas)
+        )
+        is_new = cursor.rowcount > 0
+        if is_new:
+            payload = dict(data)
+            payload.update({"_op": "archive", "_ido": now_str, "_forras": forras})
+            cursor.execute(
+                "INSERT INTO sync_outbox (payload, vps_synced, sheets_synced, attempts, created_at) VALUES (?, 1, 0, 0, ?)",
+                (json.dumps(payload, ensure_ascii=False), now_str)
+            )
+            cursor.execute("INSERT INTO naplo (idopont, r18_kod, esemeny, reszletek) VALUES (?, ?, ?, ?)",
+                           (now_str, code, "TÖRÖLT SOR ARCHIVÁLVA", f"{forras} | {format_row_for_log(data)}"))
+        if own_conn:
+            conn.commit()
+            conn.close()
+        return is_new
+    except Exception as e:
+        print(f"[Archív] Hiba ({code}): {e}")
+        return False
+
+def archive_row_from_db(code, forras):
+    """A helyi adatbázisban lévő sort archiválja (törlés / kiürítés ELŐTT hívandó)."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT {', '.join(ROW_COLS)} FROM termekek WHERE A = ? OR B = ?", (code, code))
+        row = cursor.fetchone()
+        conn.close()
+    except Exception as e:
+        print(f"[Archív] Sor beolvasási hiba ({code}): {e}")
+        return False
+    if not row:
+        return False
+    return archive_deleted_row({c: row[c] for c in ROW_COLS}, forras)
+
 def flush_outbox_async():
     threading.Thread(target=flush_sync_outbox, daemon=True).start()
 
@@ -305,7 +404,10 @@ def get_pending_outbox_codes(cursor):
     codes = set()
     for row in cursor.fetchall():
         try:
-            codes.add(str(json.loads(row[0]).get("A", "")).strip().upper())
+            payload = json.loads(row[0])
+            if payload.get("_op") == "archive":
+                continue  # a ToroltSor-ra váró archív bejegyzés nem védi a Raktar-sort
+            codes.add(str(payload.get("A", "")).strip().upper())
         except Exception:
             pass
     codes.discard("")
@@ -329,6 +431,8 @@ def flush_sync_outbox():
 def _send_outbox_to_vps(op, row_data):
     """Visszaad: 'ok', 'conflict' vagy 'retry' (nincs net / szerverhiba -> később újra)."""
     code_a = str(row_data.get("A", "")).strip().upper()
+    if op == "archive":
+        return "ok"  # csak a Sheets ToroltSor munkalapjára megy
     try:
         if op == "delete":
             res = requests.post(f"{VPS_URL}/delete_item", json={"A": code_a}, timeout=3)
@@ -355,13 +459,29 @@ def _send_outbox_to_vps(op, row_data):
         return "conflict"
     return "retry"
 
-def _send_outbox_to_sheets(op, row_data, sheet, all_a):
+def _send_outbox_to_sheets(op, row_data, sheet, all_a, deleted_ws_holder=None):
     """A Sheets-be írja a műveletet. Az all_a (A oszlop) listát helyben frissíti. True, ha sikerült."""
     code_a = str(row_data.get("A", "")).strip().upper()
     if not code_a:
         return True
     try:
-        if op == "delete":
+        if op == "archive":
+            # Törölt termék teljes adatai a 'ToroltSor' munkalap végére (A-P ugyanott, mint a Raktar lapon)
+            if deleted_ws_holder is None:
+                deleted_ws_holder = {}
+            if deleted_ws_holder.get("ws") is None:
+                ws = get_deleted_sheet()
+                # A már archivált sorok (A-P) - egy másik gép se írhassa be ugyanazt kétszer
+                existing = set()
+                for r in ws.get_all_values()[1:]:
+                    existing.add(tuple((list(r) + [""] * 16)[:16]))
+                deleted_ws_holder["ws"], deleted_ws_holder["existing"] = ws, existing
+            data_vals = [str(row_data.get(k, "")) for k in ROW_COLS]
+            if tuple(data_vals) not in deleted_ws_holder["existing"]:
+                row_vals = data_vals + [row_data.get("_ido", ""), row_data.get("_forras", "")]
+                deleted_ws_holder["ws"].append_row(row_vals, value_input_option="RAW")
+                deleted_ws_holder["existing"].add(tuple(data_vals))
+        elif op == "delete":
             if code_a in all_a:
                 idx = all_a.index(code_a)
                 sheet.delete_rows(idx + 1)
@@ -400,6 +520,7 @@ def _flush_sync_outbox_locked():
         return conflicts
 
     sheet, all_a = None, []
+    deleted_ws_holder = {}
     if SHEETS_ENABLED:
         try:
             sheet = get_sheet()
@@ -430,7 +551,7 @@ def _flush_sync_outbox_locked():
         def do_sheets():
             nonlocal sheets_ok
             if not sheets_ok and not is_conflict and sheet is not None:
-                sheets_ok = _send_outbox_to_sheets(op, row_data, sheet, all_a)
+                sheets_ok = _send_outbox_to_sheets(op, row_data, sheet, all_a, deleted_ws_holder)
 
         # Törlésnél előbb a Sheets-ből töröljük: így mire a másik gép a VPS-től megtudja
         # a törlést, a Sheets-ből letöltött adatok már nem hozzák vissza a tételt.
@@ -1258,6 +1379,16 @@ class AutoRowSyncWorker(QThread):
                 if not code_a:
                     continue
 
+                # Ha a sorból kitörölték a terméket (Márka/Típus/Cikkszám mind üres lett),
+                # a régi teljes adatok a ToroltSor munkalapra kerülnek
+                if not _row_has_product_data(row_data):
+                    cursor.execute(f"SELECT {', '.join(ROW_COLS)} FROM termekek WHERE UPPER(TRIM(A)) = ? OR UPPER(TRIM(B)) = ?", (code_a, code_a))
+                    old = cursor.fetchone()
+                    if old:
+                        old_row = dict(zip(ROW_COLS, old))
+                        if _row_has_product_data(old_row):
+                            archive_deleted_row(old_row, "Excel Live: kiürítve", cursor)
+
                 # Keresés a pontos A oszlop vagy B oszlop alapján
                 cursor.execute("""
                     UPDATE termekek 
@@ -1305,6 +1436,10 @@ class AutoRowSyncWorker(QThread):
         self.sync_finished_signal.emit(f"✅ {len(self.dirty_data_list)} sor mentve: {target_txt}!")
 
 class FastCopyLiveToTestWorker(QThread):
+    # Az előző letöltéskor a Raktar lapon látott R18-kódok. Csak az számít "Sheets-ből törölt" sornak,
+    # ami korábban OTT VOLT és most eltűnt - így egy másik gépről épp érkező, a Sheets-be még fel nem
+    # töltött új termék sosem kerül tévesen a ToroltSor munkalapra.
+    _last_cloud_codes = None
     finished_signal = pyqtSignal(bool, str, float, list) # Szignál kiegészítve a konfliktusos kódok listájával
     process_log_signal = pyqtSignal(str, str)
 
@@ -1330,8 +1465,11 @@ class FastCopyLiveToTestWorker(QThread):
             cursor = conn.cursor()
             cursor.execute("BEGIN TRANSACTION")
 
-            cursor.execute("SELECT A, C, D, E FROM termekek")
-            db_existing = {safe_str(row[0]): (safe_str(row[1]), safe_str(row[2]), safe_str(row[3])) for row in cursor.fetchall() if row[0]}
+            cursor.execute(f"SELECT {', '.join(ROW_COLS)} FROM termekek")
+            db_full = {safe_str(row["A"]): {c: safe_str(row[c]) for c in ROW_COLS} for row in cursor.fetchall() if row["A"]}
+            db_existing = db_full
+            cloud_codes = set()
+            archived_count = 0
             # A még fel nem töltött (outboxban váró) tételeket a Sheets régebbi állapota nem írhatja
             # felül - és egy helyben törölt tételt sem hozhat vissza, amíg a törlés ki nem ment.
             pending_outbox = get_pending_outbox_codes(cursor)
@@ -1349,6 +1487,7 @@ class FastCopyLiveToTestWorker(QThread):
                     vals.append("")
 
                 cloud_c, cloud_d, cloud_e = vals[2], vals[3], vals[4]
+                cloud_codes.add(code.upper())
 
                 # ÜTKÖZÉS-VIZSGÁLAT: Ha a felhasználónál pending (szerkesztés alatti) módosítás van erre a sorra
                 if code in self.pending_rows_data:
@@ -1364,9 +1503,33 @@ class FastCopyLiveToTestWorker(QThread):
                     # Ha nem szerkesztés alatti sor, frissítjük a helyit a felhőből
                     # (a színjelölést - szin - nem bántjuk, az a CSV-ben nincs benne)
                     if code not in self.pending_rows_data:
+                        # A Sheets-ben KIÜRÍTETTÉK a terméket (Márka/Típus/Cikkszám eltűnt), helyben még
+                        # megvan: felülírás ELŐTT a teljes régi adat a ToroltSor munkalapra kerül
+                        local_row = db_full[code]
+                        if not (cloud_c or cloud_d or cloud_e) and _row_has_product_data(local_row):
+                            if archive_deleted_row(local_row, "Sheets: kiürítve", cursor):
+                                archived_count += 1
                         update_data.append((*vals[:16], code, code))
                 else:
                     insert_data.append((*vals[:16], 'FEHÉR'))
+
+            # A Sheets-ből TELJESEN TÖRÖLT sorok (az R18-kód már nincs a Raktar lapon), amelyek helyben
+            # még kitöltve megvannak és nem várnak feltöltésre: teljes adataik a ToroltSor munkalapra
+            prev_cloud = FastCopyLiveToTestWorker._last_cloud_codes
+            if cloud_codes and prev_cloud:
+                missing = [r for c, r in db_full.items()
+                           if c.upper().startswith("R18-") and c.upper() in prev_cloud
+                           and c.upper() not in cloud_codes
+                           and c.upper() not in pending_outbox and c not in self.pending_rows_data
+                           and _row_has_product_data(r)]
+                if len(missing) > DELETED_MISSING_SAFETY_LIMIT:
+                    self.process_log_signal.emit(
+                        f"⚠️ {len(missing)} kitöltött termék hiányzik a Sheets-ből - túl sok egyszerre, "
+                        f"automatikus archiválás kihagyva (ellenőrizd a táblázatot!)", "ERROR")
+                else:
+                    for r in missing:
+                        if archive_deleted_row(r, "Sheets: sor törölve", cursor):
+                            archived_count += 1
 
             if update_data:
                 cursor.executemany("""
@@ -1382,6 +1545,13 @@ class FastCopyLiveToTestWorker(QThread):
 
             conn.commit()
             conn.close()
+
+            if cloud_codes:
+                FastCopyLiveToTestWorker._last_cloud_codes = cloud_codes
+
+            if archived_count:
+                self.process_log_signal.emit(f"🗃️ {archived_count} törölt termék teljes adatai a '{DELETED_SHEET_NAME}' munkalapra kerülnek", "INFO")
+                flush_outbox_async()
 
             elapsed = round(time.perf_counter() - start_time, 2)
             self.finished_signal.emit(True, f"✔ Háttér szinkron kész ({elapsed} mp)!", elapsed, conflicts)
@@ -1451,6 +1621,9 @@ class ClearWorker(QThread):
 
     def run(self):
         try:
+            # 0. Teljes adatok archiválása a ToroltSor munkalapra (kiürítés előtt!)
+            archive_row_from_db(self.code, "Program: felvétel visszavonva")
+
             # 1. Helyi mentés (net nélkül is azonnal megtörténik)
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -1657,6 +1830,9 @@ class DeleteWorker(QThread):
 
     def run(self):
         try:
+            # 0. Teljes adatok archiválása a ToroltSor munkalapra (törlés előtt!)
+            archive_row_from_db(self.code, "Program: törlés / eladás")
+
             # 1. Helyi törlés (net nélkül is azonnal megtörténik)
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -1823,6 +1999,8 @@ class SummaryDialog(QDialog):
 # Excel Live munkalap KÉPERNYŐS oszlopsorrendje (logikai indexek: 0-15 = A-P, 16 = 🖨️ gomb).
 # G (Állapot) után jön L (Raklap) és M (Súly), mert ezeket írjuk a leggyakrabban.
 EXCEL_LIVE_VISUAL_ORDER = [16, 0, 1, 2, 3, 4, 5, 6, 11, 12, 8, 9, 10, 7, 13, 14, 15]
+# Excel Live munkalap sormagassága (px) - a C/D/E hosszú szövege így két sorban kifér
+EXCEL_LIVE_ROW_HEIGHT = 46
 
 
 class ExcelCellDelegate(QStyledItemDelegate):
@@ -2641,6 +2819,7 @@ class RaktarApp(QMainWindow):
 
         self.fast_copy_worker = FastCopyLiveToTestWorker(pending_rows_data=pending_data)
         self.fast_copy_worker.finished_signal.connect(self.on_fast_copy_finished)
+        self.fast_copy_worker.process_log_signal.connect(self.handle_log_from_thread)
         self.fast_copy_worker.finished.connect(lambda: self.track_worker_finished(self.fast_copy_worker))
         self.active_workers.append(self.fast_copy_worker)
         self.fast_copy_worker.start()
@@ -4671,6 +4850,13 @@ class RaktarApp(QMainWindow):
             }
         """)
 
+        # MAGASABB SOROK: a hosszú Márka / Típus / Cikkszám (C, D, E) szöveg két sorba tördelve
+        # kifér, nem vágódik le "..."-tal, és a cellaszerkesztő is kényelmesebb
+        self.excel_table.setWordWrap(True)
+        self.excel_table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.excel_table.verticalHeader().setDefaultSectionSize(EXCEL_LIVE_ROW_HEIGHT)
+        self.excel_table.verticalHeader().setMinimumSectionSize(EXCEL_LIVE_ROW_HEIGHT)
+
         self.excel_table.itemChanged.connect(self.on_excel_cell_changed)
         layout.addWidget(self.excel_table)
 
@@ -4781,7 +4967,7 @@ class RaktarApp(QMainWindow):
         # -----------------------------------------------------------------
         # FIX OSZLOPSZÉLESSÉGEK (Villámgyors töltés, nincs fagyás sok ezres sornál!)
         # -----------------------------------------------------------------
-        col_widths = [110, 110, 120, 210, 220, 60, 100, 80, 80, 80, 100, 140, 80, 110, 150, 140, 140]
+        col_widths = [110, 110, 150, 260, 250, 60, 100, 80, 80, 80, 100, 140, 80, 110, 150, 140, 140]
         for c_idx, w in enumerate(col_widths):
             self.excel_table.setColumnWidth(c_idx, w)
 
