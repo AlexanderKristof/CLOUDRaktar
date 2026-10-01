@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# FIGYELEM: a fajl szandekosan ekezet nelkuli (ASCII), hogy a WinSCP szerkesztoje se rontsa el.
 """
-TÖRÖLT SOROK FIGYELŐ (VPS szolgáltatás) - /opt/raktarapp/torolt_figyelo.py
+TOROLT SOROK FIGYELO (VPS szolgaltatas) - /opt/raktarapp/torolt_figyelo.py
 
-Folyamatosan (éjjel-nappal) figyeli a FIGYELT (élő) Google táblázatot. Ha onnan eltűnik egy
-R18-as termék sora, vagy kiürítik a Márka / Típus / Cikkszám mezőit, a termék KORÁBBI teljes
-adatai (A-P) a ToroltSor munkalap végére kerülnek (Q: törlés ideje, R: honnan).
+Folyamatosan (ejjel-nappal) figyeli a FIGYELT (elo) Google tablazatot. Ha onnan eltunik egy
+R18-as termek sora, vagy kiuritik a Marka / Tipus / Cikkszam mezoit, a termek KORABBI teljes
+adatai (A-P) a ToroltSor munkalap vegere kerulnek (Q: torles ideje, R: honnan).
 
-BIZTONSÁG:
-- A figyelt táblázathoz KIZÁRÓLAG olvasási joggal kapcsolódik (spreadsheets.readonly),
-  így semmilyen módon nem tudja módosítani.
-- A ToroltSor nem lehet a figyelt táblázatban (a program ilyenkor nem indul el).
-- Hibás / üres letöltésnél, vagy ha egyszerre túl sok termék tűnik el, nem archivál.
-- Ha nincs net / a Google nem elérhető, a ToroltSor-bejegyzések helyben várnak és később kimennek.
+BIZTONSAG:
+- A figyelt tablazathoz KIZAROLAG olvasasi joggal kapcsolodik (spreadsheets.readonly),
+  igy semmilyen modon nem tudja modositani.
+- A ToroltSor nem lehet a figyelt tablazatban (a program ilyenkor nem indul el).
+- Hibas / ures letoltesnel, vagy ha egyszerre tul sok termek tunik el, nem archival.
+- Ha nincs net / a Google nem elerheto, a ToroltSor-bejegyzesek helyben varnak es kesobb kimennek.
 
-Indítás kézzel (teszt):   /opt/raktarapp/venv/bin/python /opt/raktarapp/torolt_figyelo.py --egyszer
-Szolgáltatásként:         lásd torolt-figyelo.service és TELEPITES_torolt_figyelo.md
+Inditas kezzel (teszt):   /opt/raktarapp/venv/bin/python /opt/raktarapp/torolt_figyelo.py --egyszer
+Szolgaltataskent:         lasd torolt-figyelo.service es TELEPITES_torolt_figyelo.md
 """
 import datetime
 import json
@@ -27,34 +28,34 @@ import time
 from logging.handlers import RotatingFileHandler
 
 # -------------------------------------------------------------------
-# BEÁLLÍTÁSOK - ITT KELL ÁTÍRNI
+# BEALLITASOK - ITT KELL ATIRNI
 # -------------------------------------------------------------------
-# A figyelt (élő) táblázat ID-ja: a docs.google.com/spreadsheets/d/<EZ>/edit részből
+# A figyelt (elo) tablazat ID-ja: a docs.google.com/spreadsheets/d/<EZ>/edit reszbol
 WATCH_SPREADSHEET_ID = ""
-# A figyelt munkalap (fül) neve - üresen hagyva a táblázat ELSŐ munkalapja
+# A figyelt munkalap (ful) neve - uresen hagyva a tablazat ELSO munkalapja
 WATCH_WORKSHEET = ""
-# Milyen gyakran nézze meg (másodperc). A Google percenként kb. 60 olvasást enged szolgáltatásfióknak.
+# Milyen gyakran nezze meg (masodperc). A Google percenkent kb. 60 olvasast enged szolgaltatasfioknak.
 WATCH_INTERVAL_SEC = 30
 
-# A ToroltSor munkalap helye (ide ÍR) - NEM lehet ugyanaz a táblázat, mint a figyelt!
+# A ToroltSor munkalap helye (ide IR) - NEM lehet ugyanaz a tablazat, mint a figyelt!
 DELETED_SPREADSHEET_ID = "1ZoB2yl_GvaY0kiICQN10dEKghAE7b9Z3hDlwtv9nMdc"
 DELETED_WORKSHEET = "ToroltSor"
 
-# Ha egy ellenőrzéskor ennél több kitöltött termék tűnik el egyszerre, nem archivál (valószínűleg hiba)
+# Ha egy ellenorzeskor ennel tobb kitoltott termek tunik el egyszerre, nem archival (valoszinuleg hiba)
 MISSING_SAFETY_LIMIT = 20
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json")
-# Saját kis adatbázis (pillanatkép + várakozó bejegyzések) - NEM a raktar_adatbazis.db
+# Sajat kis adatbazis (pillanatkep + varakozo bejegyzesek) - NEM a raktar_adatbazis.db
 STATE_DB = os.path.join(BASE_DIR, "torolt_figyelo.db")
 LOG_FILE = os.path.join(BASE_DIR, "naplok", "torolt_figyelo.log")
 # -------------------------------------------------------------------
 
 ROW_COLS = "ABCDEFGHIJKLMNOP"
-HEADER = ["A: F-Kód", "B: Vonalkód", "C: Márka", "D: Típus", "E: Cikkszám", "F: DB",
-          "G: Állapot", "H: Ár", "I: Páter", "J: Szabad", "K: Polc", "L: Raklap",
-          "M: Súly", "N: eBay ID", "O: Megjegyzés", "P: Állapot részlet",
-          "Q: Törlés ideje", "R: Honnan törölték"]
+HEADER = ["A: F-K\u00f3d", "B: Vonalk\u00f3d", "C: M\u00e1rka", "D: T\u00edpus", "E: Cikksz\u00e1m", "F: DB",
+          "G: \u00c1llapot", "H: \u00c1r", "I: P\u00e1ter", "J: Szabad", "K: Polc", "L: Raklap",
+          "M: S\u00faly", "N: eBay ID", "O: Megjegyz\u00e9s", "P: \u00c1llapot r\u00e9szlet",
+          "Q: T\u00f6rl\u00e9s ideje", "R: Honnan t\u00f6r\u00f6lt\u00e9k"]
 
 log = logging.getLogger("torolt_figyelo")
 
@@ -93,7 +94,7 @@ def _creds(readonly):
 
 
 def read_watched_values():
-    """Figyelt táblázat - CSAK OLVASÁS."""
+    """Figyelt tablazat - CSAK OLVASAS."""
     import gspread
     book = gspread.authorize(_creds(readonly=True)).open_by_key(WATCH_SPREADSHEET_ID.strip())
     ws = book.worksheet(WATCH_WORKSHEET) if WATCH_WORKSHEET.strip() else book.sheet1
@@ -113,7 +114,7 @@ def get_deleted_ws():
 
 
 def check_once(conn):
-    """Egy ellenőrzési kör: összeveti a figyelt táblázatot az előző pillanatképpel."""
+    """Egy ellenorzesi kor: osszeveti a figyelt tablazatot az elozo pillanatkeppel."""
     values = read_watched_values()
     current = {}
     for r in values:
@@ -127,9 +128,9 @@ def check_once(conn):
                 for row in conn.execute("SELECT code, payload FROM snapshot WHERE forras = ?", (key,))}
 
     if not previous:
-        log.info(f"Első ellenőrzés: {len(current)} R18-sor megjegyezve, innentől figyelem a változásokat.")
+        log.info(f"Elso ellenorzes: {len(current)} R18-sor megjegyezve, innentol figyelem a valtozasokat.")
     elif len(current) < len(previous) * 0.5:
-        log.warning(f"Csak {len(current)} sor jött le (előzőleg {len(previous)}) - valószínűleg hibás letöltés, kihagyva.")
+        log.warning(f"Csak {len(current)} sor jott le (elozoleg {len(previous)}) - valoszinuleg hibas letoltes, kihagyva.")
         return
 
     gone = []
@@ -138,13 +139,13 @@ def check_once(conn):
             continue
         new_row = current.get(code)
         if new_row is None:
-            gone.append((old_row, "Élő tábla: sor törölve"))
+            gone.append((old_row, "\u00c9l\u0151 t\u00e1bla: sor t\u00f6r\u00f6lve"))
         elif not has_product_data(new_row):
-            gone.append((old_row, "Élő tábla: kiürítve"))
+            gone.append((old_row, "\u00c9l\u0151 t\u00e1bla: ki\u00fcr\u00edtve"))
 
     if len(gone) > MISSING_SAFETY_LIMIT:
-        log.warning(f"{len(gone)} termék tűnt el egyszerre - túl sok, automatikus archiválás kihagyva "
-                    f"(ellenőrizd a táblázatot!). Kódok: {', '.join(r['A'] for r, _ in gone[:50])}")
+        log.warning(f"{len(gone)} termek tunt el egyszerre - tul sok, automatikus archivalas kihagyva "
+                    f"(ellenorizd a tablazatot!). Kodok: {', '.join(r['A'] for r, _ in gone[:50])}")
     else:
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for old_row, forras in gone:
@@ -160,7 +161,7 @@ def check_once(conn):
 
 
 def flush_pending(conn):
-    """A várakozó bejegyzéseket kiírja a ToroltSor munkalapra (ami már ott van, azt nem írja be újra)."""
+    """A varakozo bejegyzeseket kiirja a ToroltSor munkalapra (ami mar ott van, azt nem irja be ujra)."""
     pending = conn.execute("SELECT id, payload FROM varakozo ORDER BY id").fetchall()
     if not pending:
         return
@@ -173,30 +174,30 @@ def flush_pending(conn):
             existing.add(tuple(vals[:16]))
         conn.execute("DELETE FROM varakozo WHERE id = ?", (row["id"],))
         conn.commit()
-    log.info(f"{len(pending)} bejegyzés kiírva a '{DELETED_WORKSHEET}' munkalapra.")
+    log.info(f"{len(pending)} bejegyzes kiirva a '{DELETED_WORKSHEET}' munkalapra.")
 
 
 def main():
     setup_logging()
     if not WATCH_SPREADSHEET_ID.strip():
-        log.error("Nincs megadva a figyelt táblázat (WATCH_SPREADSHEET_ID) - a fájl elején kell beállítani.")
+        log.error("Nincs megadva a figyelt tablazat (WATCH_SPREADSHEET_ID) - a fajl elejen kell beallitani.")
         sys.exit(2)
     if WATCH_SPREADSHEET_ID.strip() == DELETED_SPREADSHEET_ID.strip():
-        log.error("A ToroltSor nem lehet a figyelt (élő) táblázatban! Állíts be másik DELETED_SPREADSHEET_ID-t.")
+        log.error("A ToroltSor nem lehet a figyelt (elo) tablazatban! Allits be masik DELETED_SPREADSHEET_ID-t.")
         sys.exit(2)
 
     once = "--egyszer" in sys.argv
-    log.info(f"Indul a törölt sorok figyelése ({WATCH_INTERVAL_SEC} mp-enként), csak olvasás: {WATCH_SPREADSHEET_ID}")
+    log.info(f"Indul a torolt sorok figyelese ({WATCH_INTERVAL_SEC} mp-enkent), csak olvasas: {WATCH_SPREADSHEET_ID}")
     conn = db()
     while True:
         try:
             check_once(conn)
         except Exception as e:
-            log.warning(f"Figyelt táblázat nem olvasható, később újra próbálom: {e}")
+            log.warning(f"Figyelt tablazat nem olvashato, kesobb ujra probalom: {e}")
         try:
             flush_pending(conn)
         except Exception as e:
-            log.warning(f"ToroltSor írási hiba, később újra próbálom: {e}")
+            log.warning(f"ToroltSor irasi hiba, kesobb ujra probalom: {e}")
         if once:
             break
         time.sleep(WATCH_INTERVAL_SEC)

@@ -1,5 +1,7 @@
 # Törölt sorok figyelő – telepítés a VPS-re
 
+> A `torolt_figyelo.py` szándékosan ékezet nélküli, így a WinSCP szerkesztőben is helyesen jelenik meg.
+
 A `torolt_figyelo.py` éjjel-nappal figyeli az élő Google táblázatot. Ha onnan eltűnik egy R18-as sor, vagy kiürítik a Márka, Típus és Cikkszám mezőit, a termék korábbi teljes adata a **ToroltSor** munkalapra kerül.
 Az élő táblázathoz **csak olvasási joggal** kapcsolódik, abba semmit nem ír.
 
