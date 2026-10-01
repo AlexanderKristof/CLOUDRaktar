@@ -31,7 +31,7 @@ from logging.handlers import RotatingFileHandler
 # BEALLITASOK - ITT KELL ATIRNI
 # -------------------------------------------------------------------
 # A figyelt (elo) tablazat ID-ja: a docs.google.com/spreadsheets/d/<EZ>/edit reszbol
-WATCH_SPREADSHEET_ID = ""
+WATCH_SPREADSHEET_ID = "12bvyXlrLWcndZIPxnWhoZ1EPeHKSOc_eK2F7t_fjTfg"
 # A figyelt munkalap (ful) neve - uresen hagyva a tablazat ELSO munkalapja
 WATCH_WORKSHEET = ""
 # Milyen gyakran nezze meg (masodperc). A Google percenkent kb. 60 olvasast enged szolgaltatasfioknak.
