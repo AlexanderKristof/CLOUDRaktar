@@ -1,7 +1,5 @@
 [Unit]
 Description=Raktar - torolt sorok figyelese (ToroltSor)
-After=network-online.target
-Wants=network-online.target
 
 [Service]
 Type=simple
