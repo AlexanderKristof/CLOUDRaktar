@@ -102,6 +102,9 @@ AUTO_SAVE_INTERVAL_MS = 4000
 # kapcsolódik, így véletlenül sem módosíthatja). Ha onnan eltűnik egy R18-as termék sora,
 # vagy kiürítik a Márka/Típus/Cikkszám mezőit, a korábbi teljes adatai a ToroltSor munkalapra kerülnek.
 # -------------------------------------------------------------------
+# FIGYELEM: a figyelés a VPS-en fut folyamatosan (/opt/raktarapp/torolt_figyelo.py, lásd vps/ mappa).
+# Ezért ITT hagyd üresen - különben a gépen futó program is figyelne, feleslegesen.
+# (Csak akkor töltsd ki, ha a VPS-es figyelő nem fut.)
 # A figyelt (élő) táblázat ID-ja: a docs.google.com/spreadsheets/d/<EZ>/edit részből.
 # Üresen hagyva a figyelés KI van kapcsolva.
 DELETED_WATCH_SPREADSHEET_ID = ""

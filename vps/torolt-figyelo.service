@@ -1,0 +1,15 @@
+[Unit]
+Description=Raktar - torolt sorok figyelese (ToroltSor)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/raktarapp
+ExecStart=/opt/raktarapp/venv/bin/python /opt/raktarapp/torolt_figyelo.py
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
