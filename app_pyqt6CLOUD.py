@@ -1999,6 +1999,8 @@ class SummaryDialog(QDialog):
 # Excel Live munkalap KÉPERNYŐS oszlopsorrendje (logikai indexek: 0-15 = A-P, 16 = 🖨️ gomb).
 # G (Állapot) után jön L (Raklap) és M (Súly), mert ezeket írjuk a leggyakrabban.
 EXCEL_LIVE_VISUAL_ORDER = [16, 0, 1, 2, 3, 4, 5, 6, 11, 12, 8, 9, 10, 7, 13, 14, 15]
+# A J (Szabad, logikai index 9) oszlop nincs használatban - az Excel Live munkalapon rejtve van
+EXCEL_LIVE_HIDDEN_COL_J = 9
 # Excel Live munkalap sormagassága (px) - a C/D/E hosszú szövege így két sorban kifér
 EXCEL_LIVE_ROW_HEIGHT = 46
 
@@ -2068,7 +2070,8 @@ class ExcelTableWidget(QTableWidget):
         r, c = self.currentRow(), self.currentColumn()
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
             step = -1 if key == Qt.Key.Key_Left else 1
-            data_visuals = sorted(hdr.visualIndex(col) for col in range(min(16, self.columnCount())))
+            data_visuals = sorted(hdr.visualIndex(col) for col in range(min(16, self.columnCount()))
+                                  if not self.isColumnHidden(col))
             cur_v = hdr.visualIndex(c) if c >= 0 else data_visuals[0]
             if step > 0:
                 nxt = [v for v in data_visuals if v > cur_v]
@@ -4791,6 +4794,8 @@ class RaktarApp(QMainWindow):
         hdr = self.excel_table.horizontalHeader()
         for visual_pos, logical_col in enumerate(EXCEL_LIVE_VISUAL_ORDER):
             hdr.moveSection(hdr.visualIndex(logical_col), visual_pos)
+        # A J (Szabad) oszlopot nem használjuk: elrejtjük. Az adata megmarad és a mentés változatlan.
+        self.excel_table.setColumnHidden(EXCEL_LIVE_HIDDEN_COL_J, True)
 
         # Ctrl+P: a kijelölt sor címkéjének nyomtatása (gépelés közben is működik)
         self.excel_print_shortcut = QShortcut(QKeySequence("Ctrl+P"), self.excel_table)
