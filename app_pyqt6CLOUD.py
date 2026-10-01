@@ -980,6 +980,44 @@ class RowPrintDialog(QDialog):
 
 
 
+class CopiesDialog(QDialog):
+    """Gyors példányszám-kérő ablak: alapból 1, Enter = nyomtatás, Esc = mégse.
+    A szám ki van jelölve, így azonnal felülírható (pl. 5 + Enter)."""
+    def __init__(self, code, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"🖨️ Nyomtatás: {code}")
+        self.setFixedWidth(300)
+        self.setStyleSheet("QDialog { background-color: #121212; color: white; } QLabel { color: white; font-weight: bold; }")
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"🏷️ {code}\nHány darab címke legyen?"))
+
+        self.spin_copies = QSpinBox()
+        self.spin_copies.setRange(1, 999)
+        self.spin_copies.setValue(1)
+        self.spin_copies.setStyleSheet("background-color: #2b2b2b; color: white; padding: 6px; font-weight: bold; font-size: 18px;")
+        layout.addWidget(self.spin_copies)
+
+        btn_lay = QHBoxLayout()
+        btn_print = QPushButton("🖨️ Nyomtatás")
+        btn_print.setDefault(True)
+        btn_print.setStyleSheet("background-color: #29b6f6; color: black; font-weight: bold; padding: 8px; font-size: 14px; border-radius: 4px;")
+        btn_print.clicked.connect(self.accept)
+        btn_lay.addWidget(btn_print, stretch=2)
+
+        btn_cancel = QPushButton("Mégse")
+        btn_cancel.setStyleSheet("background-color: #444; color: white; padding: 8px; border-radius: 4px;")
+        btn_cancel.clicked.connect(self.reject)
+        btn_lay.addWidget(btn_cancel, stretch=1)
+        layout.addLayout(btn_lay)
+
+        self.spin_copies.setFocus()
+        self.spin_copies.selectAll()
+
+    def copies(self):
+        return self.spin_copies.value()
+
+
 class RestoreDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1782,6 +1820,11 @@ class SummaryDialog(QDialog):
 #  - Delete / Backspace: a kijelölt cellák tartalma törlődik (nem kell belépni a cellába)
 #  - Gépelés közben a nyilak elmentik az értéket és átlépnek a szomszéd cellába
 # -------------------------------------------------------------------
+# Excel Live munkalap KÉPERNYŐS oszlopsorrendje (logikai indexek: 0-15 = A-P, 16 = 🖨️ gomb).
+# G (Állapot) után jön L (Raklap) és M (Súly), mert ezeket írjuk a leggyakrabban.
+EXCEL_LIVE_VISUAL_ORDER = [16, 0, 1, 2, 3, 4, 5, 6, 11, 12, 8, 9, 10, 7, 13, 14, 15]
+
+
 class ExcelCellDelegate(QStyledItemDelegate):
     """Cellaszerkesztő: a nyilak szerkesztés közben is átléptetnek a szomszéd cellába"""
 
@@ -1841,11 +1884,21 @@ class ExcelTableWidget(QTableWidget):
         self.setItemDelegate(ExcelCellDelegate(self))
 
     def move_current_cell(self, key):
+        # Jobbra/balra a KÉPERNYŐN látható sorrend szerint lép (az oszlopok át vannak rendezve),
+        # a nyomtatás-gomb oszlopát (16) átugorja
+        hdr = self.horizontalHeader()
         r, c = self.currentRow(), self.currentColumn()
-        if key == Qt.Key.Key_Left:
-            c -= 1
-        elif key == Qt.Key.Key_Right:
-            c += 1
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            step = -1 if key == Qt.Key.Key_Left else 1
+            data_visuals = sorted(hdr.visualIndex(col) for col in range(min(16, self.columnCount())))
+            cur_v = hdr.visualIndex(c) if c >= 0 else data_visuals[0]
+            if step > 0:
+                nxt = [v for v in data_visuals if v > cur_v]
+                v = nxt[0] if nxt else data_visuals[-1]
+            else:
+                prv = [v for v in data_visuals if v < cur_v]
+                v = prv[-1] if prv else data_visuals[0]
+            c = hdr.logicalIndex(v)
         elif key == Qt.Key.Key_Up:
             r -= 1
         elif key == Qt.Key.Key_Down:
@@ -2694,7 +2747,7 @@ class RaktarApp(QMainWindow):
                 background-color: #039be5;
             }
         """)
-        btn.setToolTip("Kattintás: azonnali nyomtatás | Shift+kattintás: nyomtatási ablak (PNG / példányszám)\n"
+        btn.setToolTip("Kattintás: példányszám megadása (alap: 1, Enter) majd nyomtatás | Shift+kattintás: nyomtatási ablak (PNG / előnézet)\n"
                        "Billentyűvel: Ctrl+P a kijelölt sorra")
         btn.clicked.connect(lambda ch=False, b=btn: self.print_row_of_button(b))
         return btn
@@ -2821,6 +2874,8 @@ class RaktarApp(QMainWindow):
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             log_event(last_code, "TERMÉK VISSZAVONÁSA", f"A(z) {last_code} adatai kiürítve.")
+            if getattr(self, 'last_added_code', None) == last_code:
+                self.last_added_code = None
             
             self.clear_worker = ClearWorker(last_code)
             self.clear_worker.process_log_signal.connect(self.handle_log_from_thread)
@@ -3663,7 +3718,9 @@ class RaktarApp(QMainWindow):
             self.lbl_add_qr_img.show()
             self.lbl_add_bar_img.show()
 
-        summary_txt = f"🏷️ <b>{code_final}</b> | Márka: <b>{c_marka}</b> | Típus: <b>{d_tipus}</b> | Cikkszám: <b>{e_cikk}</b>"
+        summary_txt = (f"🖨️ <b>Nyomtatásra kész (utoljára felvett):</b><br>"
+                       f"<b>Kód:</b> {code_final}<br><b>Márka:</b> {c_marka or '-'}<br>"
+                       f"<b>Típus:</b> {d_tipus or '-'}<br><b>Cikkszám:</b> {get_label_subtext(d_tipus, e_cikk) or '-'}")
         if hasattr(self, 'lbl_add_info_summary'):
             self.lbl_add_info_summary.setText(summary_txt)
 
@@ -3743,10 +3800,28 @@ class RaktarApp(QMainWindow):
         self.input_p.clear()
         
     def print_current_label(self):
-        code = self.input_a.text().strip().upper()
-        tipus = self.input_d.text().strip().upper()
-        cikk = self.input_e.text().strip().upper()
+        """Címke nyomtatása az Új Termék fülön.
+        A 'Termék Felvétele' után az A mező már a KÖVETKEZŐ (üres) R18-számot mutatja, ezért:
+        - ha az űrlapba még nem írtak új adatot (Márka/Típus/Cikkszám üres), az UTOLJÁRA FELVETT
+          termék címkéje jön ki a felvételkor megadott adatokkal;
+        - ha már gépelnek új terméket, az űrlapon lévő adatok kerülnek a címkére."""
+        form_code = self.input_a.text().strip().upper()
+        form_marka = self.input_c.text().strip().upper()
+        form_tipus = self.input_d.text().strip().upper()
+        form_cikk = self.input_e.text().strip().upper()
         copies = self.add_copies_spin.value()
+
+        last_code = getattr(self, 'last_added_code', None)
+        if (form_marka or form_tipus or form_cikk) or not last_code:
+            code, tipus, cikk = form_code, form_tipus, form_cikk
+        else:
+            code = last_code
+            tipus = getattr(self, 'last_added_tipus', "") or ""
+            cikk = getattr(self, 'last_added_cikk', "") or ""
+
+        if not code or code == "R18-":
+            self.trigger_toast("⚠️ Nincs nyomtatható termék adat!")
+            return
 
         printers = [p[2] for p in win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)] if WIN32_AVAILABLE else []
         if printers:
@@ -3758,13 +3833,16 @@ class RaktarApp(QMainWindow):
 
             if self.add_r_zpl.isChecked():
                 zpl_data = generate_zpl_code(code, cikkszam=cikk, tipus=tipus, copies=copies)
-                send_zpl_to_printer(selected, zpl_data)
-                self.trigger_toast(f"🖨️ ZPL Címke kiküldve [{code}]!")
+                ok, msg = send_zpl_to_printer(selected, zpl_data)
+                self.trigger_toast(f"🖨️ ZPL Címke kiküldve [{code}] - {copies} db" if ok else f"❌ Nyomtatási hiba: {msg}")
             else:
                 _, bar_b = generate_codes_in_memory(code, cikkszam_text=cikk, tipus_text=tipus)
                 if bar_b:
-                    send_png_bytes_to_printer(selected, bar_b, copies=copies)
-                    self.trigger_toast(f"🖨️ PNG Címke kinyomtatva [{code}]!")
+                    ok, msg = send_png_bytes_to_printer(selected, bar_b, copies=copies)
+                    self.trigger_toast(f"🖨️ PNG Címke kinyomtatva [{code}] - {copies} db" if ok else f"❌ Nyomtatási hiba: {msg}")
+            log_event(code, "CÍMKE NYOMTATÁS", f"Új Termék fül - {copies} db")
+        else:
+            self.trigger_toast("❌ Nem található nyomtató!")
 
     # -------------------------------------------------------------------
     # TAB 3: PDA / ELADÁS TAB
@@ -4528,9 +4606,12 @@ class RaktarApp(QMainWindow):
                    "G: Állapot", "H: Ár", "I: Páter", "J: Szabad", "K: Polc", "L: Raklap",
                    "M: Súly", "N: eBay ID", "O: Megjegyzés", "P: Állapot részlet", "🖨️ Nyomtatás"]
         self.excel_table.setHorizontalHeaderLabels(headers)
-        # A nyomtatás oszlop (17., index 16) KÉPERNYŐN a legelső helyre kerül, hogy nagyítás mellett is
-        # rögtön látszódjon. Csak a megjelenítés változik: a program továbbra is 0-15 = A-P, 16 = gomb.
-        self.excel_table.horizontalHeader().moveSection(16, 0)
+        # KÉPERNYŐS oszlopsorrend: 🖨️, A-G, majd a leggyakrabban írt L (Raklap) és M (Súly), utána I, J, K, H, N, O, P.
+        # Csak a megjelenítés változik (moveSection): a program és a mentés továbbra is a logikai
+        # oszlopokkal dolgozik (0-15 = A-P, 16 = gomb), így minden érték a saját oszlopába kerül.
+        hdr = self.excel_table.horizontalHeader()
+        for visual_pos, logical_col in enumerate(EXCEL_LIVE_VISUAL_ORDER):
+            hdr.moveSection(hdr.visualIndex(logical_col), visual_pos)
 
         # Ctrl+P: a kijelölt sor címkéjének nyomtatása (gépelés közben is működik)
         self.excel_print_shortcut = QShortcut(QKeySequence("Ctrl+P"), self.excel_table)
@@ -4739,7 +4820,8 @@ class RaktarApp(QMainWindow):
                 item._previous_text = new_val
 
     def print_row_label(self, row_idx):
-        """🖨️ gomb: egy kattintásra azonnal nyomtat (ZPL, 1 db). Shift+kattintás: nyomtatási ablak (PNG mód / példányszám)."""
+        """🖨️ gomb: kattintás után bekéri a példányszámot (alap: 1, Enter = nyomtat), majd ZPL-lel nyomtat.
+        Shift+kattintás: részletes nyomtatási ablak (PNG mód / előnézet)."""
         try:
             item_a = self.excel_table.item(row_idx, 0) # A: F-Kód
             item_c = self.excel_table.item(row_idx, 2) # C: Márka
@@ -4772,17 +4854,22 @@ class RaktarApp(QMainWindow):
                 dlg.exec()
                 return
 
-            # Sima kattintás -> azonnali nyomtatás háttérszálon (a felület nem fagy le)
+            # Sima kattintás -> példányszám bekérése (alap: 1), majd nyomtatás háttérszálon (a felület nem fagy le)
             code_u, tipus_u, cikk_u = code_a.upper(), item_type.upper(), part_num.upper()
+
+            copies_dlg = CopiesDialog(code_u, self)
+            if copies_dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            copies = copies_dlg.copies()
 
             def _job():
                 try:
-                    zpl = generate_zpl_code(code_u, cikkszam=cikk_u, tipus=tipus_u, copies=1)
+                    zpl = generate_zpl_code(code_u, cikkszam=cikk_u, tipus=tipus_u, copies=copies)
                     ok, msg = send_zpl_to_printer(get_zebra_printer_name(), zpl)
                 except Exception as e:
                     ok, msg = False, str(e)
-                self.print_result_signal.emit(f"🖨️ Címke kinyomtatva [{code_u}]" if ok else f"❌ Nyomtatási hiba [{code_u}]: {msg}")
-                log_event(code_u, "CÍMKE NYOMTATÁS", "Excel Live gomb - OK" if ok else f"HIBA: {msg}")
+                self.print_result_signal.emit(f"🖨️ Címke kinyomtatva [{code_u}] - {copies} db" if ok else f"❌ Nyomtatási hiba [{code_u}]: {msg}")
+                log_event(code_u, "CÍMKE NYOMTATÁS", f"Excel Live gomb - OK ({copies} db)" if ok else f"HIBA: {msg}")
 
             threading.Thread(target=_job, daemon=True).start()
 
