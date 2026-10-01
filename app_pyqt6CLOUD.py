@@ -25,9 +25,9 @@ from PyQt6.QtWidgets import (
     QFormLayout, QGroupBox, QSpinBox, QDialog, QScrollArea, QFrame,
     QFileDialog, QCheckBox, QMessageBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QGraphicsOpacityEffect, QTextEdit, QDateEdit, QListWidget, QInputDialog, QAbstractItemView,
-    QStyledItemDelegate, QAbstractItemDelegate
+    QStyledItemDelegate, QAbstractItemDelegate, QComboBox, QPlainTextEdit, QAbstractSpinBox
 )
-from PyQt6.QtGui import QColor, QPixmap, QFont, QDesktopServices, QCloseEvent, QShortcut, QKeySequence
+from PyQt6.QtGui import QColor, QPixmap, QFont, QDesktopServices, QCloseEvent, QShortcut, QKeySequence, QIntValidator
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEnginePage
 
@@ -58,6 +58,29 @@ DB_FILE = os.path.join(BASE_DIR, "raktar_adatbazis.db")
 CONFIG_FILE = os.path.join(BASE_DIR, "beallitasok.json")
 
 TEST_SHEETS_ID = "1ZoB2yl_GvaY0kiICQN10dEKghAE7b9Z3hDlwtv9nMdc"
+
+# -------------------------------------------------------------------
+# ELADÁSI MUNKALAPOK (3 db) - PDA / Eladás fül 3 gombja ide írja az eladásokat.
+# TESZT UTÁN ITT KELL ÁTÍRNI az élő táblázatra: "spreadsheet_id" = a Google táblázat ID-ja
+# (a docs.google.com/spreadsheets/d/<EZ>/edit részből), "worksheet" = a munkalap (fül) neve.
+# Ha a munkalap még nem létezik, a program létrehozza és fejlécet ír bele.
+# (A credentials.json szolgáltatásfiókjának szerkesztési joga kell legyen a táblázathoz!)
+# -------------------------------------------------------------------
+SALES_SHEETS = {
+    "EBAY_KIVULI": {"cim": "eBay-en kívüli eladás", "spreadsheet_id": TEST_SHEETS_ID, "worksheet": "Eladas_EbayKivul"},
+    "EBAY":        {"cim": "eBay eladás",           "spreadsheet_id": TEST_SHEETS_ID, "worksheet": "Eladas_Ebay"},
+    "WEBSHOP":     {"cim": "Webshop eladás",        "spreadsheet_id": TEST_SHEETS_ID, "worksheet": "Eladas_Webshop"},
+}
+# Az eladási munkalapok oszlopai (sorrendben) - (belső kulcs, fejléc)
+SALES_COLUMNS = [
+    ("eladas_id", "Eladás ID"), ("datum", "Eladás dátuma"), ("platform", "Platform"),
+    ("A", "R18 kód"), ("C", "Márka"), ("D", "Típus"), ("E", "Cikkszám"), ("G", "Állapot"),
+    ("L", "Raklap"), ("M", "Súly"), ("N", "eBay ID"),
+    ("vevo", "Vevő"), ("ar", "Eladási ár"), ("darab", "Darab"), ("tracking", "Tracking number"),
+    ("megjegyzes", "Megjegyzés"),
+]
+# Ezek a mezők "később" is kitölthetők - az Eladottak fülön narancs háttérrel jelöli, ha még üresek
+SALES_LATER_FIELDS = ("vevo", "ar", "tracking")
 
 MAP_SHEETS_ID = "13uw_-HNPHep94j-Ra9TsJrUYXADa8qcuBYyBuFdL1Fw"
 MAP_EDIT_URL = f"https://docs.google.com/spreadsheets/d/{MAP_SHEETS_ID}/edit"
@@ -250,6 +273,23 @@ def get_db_connection():
         )
     """)
 
+    # Eladások (PDA / Eladás fül 3 gombja) - az Eladottak fül ebből dolgozik, és innen megy ki
+    # a 3 eladási munkalapra. valtozat: minden szerkesztés növeli (a szinkron csak a legutolsó
+    # állapotot jelöli késznek); synced_platform: melyik munkalapon van most fent.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS eladasok (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            eladas_id TEXT UNIQUE,
+            datum TEXT, platform TEXT,
+            A TEXT, C TEXT, D TEXT, E TEXT, G TEXT, L TEXT, M TEXT, N TEXT,
+            vevo TEXT, ar TEXT, darab TEXT, tracking TEXT, megjegyzes TEXT,
+            sheets_synced INTEGER NOT NULL DEFAULT 0,
+            synced_platform TEXT,
+            torolve INTEGER NOT NULL DEFAULT 0,
+            valtozat INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+
     conn.commit()
     return conn
 
@@ -378,6 +418,120 @@ def archive_deleted_row(row_data, forras, cursor=None):
     except Exception as e:
         print(f"[Archív] Hiba ({code}): {e}")
         return False
+
+# -------------------------------------------------------------------
+# ELADÁSOK -> 3 ELADÁSI MUNKALAP (offline-biztos: ami nem ment ki, sheets_synced=0 marad)
+# -------------------------------------------------------------------
+_sales_sync_lock = threading.Lock()
+
+def _sales_last_col_letter():
+    return chr(ord("A") + len(SALES_COLUMNS) - 1)
+
+def get_sales_worksheet(platform, cache):
+    """A platformhoz tartozó eladási munkalap (cache: {platform: ws}); ha nincs, létrehozza fejléccel."""
+    if platform in cache:
+        return cache[platform]
+    import gspread
+    from google.oauth2.service_account import Credentials
+    cfg = SALES_SHEETS[platform]
+    if "_client" not in cache:
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+        cache["_client"] = gspread.authorize(creds)
+    book = cache["_client"].open_by_key(cfg["spreadsheet_id"])
+    try:
+        ws = book.worksheet(cfg["worksheet"])
+    except gspread.exceptions.WorksheetNotFound:
+        ws = book.add_worksheet(title=cfg["worksheet"], rows=1000, cols=len(SALES_COLUMNS))
+    if not ws.row_values(1):
+        ws.update(range_name=f"A1:{_sales_last_col_letter()}1", values=[[h for _, h in SALES_COLUMNS]])
+    cache[platform] = ws
+    return ws
+
+def _sales_row_values(row):
+    vals = []
+    for key, _ in SALES_COLUMNS:
+        if key == "platform":
+            vals.append(SALES_SHEETS.get(row["platform"], {}).get("cim", row["platform"]))
+        else:
+            vals.append(safe_str(row[key]))
+    return vals
+
+def sync_sales_to_sheets():
+    """A még fel nem töltött eladásokat (új / szerkesztett / törölt / platformot váltott)
+    kiírja a megfelelő eladási munkalapra. Visszaadja a sikeresen szinkronizált sorok számát."""
+    if not SHEETS_ENABLED:
+        return 0
+    if not _sales_sync_lock.acquire(blocking=False):
+        return 0
+    done = 0
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM eladasok WHERE sheets_synced = 0 ORDER BY id")
+        pending = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        if not pending:
+            return 0
+
+        cache, id_cols = {}, {}
+
+        def ids_of(platform):
+            if platform not in id_cols:
+                id_cols[platform] = [str(x).strip() for x in get_sales_worksheet(platform, cache).col_values(1)]
+            return id_cols[platform]
+
+        for row in pending:
+            try:
+                eid = row["eladas_id"]
+                old_pf = row.get("synced_platform") or ""
+                new_pf = row["platform"]
+                # 1. A régi helyéről törlés (platformváltás vagy törölt eladás)
+                if old_pf in SALES_SHEETS and (old_pf != new_pf or row["torolve"]):
+                    ids = ids_of(old_pf)
+                    if eid in ids:
+                        idx = ids.index(eid)
+                        get_sales_worksheet(old_pf, cache).delete_rows(idx + 1)
+                        ids.pop(idx)
+                conn2 = get_db_connection()
+                cur2 = conn2.cursor()
+                if row["torolve"]:
+                    cur2.execute("DELETE FROM eladasok WHERE id = ? AND valtozat = ?", (row["id"], row["valtozat"]))
+                    conn2.commit()
+                    conn2.close()
+                    done += 1
+                    continue
+                conn2.close()
+                if new_pf not in SALES_SHEETS:
+                    continue
+                # 2. Beírás / frissítés az aktuális platform munkalapján (Eladás ID alapján)
+                ws = get_sales_worksheet(new_pf, cache)
+                ids = ids_of(new_pf)
+                vals = _sales_row_values(row)
+                if eid in ids:
+                    r = ids.index(eid) + 1
+                    ws.update(range_name=f"A{r}:{_sales_last_col_letter()}{r}", values=[vals], value_input_option="RAW")
+                else:
+                    ws.append_row(vals, value_input_option="RAW")
+                    ids.append(eid)
+                conn2 = get_db_connection()
+                cur2 = conn2.cursor()
+                cur2.execute("UPDATE eladasok SET sheets_synced = 1, synced_platform = ? WHERE id = ? AND valtozat = ?",
+                             (new_pf, row["id"], row["valtozat"]))
+                conn2.commit()
+                conn2.close()
+                done += 1
+            except Exception as e:
+                print(f"[Eladás szinkron] Hiba ({row.get('eladas_id')}): {e}")
+        return done
+    except Exception as e:
+        print(f"[Eladás szinkron] Hiba: {e}")
+        return done
+    finally:
+        _sales_sync_lock.release()
+
+def sync_sales_async():
+    threading.Thread(target=sync_sales_to_sheets, daemon=True).start()
 
 def archive_row_from_db(code, forras):
     """A helyi adatbázisban lévő sort archiválja (törlés / kiürítés ELŐTT hívandó)."""
@@ -1137,6 +1291,116 @@ class CopiesDialog(QDialog):
 
     def copies(self):
         return self.spin_copies.value()
+
+
+class SaleDialog(QDialog):
+    """Eladás rögzítése: a mezők egymás után jönnek (Enter = következő mező).
+    Vevő / Eladási ár / Tracking number: '⏭ Később' gombbal kihagyható, az Eladottak fülön pótolható.
+    A dátum automatikus."""
+    def __init__(self, platform, product, stock_qty, parent=None):
+        super().__init__(parent)
+        self.platform = platform
+        self.product = product
+        cim = SALES_SHEETS[platform]["cim"]
+        self.datum = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        self.setWindowTitle(f"💰 {cim}: {product.get('A', '')}")
+        self.setMinimumWidth(520)
+        self.setStyleSheet("""
+            QDialog { background-color: #121212; color: white; }
+            QLabel { color: white; font-weight: bold; }
+            QLineEdit { background-color: #2b2b2b; color: white; padding: 6px; font-size: 15px; border: 1px solid #444; border-radius: 4px; }
+            QLineEdit:focus { border: 2px solid #00e676; }
+        """)
+
+        layout = QVBoxLayout(self)
+        info = QLabel(
+            f"🏷️ <b>{product.get('A', '')}</b> &nbsp;|&nbsp; {product.get('C', '') or '-'} &nbsp;|&nbsp; "
+            f"{product.get('D', '') or '-'} &nbsp;|&nbsp; {product.get('E', '') or '-'}<br>"
+            f"📦 Raktáron: <b>{stock_qty} db</b> &nbsp;|&nbsp; 📅 Eladás dátuma (automatikus): <b>{self.datum}</b>"
+        )
+        info.setStyleSheet("background: #1e1e1e; padding: 10px; border: 1px solid #333; border-radius: 6px; font-size: 13px;")
+        layout.addWidget(info)
+
+        form = QFormLayout()
+        self.inp_vevo = QLineEdit()
+        self.inp_vevo.setPlaceholderText("Vevő neve / felhasználóneve")
+        self.inp_ar = QLineEdit()
+        self.inp_ar.setPlaceholderText("pl. 120 EUR")
+        self.inp_darab = QLineEdit("1")
+        self.inp_darab.setValidator(QIntValidator(1, 100000, self))
+        self.inp_tracking = QLineEdit()
+        self.inp_tracking.setPlaceholderText("Tracking number")
+        self.inp_megj = QLineEdit()
+        self.inp_megj.setPlaceholderText("(nem kötelező)")
+
+        form.addRow("👤 Vevő:", self._with_later(self.inp_vevo))
+        form.addRow("💶 Eladási ár:", self._with_later(self.inp_ar))
+        form.addRow("🔢 Eladott darab:", self.inp_darab)
+        form.addRow("🚚 Tracking number:", self._with_later(self.inp_tracking))
+        form.addRow("📝 Megjegyzés:", self.inp_megj)
+        layout.addLayout(form)
+
+        self.chk_stock = QCheckBox("Eladott darabszám levonása a raktárkészletből (0 db esetén a termék törlődik és a ToroltSor lapra kerül)")
+        self.chk_stock.setChecked(True)
+        self.chk_stock.setStyleSheet("color: #ffb74d; font-weight: bold;")
+        layout.addWidget(self.chk_stock)
+
+        btn_lay = QHBoxLayout()
+        self.btn_ok = QPushButton(f"✅ Eladás rögzítése ({cim})")
+        self.btn_ok.setStyleSheet("background-color: #00e676; color: black; font-weight: bold; padding: 10px; font-size: 15px; border-radius: 4px;")
+        self.btn_ok.clicked.connect(self._try_accept)
+        btn_cancel = QPushButton("Mégse")
+        btn_cancel.setStyleSheet("background-color: #444; color: white; padding: 10px; border-radius: 4px;")
+        btn_cancel.clicked.connect(self.reject)
+        for b in (self.btn_ok, btn_cancel):
+            b.setAutoDefault(False)
+            b.setDefault(False)
+        btn_lay.addWidget(self.btn_ok, stretch=3)
+        btn_lay.addWidget(btn_cancel, stretch=1)
+        layout.addLayout(btn_lay)
+
+        # Enter = következő mező, az utolsó után rögzítés
+        order = [self.inp_vevo, self.inp_ar, self.inp_darab, self.inp_tracking, self.inp_megj]
+        for cur, nxt in zip(order, order[1:]):
+            cur.returnPressed.connect(lambda n=nxt: (n.setFocus(), n.selectAll()))
+        self.inp_megj.returnPressed.connect(self._try_accept)
+        self.inp_vevo.setFocus()
+
+    def _with_later(self, line_edit):
+        box = QWidget()
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(line_edit, stretch=1)
+        btn = QPushButton("⏭ Később")
+        btn.setAutoDefault(False)
+        btn.setToolTip("Most kihagyja - az Eladottak fülön később kitölthető")
+        btn.setStyleSheet("background-color: #ff9800; color: black; font-weight: bold; padding: 5px 10px; border-radius: 4px;")
+
+        def later():
+            line_edit.clear()
+            line_edit.setPlaceholderText("⏭ később kitöltendő (Eladottak fül)")
+            line_edit.focusNextChild()
+        btn.clicked.connect(later)
+        lay.addWidget(btn)
+        return box
+
+    def _try_accept(self):
+        if not self.inp_darab.text().strip().isdigit() or int(self.inp_darab.text()) < 1:
+            self.inp_darab.setFocus()
+            self.inp_darab.selectAll()
+            return
+        self.accept()
+
+    def values(self):
+        return {
+            "vevo": self.inp_vevo.text().strip(),
+            "ar": self.inp_ar.text().strip(),
+            "darab": int(self.inp_darab.text().strip() or "1"),
+            "tracking": self.inp_tracking.text().strip(),
+            "megjegyzes": self.inp_megj.text().strip(),
+            "reduce_stock": self.chk_stock.isChecked(),
+            "datum": self.datum,
+        }
 
 
 class RestoreDialog(QDialog):
@@ -2273,6 +2537,7 @@ class RaktarApp(QMainWindow):
         self.tab_add = QWidget()
         self.tab_local_db = QWidget()
         self.tab_pda = QWidget()
+        self.tab_sold = QWidget()
         self.tab_excel = QWidget()
         self.tab_single = QWidget()
         self.tab_map = QWidget()
@@ -2284,6 +2549,7 @@ class RaktarApp(QMainWindow):
         self.tabs.addTab(self.tab_add, "📝 Új Termék Felvitele")
         self.tabs.addTab(self.tab_local_db, "💾 Helyi Adatbázis (Élő)")
         self.tabs.addTab(self.tab_pda, "📱 PDA / Eladás")
+        self.tabs.addTab(self.tab_sold, "💰 Eladottak")
         self.tabs.addTab(self.tab_excel, "📊 Excel Kezelés")
         self.tabs.addTab(self.tab_single, "🖨️ Egyedi Címke")
         self.tabs.addTab(self.tab_map, "🗺️ Raktártérkép")
@@ -2295,6 +2561,7 @@ class RaktarApp(QMainWindow):
         self.init_add_tab()
         self.init_local_db_tab()
         self.init_pda_tab()
+        self.init_sold_tab()
         self.init_excel_tab()
         self.init_single_tab()
         self.init_map_tab()
@@ -3146,7 +3413,7 @@ class RaktarApp(QMainWindow):
         scroll.setWidget(self.results_area)
         layout.addWidget(scroll)
 
-    def create_item_card(self, row):
+    def create_item_card(self, row, sale_mode=False):
         card = QFrame()
         card.setStyleSheet("QFrame#MainCard { background-color: #1e1e1e; border: 1px solid #333; border-radius: 8px; margin-bottom: 10px; } QLineEdit { background-color: #2b2b2b; border: 1px solid #444; color: #fff; padding: 4px; border-radius: 4px; } QLabel { color: #fff; }")
         card.setObjectName("MainCard")
@@ -3439,6 +3706,23 @@ class RaktarApp(QMainWindow):
         btn_layout.addWidget(btn_delete, stretch=1)
 
         left_layout.addLayout(btn_layout)
+
+        # PDA / Eladás fül: 3 eladás gomb - mindegyik a saját eladási munkalapjára ír
+        if sale_mode:
+            sale_layout = QHBoxLayout()
+            sale_layout.setSpacing(10)
+            sale_styles = {
+                "EBAY_KIVULI": "background-color: #7e57c2; color: white;",
+                "EBAY": "background-color: #ffd600; color: black;",
+                "WEBSHOP": "background-color: #00c853; color: black;",
+            }
+            for pf, cfg in SALES_SHEETS.items():
+                b = QPushButton(f"💰 {cfg['cim']}")
+                b.setCursor(Qt.CursorShape.PointingHandCursor)
+                b.setStyleSheet(f"QPushButton {{ {sale_styles.get(pf, '')} font-weight: bold; padding: 10px; border-radius: 4px; font-size: 14px; }}")
+                b.clicked.connect(lambda checked, p=pf, c=code_val: self.open_sale_dialog(p, c))
+                sale_layout.addWidget(b, stretch=1)
+            left_layout.addLayout(sale_layout)
 
         main_card_layout.addWidget(left_box, stretch=3)
 
@@ -4057,6 +4341,341 @@ class RaktarApp(QMainWindow):
         scroll.setWidget(self.pda_results_area)
         layout.addWidget(scroll)
 
+    def _is_text_input_widget(self, w):
+        if w is None:
+            return False
+        if isinstance(w, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+            return True
+        if isinstance(w, QComboBox) and w.isEditable():
+            return True
+        return False
+
+    def eventFilter(self, obj, event):
+        """PDA / Eladás fül: a vonalkód-olvasó (billentyűzetként gépel) akkor is a keresőmezőbe ír,
+        ha éppen nem abban áll a kurzor (pl. egy gombra kattintottunk előtte)."""
+        try:
+            if (event.type() == QEvent.Type.KeyPress and hasattr(self, "pda_input")
+                    and self.tabs.currentWidget() is self.tab_pda
+                    and QApplication.activeModalWidget() is None
+                    and QApplication.activeWindow() is self):
+                focus = QApplication.focusWidget()
+                if focus is not self.pda_input and not self._is_text_input_widget(focus):
+                    txt = event.text()
+                    mods = event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier |
+                                                Qt.KeyboardModifier.MetaModifier)
+                    if txt and txt.isprintable() and not mods:
+                        # Új csippantás: a mező tartalmát lecseréli, a többi karakter már közvetlenül ide jön
+                        self.pda_input.setFocus()
+                        self.pda_input.setText(txt)
+                        return True
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
+
+    def open_sale_dialog(self, platform, code):
+        """💰 Eladás gomb a PDA kártyán: bekéri a vevő / ár / darab / tracking adatokat és rögzíti az eladást."""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT {', '.join(ROW_COLS)} FROM termekek WHERE A = ? OR B = ?", (code, code))
+            r = cursor.fetchone()
+            conn.close()
+        except Exception as e:
+            self.trigger_toast(f"❌ Adatbázis hiba: {e}")
+            return
+        if not r:
+            self.trigger_toast(f"⚠️ {code} nem található a raktárban!")
+            return
+        product = {c: safe_str(r[c]) for c in ROW_COLS}
+        f_match = re.search(r"\d+", product.get("F", ""))
+        stock = int(f_match.group(0)) if f_match else 1
+
+        dlg = SaleDialog(platform, product, stock, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            self.pda_input.setFocus()
+            return
+        v = dlg.values()
+        self.record_sale(platform, product, stock, v)
+
+    def record_sale(self, platform, product, stock, v):
+        code = product.get("A", "").strip().upper()
+        eladas_id = f"E{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}-{code}-{os.urandom(2).hex()}"
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO eladasok (eladas_id, datum, platform, A, C, D, E, G, L, M, N,
+                                      vevo, ar, darab, tracking, megjegyzes, sheets_synced, valtozat)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+            """, (eladas_id, v["datum"], platform, code, product.get("C", ""), product.get("D", ""),
+                  product.get("E", ""), product.get("G", ""), product.get("L", ""), product.get("M", ""),
+                  product.get("N", ""), v["vevo"], v["ar"], str(v["darab"]), v["tracking"], v["megjegyzes"]))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            self.trigger_toast(f"❌ Eladás mentési hiba: {e}")
+            return
+
+        cim = SALES_SHEETS[platform]["cim"]
+        log_event(code, "ELADÁS", f"{cim} | {v['darab']} db | Vevő: {v['vevo'] or '(később)'} | Ár: {v['ar'] or '(később)'} | "
+                                  f"Tracking: {v['tracking'] or '(később)'}")
+
+        # Készlet levonása
+        stock_msg = ""
+        if v["reduce_stock"]:
+            remaining = stock - v["darab"]
+            if remaining > 0:
+                try:
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE termekek SET F = ? WHERE A = ? OR B = ?", (str(remaining), code, code))
+                    conn.commit()
+                    conn.close()
+                    enqueue_row_from_db(code, force=True)
+                    flush_outbox_async()
+                    stock_msg = f" | Maradt: {remaining} db"
+                except Exception as e:
+                    stock_msg = f" | ❌ Készlet hiba: {e}"
+            else:
+                self.delete_item_action(code)
+                stock_msg = " | Elfogyott - törölve a raktárból"
+
+        sync_sales_async()
+        self.trigger_toast(f"💰 {code} eladva ({cim}, {v['darab']} db){stock_msg}")
+
+        # PDA fül: visszaigazolás, és a kurzor kész a következő csippantásra
+        while self.pda_results_layout.count():
+            item = self.pda_results_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        lbl = QLabel(f"✅ <b>{code}</b> eladva — {cim} — {v['darab']} db{stock_msg}<br>"
+                     f"<span style='color:#aaa'>Az adatok az 💰 Eladottak fülön módosíthatók.</span>")
+        lbl.setStyleSheet("background: #1b5e20; color: white; padding: 14px; border-radius: 6px; font-size: 15px;")
+        self.pda_results_layout.addWidget(lbl)
+        self.pda_input.setFocus()
+        self.pda_input.selectAll()
+
+        if hasattr(self, "refresh_sold_table"):
+            self.refresh_sold_table()
+
+    # -------------------------------------------------------------------
+    # 💰 ELADOTTAK FÜL: minden programban rögzített eladás - látható és szerkeszthető
+    # -------------------------------------------------------------------
+    def init_sold_tab(self):
+        layout = QVBoxLayout(self.tab_sold)
+
+        bar = QHBoxLayout()
+        self.sold_search = QLineEdit()
+        self.sold_search.setPlaceholderText("🔍 Keresés (R18, vevő, típus, tracking...)")
+        self.sold_search.textChanged.connect(self.refresh_sold_table)
+        bar.addWidget(self.sold_search, stretch=3)
+
+        self.sold_platform_filter = QComboBox()
+        self.sold_platform_filter.addItem("Minden platform", "")
+        for pf, cfg in SALES_SHEETS.items():
+            self.sold_platform_filter.addItem(cfg["cim"], pf)
+        self.sold_platform_filter.currentIndexChanged.connect(self.refresh_sold_table)
+        bar.addWidget(self.sold_platform_filter, stretch=1)
+
+        self.sold_only_missing = QCheckBox("Csak hiányos (⏭ később)")
+        self.sold_only_missing.toggled.connect(self.refresh_sold_table)
+        bar.addWidget(self.sold_only_missing)
+
+        btn_refresh = QPushButton("🔄 Frissítés")
+        btn_refresh.clicked.connect(self.refresh_sold_table)
+        bar.addWidget(btn_refresh)
+
+        btn_sync = QPushButton("☁️ Szinkron most")
+        btn_sync.setStyleSheet("background-color: #00e676; color: black; font-weight: bold;")
+        btn_sync.clicked.connect(lambda: (sync_sales_async(), self.trigger_toast("☁️ Eladások feltöltése elindítva...")))
+        bar.addWidget(btn_sync)
+
+        btn_del = QPushButton("🗑️ Kijelölt eladás törlése")
+        btn_del.setStyleSheet("background-color: #ff5252; color: white; font-weight: bold;")
+        btn_del.clicked.connect(self.delete_selected_sale)
+        bar.addWidget(btn_del)
+        layout.addLayout(bar)
+
+        self.sold_status_lbl = QLabel("")
+        self.sold_status_lbl.setStyleSheet("color: #ffb74d; font-weight: bold;")
+        layout.addWidget(self.sold_status_lbl)
+
+        self.sold_table = QTableWidget()
+        self.sold_table.setColumnCount(len(SALES_COLUMNS) + 1)
+        self.sold_table.setHorizontalHeaderLabels([h for _, h in SALES_COLUMNS] + ["☁️"])
+        self.sold_table.setAlternatingRowColors(True)
+        self.sold_table.setWordWrap(True)
+        self.sold_table.verticalHeader().setDefaultSectionSize(36)
+        self.sold_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.sold_table.setStyleSheet("""
+            QTableWidget { background-color: #21252b; alternate-background-color: #282c34; color: #e0e0e0;
+                           gridline-color: #3b4048; font-size: 13px; }
+            QHeaderView::section { background-color: #1b1e23; color: #61afef; font-weight: bold; padding: 6px; border: 1px solid #3b4048; }
+            QTableWidget::item:selected { background-color: #2f5f8f; color: #ffffff; }
+        """)
+        widths = {"eladas_id": 150, "datum": 130, "platform": 170, "A": 100, "C": 110, "D": 200, "E": 180,
+                  "G": 90, "L": 100, "M": 60, "N": 110, "vevo": 160, "ar": 90, "darab": 60, "tracking": 170, "megjegyzes": 200}
+        for i, (key, _) in enumerate(SALES_COLUMNS):
+            self.sold_table.setColumnWidth(i, widths.get(key, 100))
+        self.sold_table.setColumnWidth(len(SALES_COLUMNS), 40)
+        self.sold_table.itemChanged.connect(self.on_sold_cell_changed)
+        layout.addWidget(self.sold_table)
+
+        # Időnként újrapróbálja feltölteni, ami net hiánya miatt nem ment ki
+        self.sales_sync_timer = QTimer()
+        self.sales_sync_timer.setInterval(30000)
+        self.sales_sync_timer.timeout.connect(sync_sales_async)
+        self.sales_sync_timer.start()
+        QTimer.singleShot(3000, sync_sales_async)
+
+        # A szinkron állapot (☁️ oszlop) frissítése, ha épp ezen a fülön vagyunk
+        self.sold_status_timer = QTimer()
+        self.sold_status_timer.setInterval(10000)
+        self.sold_status_timer.timeout.connect(
+            lambda: self.refresh_sold_table() if self.tabs.currentWidget() is self.tab_sold
+            and self.sold_table.state() != QAbstractItemView.State.EditingState else None)
+        self.sold_status_timer.start()
+
+        # Vonalkód-olvasó elkapása a PDA fülön (lásd eventFilter)
+        QApplication.instance().installEventFilter(self)
+
+        self.refresh_sold_table()
+
+    def refresh_sold_table(self, *_):
+        if not hasattr(self, "sold_table"):
+            return
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM eladasok WHERE torolve = 0 ORDER BY datum DESC, id DESC")
+            rows = [dict(r) for r in cursor.fetchall()]
+            conn.close()
+        except Exception as e:
+            self.trigger_toast(f"❌ Eladások betöltési hiba: {e}")
+            return
+
+        q = self.sold_search.text().strip().lower()
+        pf_filter = self.sold_platform_filter.currentData()
+        only_missing = self.sold_only_missing.isChecked()
+        missing_total = sum(1 for r in rows if any(not safe_str(r.get(k)).strip() for k in SALES_LATER_FIELDS))
+
+        shown = []
+        for r in rows:
+            if pf_filter and r["platform"] != pf_filter:
+                continue
+            if only_missing and not any(not safe_str(r.get(k)).strip() for k in SALES_LATER_FIELDS):
+                continue
+            if q and q not in " ".join(safe_str(r.get(k)) for k, _ in SALES_COLUMNS).lower():
+                continue
+            shown.append(r)
+
+        self.sold_table.blockSignals(True)
+        self.sold_table.setRowCount(len(shown))
+        later_bg = QColor("#7a4a00")
+        for ri, r in enumerate(shown):
+            for ci, (key, _) in enumerate(SALES_COLUMNS):
+                if key == "platform":
+                    combo = QComboBox()
+                    for pf, cfg in SALES_SHEETS.items():
+                        combo.addItem(cfg["cim"], pf)
+                    idx = combo.findData(r["platform"])
+                    combo.setCurrentIndex(max(idx, 0))
+                    combo.currentIndexChanged.connect(
+                        lambda _i, c=combo, eid=r["eladas_id"]: self.update_sale_field(eid, "platform", c.currentData()))
+                    self.sold_table.setCellWidget(ri, ci, combo)
+                    item = QTableWidgetItem("")
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                else:
+                    item = QTableWidgetItem(safe_str(r.get(key)))
+                    if key == "eladas_id":
+                        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    if key in SALES_LATER_FIELDS and not safe_str(r.get(key)).strip():
+                        item.setBackground(later_bg)
+                        item.setToolTip("⏭ Később kitöltendő")
+                item.setData(Qt.ItemDataRole.UserRole, r["eladas_id"])
+                self.sold_table.setItem(ri, ci, item)
+            st = QTableWidgetItem("✅" if r["sheets_synced"] else "⏳")
+            st.setToolTip("Fent van az eladási munkalapon" if r["sheets_synced"] else "Feltöltésre vár")
+            st.setFlags(st.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            st.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.sold_table.setItem(ri, len(SALES_COLUMNS), st)
+        self.sold_table.blockSignals(False)
+
+        self.sold_status_lbl.setText(
+            f"💰 Összes eladás: {len(rows)} db  |  Megjelenítve: {len(shown)} db  |  "
+            f"⏭ Hiányos (vevő / ár / tracking később): {missing_total} db  |  Narancs cella = később kitöltendő")
+
+    def on_sold_cell_changed(self, item):
+        col = item.column()
+        if col >= len(SALES_COLUMNS):
+            return
+        key = SALES_COLUMNS[col][0]
+        if key in ("eladas_id", "platform"):
+            return
+        eid = item.data(Qt.ItemDataRole.UserRole)
+        if eid:
+            self.update_sale_field(eid, key, item.text().strip())
+            self.sold_table.blockSignals(True)
+            if key in SALES_LATER_FIELDS:
+                item.setBackground(QColor("#7a4a00") if not item.text().strip() else QColor(0, 0, 0, 0))
+            st = self.sold_table.item(item.row(), len(SALES_COLUMNS))
+            if st:
+                st.setText("⏳")
+            self.sold_table.blockSignals(False)
+
+    def update_sale_field(self, eladas_id, key, value):
+        allowed = {k for k, _ in SALES_COLUMNS} - {"eladas_id"}
+        if key not in allowed:
+            return
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(f"UPDATE eladasok SET {key} = ?, sheets_synced = 0, valtozat = valtozat + 1 WHERE eladas_id = ?",
+                           (value, eladas_id))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            self.trigger_toast(f"❌ Eladás módosítási hiba: {e}")
+            return
+        log_event(eladas_id, "ELADÁS MÓDOSÍTÁSA", f"{key} = {value}")
+        # Gyors egymás utáni javításoknál csak egyszer töltünk fel (2 mp késleltetés)
+        if not hasattr(self, "_sales_sync_debounce"):
+            self._sales_sync_debounce = QTimer()
+            self._sales_sync_debounce.setSingleShot(True)
+            self._sales_sync_debounce.setInterval(2000)
+            self._sales_sync_debounce.timeout.connect(sync_sales_async)
+        self._sales_sync_debounce.start()
+
+    def delete_selected_sale(self):
+        row = self.sold_table.currentRow()
+        if row < 0:
+            self.trigger_toast("⚠️ Nincs kijelölt eladás!")
+            return
+        item = self.sold_table.item(row, 0)
+        eid = item.data(Qt.ItemDataRole.UserRole) if item else None
+        if not eid:
+            return
+        dlg = SilentConfirmDialog("Eladás törlése",
+                                  f"Biztosan törlöd ezt az eladást?\n\n{eid}\n\n"
+                                  f"Az eladási munkalapról is törlődik. (A raktárkészletet NEM állítja vissza!)", self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("UPDATE eladasok SET torolve = 1, sheets_synced = 0, valtozat = valtozat + 1 WHERE eladas_id = ?", (eid,))
+            # Ha még fel sem ment sehova, helyben azonnal törölhető
+            cursor.execute("DELETE FROM eladasok WHERE eladas_id = ? AND (synced_platform IS NULL OR synced_platform = '')", (eid,))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            self.trigger_toast(f"❌ Törlési hiba: {e}")
+            return
+        log_event(eid, "ELADÁS TÖRLÉSE", "Eladás törölve az Eladottak fülön")
+        sync_sales_async()
+        self.refresh_sold_table()
+        self.trigger_toast("🗑️ Eladás törölve")
+
     def execute_pda_search(self):
         query_text = self.pda_input.text().strip()
         if not query_text: return
@@ -4073,17 +4692,29 @@ class RaktarApp(QMainWindow):
         conn.close()
 
         matched_rows = []
-        for idx, row in df.iterrows():
-            row_text = " ".join([safe_str(row.get(col)) for col in df.columns])
-            if query_text.lower() in row_text.lower() or (clean_query and clean_query in clean_part_number(row_text)):
-                matched_rows.append(dict(row))
-                if len(matched_rows) >= 10: break
+        # Leolvasott R18-kód: a pontosan egyező termék kerül előre (R18-129 ne hozza elöl az R18-1290-et)
+        q_up = query_text.strip().upper()
+        exact = df[(df["A"].astype(str).str.strip().str.upper() == q_up) | (df["B"].astype(str).str.strip().str.upper() == q_up)]
+        for _, row in exact.iterrows():
+            matched_rows.append(dict(row))
+        exact_idx = set(exact.index)
+        if not (re.match(r"^R18-\d+$", q_up) and matched_rows):
+            for idx, row in df.iterrows():
+                if idx in exact_idx:
+                    continue
+                row_text = " ".join([safe_str(row.get(col)) for col in df.columns])
+                if query_text.lower() in row_text.lower() or (clean_query and clean_query in clean_part_number(row_text)):
+                    matched_rows.append(dict(row))
+                    if len(matched_rows) >= 10: break
 
         if not matched_rows:
             self.pda_results_layout.addWidget(QLabel("❌ Nincs találat!"))
         else:
             for row_dict in matched_rows:
-                self.pda_results_layout.addWidget(self.create_item_card(row_dict))
+                self.pda_results_layout.addWidget(self.create_item_card(row_dict, sale_mode=True))
+
+        # A következő csippantás felülírja (nem fűzi hozzá) a keresőmező tartalmát
+        self.pda_input.selectAll()
 
     # -------------------------------------------------------------------
     # TAB 4: EXCEL KEZELÉS TAB
