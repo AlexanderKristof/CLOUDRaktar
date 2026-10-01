@@ -71,6 +71,9 @@ def main():
     if "--munkalap" in args:
         worksheet = args[args.index("--munkalap") + 1]
 
+    if source.strip() == tf.WATCH_SPREADSHEET_ID.strip():
+        sys.exit("Ez az ELO tablazat ID-ja, nem a regi masolate. Elobb keszits masolatot egy regi verziobol\n"
+                 "(Fajl -> Verzioelozmenyek -> regi datum -> Masolat keszitese), es annak az ID-jat add meg.")
     if source.strip() == tf.DELETED_SPREADSHEET_ID.strip():
         sys.exit("A regi forras nem lehet a ToroltSor tablazata.")
 
