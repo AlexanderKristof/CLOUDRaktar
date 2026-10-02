@@ -58,6 +58,9 @@ VPS_URL = f"http://{VPS_IP}:5000"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "raktar_adatbazis.db")
 CONFIG_FILE = os.path.join(BASE_DIR, "beallitasok.json")
+# ⚙️ Folyamat (technikai) napló napi fájljai - ennyi napig őrzi meg őket
+PROCESS_LOG_DIR = os.path.join(BASE_DIR, "naplok")
+PROCESS_LOG_KEEP_DAYS = 30
 
 TEST_SHEETS_ID = "1ZoB2yl_GvaY0kiICQN10dEKghAE7b9Z3hDlwtv9nMdc"
 
@@ -3605,10 +3608,23 @@ class RaktarApp(QMainWindow):
         toast.show_toast(duration=2500)
 
     def append_process_log(self, text, color="#00e676"):
-        if hasattr(self, 'process_log_text'):
-            now_str = datetime.datetime.now().strftime("[%H:%M:%S]")
-            line_html = f"<span style='color: #888;'>{now_str}</span> <span style='color: {color};'>{text}</span>"
-            self.process_log_text.append(line_html)
+        """⚙️ Folyamat napló: CSAK technikai üzenetek (szinkron, VPS, hibák). Naponta külön fájlba
+        is menti (naplok/folyamat_ÉÉÉÉ-HH-NN.log), így a régebbi napok is visszanézhetők."""
+        now = datetime.datetime.now()
+        try:
+            os.makedirs(PROCESS_LOG_DIR, exist_ok=True)
+            with open(os.path.join(PROCESS_LOG_DIR, f"folyamat_{now:%Y-%m-%d}.log"), "a", encoding="utf-8") as f:
+                f.write(f"{now:%H:%M:%S}\t{color}\t{str(text).replace(chr(10), ' ')}\n")
+        except Exception:
+            pass
+        # A nézetbe csak akkor, ha éppen a mai (élő) napot nézzük
+        if hasattr(self, 'process_log_text') and getattr(self, "_process_log_live", True):
+            self.process_log_text.append(self._process_log_line_html(f"{now:%H:%M:%S}", color, text))
+
+    @staticmethod
+    def _process_log_line_html(time_str, color, text):
+        import html as _html
+        return f"<span style='color: #888;'>[{time_str}]</span> <span style='color: {color};'>{_html.escape(str(text))}</span>"
 
     # -------------------------------------------------------------------
     # TAB 1: GYORSKERESŐ TAB
@@ -5264,10 +5280,24 @@ class RaktarApp(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
 
         top_bar = QHBoxLayout()
-        lbl_title = QLabel("📜 Raktári Események és Változások Naplója (SQLite DB)")
+        lbl_title = QLabel("📜 Raktári események: felvétel, módosítás, törlés, eladás, nyomtatás")
         lbl_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #29b6f6;")
         top_bar.addWidget(lbl_title)
         top_bar.addStretch()
+
+        self.db_log_search = QLineEdit()
+        self.db_log_search.setPlaceholderText("🔍 R18-kód / esemény / szöveg")
+        self.db_log_search.setFixedWidth(260)
+        self.db_log_search.returnPressed.connect(self.refresh_db_log_view)
+        top_bar.addWidget(self.db_log_search)
+
+        top_bar.addWidget(QLabel("Ettől a naptól:"))
+        self.db_log_date = QDateEdit()
+        self.db_log_date.setCalendarPopup(True)
+        self.db_log_date.setDate(QDate.currentDate().addDays(-7))
+        self.db_log_date.setStyleSheet("background-color: #2b2b2b; color: #fff; padding: 4px; font-weight: bold;")
+        self.db_log_date.dateChanged.connect(self.refresh_db_log_view)
+        top_bar.addWidget(self.db_log_date)
 
         btn_refresh_log = QPushButton("🔄 Napló Frissítése")
         btn_refresh_log.setStyleSheet("background-color: #00e676; color: black; font-weight: bold; padding: 6px 12px;")
@@ -5305,13 +5335,21 @@ class RaktarApp(QMainWindow):
 
         self.db_log_text.clear()
         try:
+            date_from = self.db_log_date.date().toString("yyyy-MM-dd") if hasattr(self, "db_log_date") else "1900-01-01"
+            search = self.db_log_search.text().strip() if hasattr(self, "db_log_search") else ""
+            sql = "SELECT * FROM naplo WHERE idopont >= ?"
+            params = [f"{date_from} 00:00:00"]
+            if search:
+                sql += " AND (r18_kod LIKE ? OR esemeny LIKE ? OR reszletek LIKE ?)"
+                params += [f"%{search}%"] * 3
+            sql += " ORDER BY id DESC LIMIT 1000"
             conn = get_db_connection()
-            query = "SELECT * FROM naplo ORDER BY id DESC LIMIT 200"
-            df_log = pd.read_sql_query(query, conn)
+            df_log = pd.read_sql_query(sql, conn, params=params)
             conn.close()
 
             if len(df_log) == 0:
-                self.db_log_text.setHtml("<span style='color: #888;'>Még nincsenek rögzített események az adatbázisban.</span>")
+                self.db_log_text.setHtml(f"<span style='color: #888;'>Nincs rögzített esemény {date_from} óta"
+                                         f"{' erre a keresésre' if search else ''}.</span>")
                 return
 
             html_content = ""
@@ -5331,7 +5369,8 @@ class RaktarApp(QMainWindow):
 
                 html_content += f"<p style='margin: 3px 0;'><span style='color: #888;'>[{idopont}]</span> <b style='color: {color};'>[{esemeny}]</b> <b style='color: #fff;'>{kod}</b> | <span style='color: #ccc;'>{reszletek}</span></p>"
 
-            self.db_log_text.setHtml(html_content)
+            more = " (a legutóbbi 1000 látszik - szűkítsd a dátumot / keresést)" if len(df_log) >= 1000 else ""
+            self.db_log_text.setHtml(f"<p style='color:#888;'>{len(df_log)} esemény {date_from} óta{more}</p>" + html_content)
         except Exception as e:
             self.db_log_text.setHtml(f"<span style='color: #ff5252;'>Hiba a napló betöltésekor: {e}</span>")
 
@@ -5343,28 +5382,28 @@ class RaktarApp(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
 
         top_bar = QHBoxLayout()
-        lbl_title = QLabel("⚙️ ÉLŐ FOLYAMAT & GOOGLE SHEETS SZINKRONIZÁCIÓS NAPLÓ")
+        lbl_title = QLabel("⚙️ TECHNIKAI FOLYAMAT NAPLÓ: szinkron, VPS, Google Sheets, hibák")
         lbl_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
         top_bar.addWidget(lbl_title)
         top_bar.addStretch()
 
-        top_bar.addWidget(QLabel("Dátum szűrő:"))
+        top_bar.addWidget(QLabel("Nap:"))
         self.log_date_edit = QDateEdit()
         self.log_date_edit.setCalendarPopup(True)
-        self.log_date_edit.setDate(QDate.currentDate().addDays(-1))
+        self.log_date_edit.setDate(QDate.currentDate())
         self.log_date_edit.setStyleSheet("background-color: #2b2b2b; color: #fff; padding: 4px; font-weight: bold;")
         top_bar.addWidget(self.log_date_edit)
 
-        btn_fetch_changes = QPushButton("🔍 Módosítások Lekérdezése")
+        btn_fetch_changes = QPushButton("📂 Nap betöltése")
+        btn_fetch_changes.setToolTip("A kiválasztott nap technikai naplóját tölti be (naplok/folyamat_ÉÉÉÉ-HH-NN.log)")
         btn_fetch_changes.setStyleSheet("background-color: #29b6f6; color: #000; font-weight: bold; padding: 6px 12px;")
-        btn_fetch_changes.clicked.connect(
-            lambda: self.run_button_action(
-                btn_fetch_changes, 
-                "🔍 Módosítások Lekérdezése", 
-                self.query_history_logs_by_date
-            )
-        )
+        btn_fetch_changes.clicked.connect(self.query_history_logs_by_date)
         top_bar.addWidget(btn_fetch_changes)
+
+        btn_live = QPushButton("🟢 Élő (mai) nézet")
+        btn_live.setStyleSheet("background-color: #00e676; color: #000; font-weight: bold; padding: 6px 12px;")
+        btn_live.clicked.connect(self.show_live_process_log)
+        top_bar.addWidget(btn_live)
 
         btn_clear_view = QPushButton("🗑️ Nézet Törlése")
         btn_clear_view.setStyleSheet("background-color: #ef5350; color: #fff; font-weight: bold; padding: 6px 12px;")
@@ -5394,31 +5433,62 @@ class RaktarApp(QMainWindow):
         """)
         layout.addWidget(self.process_log_text)
 
-        self.append_process_log("🚀 Rendszer elindítva. Automatikus nézet: Az elmúlt 1 nap (24 óra) változásai láthatók.")
+        # Régi napi fájlok takarítása
+        try:
+            limit = datetime.date.today() - datetime.timedelta(days=PROCESS_LOG_KEEP_DAYS)
+            for fn in os.listdir(PROCESS_LOG_DIR) if os.path.isdir(PROCESS_LOG_DIR) else []:
+                m = re.fullmatch(r"folyamat_(\d{4}-\d{2}-\d{2})\.log", fn)
+                if m and datetime.date.fromisoformat(m.group(1)) < limit:
+                    os.remove(os.path.join(PROCESS_LOG_DIR, fn))
+        except Exception:
+            pass
+
+        self._process_log_live = True
+        self.show_live_process_log()
+        self.append_process_log("🚀 Rendszer elindítva. (Itt csak technikai üzenetek vannak - a raktári események a 📜 Napló fülön.)")
+
+    def _load_process_log_day(self, day_str):
+        path = os.path.join(PROCESS_LOG_DIR, f"folyamat_{day_str}.log")
+        if not os.path.exists(path):
+            return None
+        lines = []
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f.read().splitlines()[-3000:]:
+                parts = line.split("\t", 2)
+                if len(parts) == 3:
+                    lines.append(self._process_log_line_html(*parts))
+        return lines
+
+    def show_live_process_log(self):
+        """A mai nap technikai naplója, és innentől élőben jönnek az új sorok."""
+        self._process_log_live = True
+        self.log_date_edit.setDate(QDate.currentDate())
+        self.process_log_text.clear()
+        lines = self._load_process_log_day(datetime.date.today().isoformat()) or []
+        if lines:
+            self.process_log_text.setHtml("<br>".join(lines))
+            self.process_log_text.moveCursor(self.process_log_text.textCursor().MoveOperation.End)
 
     def query_history_logs_by_date(self):
-        selected_date_str = self.log_date_edit.date().toString("yyyy-MM-dd")
-        self.append_process_log(f"🔎 Módosítások lekérdezése ettől a dátumtól: {selected_date_str}...", "#29b6f6")
-        try:
-            conn = get_db_connection()
-            query = "SELECT * FROM naplo WHERE idopont >= ? ORDER BY id ASC"
-            df_hist = pd.read_sql_query(query, conn, params=(f"{selected_date_str} 00:00:00",))
-            conn.close()
-
-            if len(df_hist) > 0:
-                self.append_process_log(f"📊 {len(df_hist)} DB ELŐZMÉNY BEJEGYZÉS TALÁLHATÓ [{selected_date_str}] ÓTA:", "#00e676")
-                for _, r in df_hist.iterrows():
-                    log_line = f"[{safe_str(r.get('idopont'))}] | Kód: {safe_str(r.get('r18_kod'))} | Esemény: {safe_str(r.get('esemeny'))} | {safe_str(r.get('reszletek'))}"
-                    self.append_process_log(log_line, "#aaaaaa")
-            else:
-                self.append_process_log(f"ℹ️ Nem található rögzített módosítás a helyi naplóban {selected_date_str} óta.", "#29b6f6")
-        except Exception as e:
-            self.append_process_log(f"❌ Hiba a lekérdezéskor: {e}", "#ff5252")
+        """📂 Egy korábbi nap TECHNIKAI naplójának betöltése (nem a raktári események - azok a Napló fülön)."""
+        day = self.log_date_edit.date().toString("yyyy-MM-dd")
+        if day == datetime.date.today().isoformat():
+            self.show_live_process_log()
+            return
+        self._process_log_live = False
+        self.process_log_text.clear()
+        lines = self._load_process_log_day(day)
+        if not lines:
+            self.process_log_text.setHtml(f"<span style='color:#888;'>Nincs technikai napló erre a napra: {day} "
+                                          f"(legfeljebb {PROCESS_LOG_KEEP_DAYS} napig őrződnek meg).</span>")
+            return
+        self.process_log_text.setHtml(f"<p style='color:#29b6f6;'>📂 {day} - {len(lines)} sor (archív nézet; "
+                                      f"az élő sorokhoz: 🟢 Élő (mai) nézet)</p>" + "<br>".join(lines))
 
     def clear_process_log(self):
+        """Csak a NÉZETET üríti (a napi fájl megmarad)."""
         if hasattr(self, 'process_log_text'):
             self.process_log_text.clear()
-            self.append_process_log("🧹 Napló nézet törölve.")
 
     def closeEvent(self, event: QCloseEvent):
         for worker in list(self.active_workers):
