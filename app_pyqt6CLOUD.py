@@ -1119,7 +1119,19 @@ def match_location(cell_val, target_val):
     if t_clean and c_clean == t_clean: return True
     return c_raw == t_raw
 
-def render_interactive_map_html(map_data, target_location):
+def _norm_map_text(val):
+    """Pontos egyezéshez: kis/nagybetű, felesleges szóközök és a '112.0' alak nem számít."""
+    t = re.sub(r"\s+", " ", str(val or "")).strip().upper()
+    if re.fullmatch(r"\d+\.0", t):
+        t = t[:-2]
+    return t
+
+def match_location_exact(cell_val, target_val):
+    """Raktártérkép kereső: CSAK a pontosan egyező cella (a '112' nem találja meg a '112B'-t vagy az 'A112'-t)."""
+    t = _norm_map_text(target_val)
+    return bool(t) and _norm_map_text(cell_val) == t
+
+def render_interactive_map_html(map_data, target_location, exact=False):
     if not map_data:
         return "<html><body style='background:#121212; color:red;'><h2>⚠️ A térkép letöltése sikertelen!</h2></body></html>"
 
@@ -1155,7 +1167,7 @@ def render_interactive_map_html(map_data, target_location):
         for cell in row:
             val = cell["value"]
             bg_color = cell["color"]
-            is_match = match_location(val, target_location)
+            is_match = match_location_exact(val, target_location) if exact else match_location(val, target_location)
             if is_match:
                 match_found = True
                 cell_class = "map-cell highlighted-cell"
@@ -1167,7 +1179,30 @@ def render_interactive_map_html(map_data, target_location):
         html_code += "</tr>"
     html_code += "</table>"
 
-    if match_found:
+    if match_found and exact:
+        # Több találatnál: az elsőhöz ugrik; nextMatch() a következőhöz lép (újabb keresés ugyanarra)
+        html_code += """
+        <style>
+            .current-match { outline: 4px solid #ffeb3b !important; outline-offset: 2px; z-index: 10; position: relative; }
+        </style>
+        <script>
+            var matches = [], idx = -1;
+            function showMatch(i) {
+                matches = document.querySelectorAll('.highlighted-cell');
+                if (!matches.length) return 0;
+                idx = ((i % matches.length) + matches.length) % matches.length;
+                matches.forEach(function (m) { m.classList.remove('current-match'); });
+                var t = matches[idx];
+                t.classList.add('current-match');
+                t.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+                return idx + 1;
+            }
+            function nextMatch() { return showMatch(idx + 1); }
+            window.addEventListener('load', function () { showMatch(0); });
+            setTimeout(function () { if (idx < 0) showMatch(0); }, 150);
+        </script>
+        """
+    elif match_found:
         html_code += """
         <script>
             function forceScroll() {
@@ -5114,7 +5149,26 @@ class RaktarApp(QMainWindow):
     # -------------------------------------------------------------------
     def init_map_tab(self):
         layout = QVBoxLayout(self.tab_map)
-        btn_edit_txt = "✏️ Térkép Szerkesztése (Google Sheets Megnyitása Browserben)"
+
+        # 🔍 KERESŐSÁV: pontos egyezés kiemelése és odagörgetés
+        search_bar = QHBoxLayout()
+        self.map_search_input = QLineEdit()
+        self.map_search_input.setPlaceholderText("🔍 Keresés a raktártérképen (pontos érték, pl. 112 vagy KISRAKTÁR 80) - Enter")
+        self.map_search_input.setStyleSheet("font-size: 15px; padding: 6px;")
+        self.map_search_input.returnPressed.connect(self.search_on_map)
+        search_bar.addWidget(self.map_search_input, stretch=3)
+
+        btn_map_search = QPushButton("🔍 Keresés")
+        btn_map_search.setStyleSheet("background-color: #ff0055; color: white; font-weight: bold; padding: 6px 14px;")
+        btn_map_search.clicked.connect(self.search_on_map)
+        search_bar.addWidget(btn_map_search)
+
+        btn_map_reload = QPushButton("🔄 Térkép frissítése")
+        btn_map_reload.setToolTip("A térképet újra letölti a Google táblázatból (ha közben módosult)")
+        btn_map_reload.clicked.connect(lambda: self.search_on_map(force_reload=True))
+        search_bar.addWidget(btn_map_reload)
+
+        btn_edit_txt = "✏️ Térkép Szerkesztése (Google Sheets)"
         btn_edit = QPushButton(btn_edit_txt)
         btn_edit.clicked.connect(
             lambda: self.run_button_action(
@@ -5123,7 +5177,16 @@ class RaktarApp(QMainWindow):
                 lambda: QDesktopServices.openUrl(QUrl(MAP_EDIT_URL))
             )
         )
-        layout.addWidget(btn_edit)
+        search_bar.addWidget(btn_edit)
+        layout.addLayout(search_bar)
+
+        self.map_search_status = QLabel("Írd be a keresett értéket, és nyomj Entert. Több találatnál az újabb Enter a következőre ugrik.")
+        self.map_search_status.setStyleSheet("color: #aaaaaa; font-size: 13px;")
+        layout.addWidget(self.map_search_status)
+
+        self._map_data_cache = None
+        self._map_last_query = None
+        self._map_pending_query = None
 
         try:
             self.web_view = QWebEngineView()
@@ -5133,6 +5196,56 @@ class RaktarApp(QMainWindow):
             layout.addWidget(self.web_view)
         except Exception:
             layout.addWidget(QLabel("🗺️ A beágyazott böngésző nem érhető el."))
+
+    def search_on_map(self, *_, force_reload=False):
+        """🔍 Raktártérkép kereső: a pontosan egyező cellá(ka)t színesen kiemeli és odagörget."""
+        query = self.map_search_input.text().strip()
+        if not query:
+            self.map_search_status.setText("⚠️ Írj be egy keresett értéket!")
+            return
+        if not hasattr(self, "web_view"):
+            return
+
+        # Ugyanaz a keresés újra (és már látszik): a következő találatra lép
+        if (not force_reload and self._map_data_cache is not None
+                and _norm_map_text(query) == self._map_last_query and getattr(self, "_map_match_count", 0) > 1):
+            def on_next(pos):
+                if pos:
+                    self.map_search_status.setText(f"📍 '{query}': {pos}. / {self._map_match_count} találat (Enter = következő)")
+            self.web_view.page().runJavaScript("nextMatch()", on_next)
+            return
+
+        if force_reload or self._map_data_cache is None:
+            # A térkép letöltése háttérszálon (a felület nem akad meg)
+            self._map_pending_query = query
+            if getattr(self, "map_tab_worker", None) and self.map_tab_worker.isRunning():
+                return
+            self.map_search_status.setText("⏳ Raktártérkép betöltése...")
+            self.map_tab_worker = MapWorker()
+            self.map_tab_worker.finished_signal.connect(self._on_map_tab_loaded)
+            self.map_tab_worker.error_signal.connect(lambda e: self.map_search_status.setText(f"❌ {e}"))
+            self.map_tab_worker.start()
+            return
+
+        self._render_map_search(query)
+
+    def _on_map_tab_loaded(self, map_data):
+        self._map_data_cache = map_data
+        if self._map_pending_query:
+            self._render_map_search(self._map_pending_query)
+
+    def _render_map_search(self, query):
+        data = self._map_data_cache or []
+        count = sum(1 for row in data for cell in row if match_location_exact(cell["value"], query))
+        self._map_last_query = _norm_map_text(query)
+        self._map_match_count = count
+        self.web_view.setHtml(render_interactive_map_html(data, query, exact=True))
+        if count == 0:
+            self.map_search_status.setText(f"❌ '{query}' nem található a raktártérképen (csak pontos egyezést keres).")
+        elif count == 1:
+            self.map_search_status.setText(f"📍 '{query}': 1 találat")
+        else:
+            self.map_search_status.setText(f"📍 '{query}': 1. / {count} találat (Enter = következő)")
 
     # -------------------------------------------------------------------
     # TAB 7: NAPLÓ TAB (ADATBÁZIS ALAPÚ)
