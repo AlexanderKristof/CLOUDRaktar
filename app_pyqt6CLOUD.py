@@ -357,6 +357,13 @@ def get_db_connection():
             reszletek TEXT
         )
     """)
+    # A termék TELJES adata (A-P) az esemény előtt és után (JSON) - a Napló fül ebből mutatja,
+    # mivel mi történt. Régi bejegyzéseknél üres.
+    cursor.execute("PRAGMA table_info(naplo)")
+    naplo_cols = [c[1] for c in cursor.fetchall()]
+    for col in ("elotte", "utana"):
+        if col not in naplo_cols:
+            cursor.execute(f"ALTER TABLE naplo ADD COLUMN {col} TEXT")
 
     # "Kimenő postaláda": ha nincs net, ide kerül minden módosítás, amíg fel nem ment
     # a VPS-re / Google Sheets-re. Semmi nem vész el - csak várakozik a következő
@@ -417,13 +424,48 @@ def get_db_connection():
     conn.commit()
     return conn
 
-def log_event(r18_kod, esemeny, reszletek=""):
+NAPLO_COLS = "ABCDEFGHIJKLMNOP"
+
+def get_row_snapshot(code, cursor=None):
+    """A termék aktuális teljes adata (A-P) dict-ként, vagy None, ha nincs ilyen sor."""
+    if not code:
+        return None
+    own = cursor is None
+    try:
+        if own:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+        cursor.execute(f"SELECT {', '.join(NAPLO_COLS)} FROM termekek WHERE UPPER(TRIM(A)) = ? OR UPPER(TRIM(B)) = ?",
+                       (str(code).strip().upper(), str(code).strip().upper()))
+        row = cursor.fetchone()
+        if own:
+            conn.close()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return {c: ("" if v is None or str(v).lower() in ("none", "nan") else str(v)) for c, v in zip(NAPLO_COLS, tuple(row))}
+
+def describe_changes(elotte, utana):
+    """'L (Raklap): 573 → 574 | M (Súly): 19 → 20' - csak a megváltozott oszlopok."""
+    b, a = elotte or {}, utana or {}
+    parts = []
+    for c in NAPLO_COLS:
+        ov, nv = str(b.get(c, "") or "").strip(), str(a.get(c, "") or "").strip()
+        if ov != nv:
+            parts.append(f"{c} ({COLUMN_LABELS.get(c, c)}): {ov or '∅'} → {nv or '∅'}")
+    return " | ".join(parts)
+
+def log_event(r18_kod, esemeny, reszletek="", elotte=None, utana=None):
+    """Raktári esemény a Napló fülre. elotte / utana: a termék teljes A-P adata az esemény előtt / után."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cursor.execute("INSERT INTO naplo (idopont, r18_kod, esemeny, reszletek) VALUES (?, ?, ?, ?)",
-                       (now_str, r18_kod, esemeny, reszletek))
+        cursor.execute("INSERT INTO naplo (idopont, r18_kod, esemeny, reszletek, elotte, utana) VALUES (?, ?, ?, ?, ?, ?)",
+                       (now_str, r18_kod, esemeny, reszletek,
+                        json.dumps(elotte, ensure_ascii=False) if elotte is not None else None,
+                        json.dumps(utana, ensure_ascii=False) if utana is not None else None))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -535,8 +577,8 @@ def archive_deleted_row(row_data, forras, cursor=None, force=False):
                 "INSERT INTO sync_outbox (payload, vps_synced, sheets_synced, attempts, created_at) VALUES (?, 1, 0, 0, ?)",
                 (json.dumps(payload, ensure_ascii=False), now_str)
             )
-            cursor.execute("INSERT INTO naplo (idopont, r18_kod, esemeny, reszletek) VALUES (?, ?, ?, ?)",
-                           (now_str, code, "TÖRÖLT SOR ARCHIVÁLVA", f"{forras} | {format_row_for_log(data)}"))
+            cursor.execute("INSERT INTO naplo (idopont, r18_kod, esemeny, reszletek, elotte) VALUES (?, ?, ?, ?, ?)",
+                           (now_str, code, "TÖRÖLT SOR ARCHIVÁLVA", forras, json.dumps(data, ensure_ascii=False)))
         if own_conn:
             conn.commit()
             conn.close()
@@ -1836,6 +1878,7 @@ class AutoRowSyncWorker(QThread):
             return
 
         # 1. BIZTONSÁGOS HELYI SQLITE MENTÉS A DB_FILE GLOBÁLIS VÁLTOZÓVAL
+        naplo_entries = []   # (kód, előtte, utána) - a tranzakció lezárása UTÁN írjuk a naplóba
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
@@ -1844,6 +1887,7 @@ class AutoRowSyncWorker(QThread):
                 code_a = str(row_data.get("A", "")).strip().upper()
                 if not code_a:
                     continue
+                elotte = get_row_snapshot(code_a, cursor)
 
                 # Ha a sorból kitörölték a terméket (Márka/Típus/Cikkszám mind üres lett),
                 # a régi teljes adatok a ToroltSor munkalapra kerülnek
@@ -1883,9 +1927,22 @@ class AutoRowSyncWorker(QThread):
                         row_data.get("P", "")
                     ))
 
+                utana = get_row_snapshot(code_a, cursor)
+                if elotte != utana:
+                    naplo_entries.append((code_a, elotte, utana))
+
             conn.commit()
             conn.close()
             print(f"[AutoRowSync] SQLite sikeresen frissítve ({len(self.dirty_data_list)} sor).")
+            for code_a, elotte, utana in naplo_entries:
+                if elotte is None:
+                    log_event(code_a, "FELVÉTEL (Excel Live)", "", None, utana)
+                elif _row_has_product_data(elotte) and not _row_has_product_data(utana):
+                    log_event(code_a, "TÖRLÉS (Excel Live: kiürítve)", describe_changes(elotte, utana), elotte, utana)
+                elif not _row_has_product_data(elotte) and _row_has_product_data(utana):
+                    log_event(code_a, "FELVÉTEL (Excel Live)", describe_changes(elotte, utana), elotte, utana)
+                else:
+                    log_event(code_a, "MÓDOSÍTÁS (Excel Live)", describe_changes(elotte, utana), elotte, utana)
 
         except Exception as e:
             print(f"[AutoRowSync] Helyi SQL hiba: {e}")
@@ -2162,6 +2219,7 @@ class CardUpdateWorker(QThread):
         start_time = time.perf_counter()
         try:
             self.process_log_signal.emit(f"⚙️ Kártya adatai és helyszíne frissítése az SQLite adatbázisban [{self.code}]...", "INFO")
+            elotte = get_row_snapshot(self.code)
             conn = get_db_connection()
             cursor = conn.cursor()
             cursor.execute("""
@@ -2172,7 +2230,9 @@ class CardUpdateWorker(QThread):
             conn.commit()
             conn.close()
 
-            log_event(self.code, "TERMÉK MÓDOSÍTÁSA", f"Márka: {self.marka}, Típus: {self.tipus}, Cikkszám: {self.cikkszam}, Páter: {self.pater_val}, Polc: {self.polc_val}, Hely: {self.hely_val}")
+            utana = get_row_snapshot(self.code)
+            if elotte != utana:
+                log_event(self.code, "MÓDOSÍTÁS (kártya)", describe_changes(elotte, utana), elotte, utana)
 
             # Felhő (VPS + Sheets) az outboxon át: ha nincs net, később automatikusan kimegy.
             # force: a kártyán szándékosan javítjuk a Márkát/Típust/Cikkszámot, ez nem R18-ütközés.
@@ -2267,12 +2327,14 @@ class DeleteWorker(QThread):
     finished_signal = pyqtSignal(str)
     process_log_signal = pyqtSignal(str, str)
 
-    def __init__(self, code):
+    def __init__(self, code, reason=""):
         super().__init__()
         self.code = code
+        self.reason = reason
 
     def run(self):
         try:
+            elotte = get_row_snapshot(self.code)
             # 0. Teljes adatok archiválása a ToroltSor munkalapra (törlés előtt!)
             archive_row_from_db(self.code, "Program: törlés / eladás")
 
@@ -2288,7 +2350,7 @@ class DeleteWorker(QThread):
             flush_outbox_async()
             self.process_log_signal.emit(f"✔ A(z) {self.code} törölve helyben (felhő: amint van internet)", "SUCCESS")
 
-            log_event(self.code, "TERMÉK TÖRLÉSE / ELADÁS", "A sor törölve lett az SQLite adatbázisból!")
+            log_event(self.code, "TÖRLÉS", self.reason or "A termék sora törölve", elotte, None)
             self.finished_signal.emit(f"🗑️ A(z) {self.code} termék sikeresen törölve!")
         except Exception as e:
             err_msg = f"❌ Törlési hiba: {e}"
@@ -2844,6 +2906,7 @@ class RaktarApp(QMainWindow):
             return
 
         try:
+            elotte = get_row_snapshot(r18_code)
             conn = get_db_connection()
             cursor = conn.cursor()
             cursor.execute("""
@@ -2853,6 +2916,7 @@ class RaktarApp(QMainWindow):
             """, (r18_code, r18_code))
             conn.commit()
             conn.close()
+            log_event(r18_code, "TÖRLÉS (adatok kiürítve, R18 megmarad)", "", elotte, get_row_snapshot(r18_code))
 
             # Felhő (VPS + Sheets) az outboxon át: ha nincs net, később automatikusan kimegy
             enqueue_row_from_db(r18_code, force=True)
@@ -3067,6 +3131,7 @@ class RaktarApp(QMainWindow):
 
         try:
             # 1. Helyi SQLite frissítése
+            elotte = get_row_snapshot(r18_code)
             conn = get_db_connection()
             cursor = conn.cursor()
             query = f"UPDATE termekek SET {target_col_letter} = ? WHERE A = ? OR B = ?"
@@ -3090,7 +3155,9 @@ class RaktarApp(QMainWindow):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             self.local_db_table.blockSignals(False)
 
-            log_event(r18_code, "TÁBLÁZAT CELLA MÓDOSÍTÁSA", f"Oszlop {target_col_letter} ➔ '{new_value}'")
+            utana = get_row_snapshot(r18_code)
+            if elotte != utana:
+                log_event(r18_code, "MÓDOSÍTÁS (Helyi adatbázis)", describe_changes(elotte, utana), elotte, utana)
             self.trigger_toast(f"💾 {r18_code} [{target_col_letter}] frissítve (Local + VPS)!")
 
             self.update_cards_only()
@@ -3554,7 +3621,9 @@ class RaktarApp(QMainWindow):
             self
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            log_event(last_code, "TERMÉK VISSZAVONÁSA", f"A(z) {last_code} adatai kiürítve.")
+            elotte = get_row_snapshot(last_code)
+            utana = dict(elotte, **{c: "" for c in "CDEFGHIJKLMNOP"}) if elotte else None
+            log_event(last_code, "TÖRLÉS (felvétel visszavonva)", f"A(z) {last_code} adatai kiürítve.", elotte, utana)
             if getattr(self, 'last_added_code', None) == last_code:
                 self.last_added_code = None
             
@@ -4033,8 +4102,8 @@ class RaktarApp(QMainWindow):
             self.active_workers.append(self.color_worker)
             self.color_worker.start()
 
-    def delete_item_action(self, code):
-        self.del_worker = DeleteWorker(code)
+    def delete_item_action(self, code, reason=""):
+        self.del_worker = DeleteWorker(code, reason)
         self.del_worker.process_log_signal.connect(self.handle_log_from_thread)
         self.del_worker.finished_signal.connect(self.on_delete_finished)
         self.del_worker.finished.connect(lambda: self.track_worker_finished(self.del_worker))
@@ -4430,6 +4499,7 @@ class RaktarApp(QMainWindow):
 
         # 2. HELYI SQLITE MENTÉS (Azonnali, tranzakciós)
         try:
+            elotte = get_row_snapshot(code_final)
             conn = get_db_connection()
             cursor = conn.cursor()
             cursor.execute("SELECT rowid FROM termekek WHERE A=? OR B=?", (code_final, code_final))
@@ -4462,7 +4532,7 @@ class RaktarApp(QMainWindow):
             threading.Thread(target=flush_sync_outbox, daemon=True).start()
             
             self.trigger_toast(f"⚡ {code_final} elmentve!")
-            log_event(code_final, "TERMÉK FELVÉTELE", f"Mentve: {c_marka} {d_tipus}")
+            log_event(code_final, "FELVÉTEL", f"Új termék: {c_marka} {d_tipus}", elotte, get_row_snapshot(code_final))
         except Exception as e:
             self.trigger_toast(f"❌ Mentési hiba: {e}")
             
@@ -4655,8 +4725,9 @@ class RaktarApp(QMainWindow):
             return
 
         cim = SALES_SHEETS[platform]["cim"]
-        log_event(code, "ELADÁS", f"{cim} | {v['darab']} db | Vevő: {v['vevo'] or '(később)'} | Ár: {v['ar'] or '(később)'} | "
-                                  f"Tracking: {v['tracking'] or '(később)'}")
+        sale_details = (f"{v['darab']} db | Vevő: {v['vevo'] or '(később)'} | Ár: {v['ar'] or '(később)'} | "
+                        f"Tracking: {v['tracking'] or '(később)'}")
+        elotte = get_row_snapshot(code) or {c: product.get(c, "") for c in NAPLO_COLS}
 
         # Készlet levonása
         stock_msg = ""
@@ -4674,9 +4745,13 @@ class RaktarApp(QMainWindow):
                     stock_msg = f" | Maradt: {remaining} db"
                 except Exception as e:
                     stock_msg = f" | ❌ Készlet hiba: {e}"
+                log_event(code, f"ELADÁS: {cim}", sale_details + stock_msg, elotte, get_row_snapshot(code))
             else:
-                self.delete_item_action(code)
+                log_event(code, f"ELADÁS: {cim}", sale_details + " | Elfogyott - törölve a raktárból", elotte, None)
+                self.delete_item_action(code, reason=f"Eladás ({cim}) után elfogyott")
                 stock_msg = " | Elfogyott - törölve a raktárból"
+        else:
+            log_event(code, f"ELADÁS: {cim}", sale_details + " | Készlet nem változott", elotte, elotte)
 
         sync_sales_async()
         self.trigger_toast(f"💰 {code} eladva ({cim}, {v['darab']} db){stock_msg}")
@@ -4865,9 +4940,13 @@ class RaktarApp(QMainWindow):
         allowed = {k for k, _ in SALES_COLUMNS} - {"eladas_id"}
         if key not in allowed:
             return
+        old_val = ""
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
+            cursor.execute(f"SELECT {key} FROM eladasok WHERE eladas_id = ?", (eladas_id,))
+            r = cursor.fetchone()
+            old_val = safe_str(r[0]) if r else ""
             cursor.execute(f"UPDATE eladasok SET {key} = ?, sheets_synced = 0, valtozat = valtozat + 1 WHERE eladas_id = ?",
                            (value, eladas_id))
             conn.commit()
@@ -4875,7 +4954,8 @@ class RaktarApp(QMainWindow):
         except Exception as e:
             self.trigger_toast(f"❌ Eladás módosítási hiba: {e}")
             return
-        log_event(eladas_id, "ELADÁS MÓDOSÍTÁSA", f"{key} = {value}")
+        label = dict(SALES_COLUMNS).get(key, key)
+        log_event(eladas_id, "ELADÁS MÓDOSÍTÁSA", f"{label}: {old_val or '∅'} → {value or '∅'}")
         # Gyors egymás utáni javításoknál csak egyszer töltünk fel (2 mp késleltetés)
         if not hasattr(self, "_sales_sync_debounce"):
             self._sales_sync_debounce = QTimer()
@@ -5275,19 +5355,36 @@ class RaktarApp(QMainWindow):
     # -------------------------------------------------------------------
     # TAB 7: NAPLÓ TAB (ADATBÁZIS ALAPÚ)
     # -------------------------------------------------------------------
+    # Napló fül eseménytípus-szűrői: (felirat, SQL feltétel az esemeny oszlopra)
+    LOG_FILTERS = [
+        ("Minden esemény", None),
+        ("➕ Felvétel", "esemeny LIKE '%FELVÉTEL%'"),
+        ("✏️ Módosítás", "(esemeny LIKE '%MÓDOSÍTÁS%' AND esemeny NOT LIKE 'ELADÁS%')"),
+        ("🗑️ Törlés / kiürítés", "(esemeny LIKE '%TÖRLÉS%' OR esemeny LIKE '%VISSZAVONÁS%') AND esemeny NOT LIKE 'ELADÁS%'"),
+        ("💰 Minden eladás", "esemeny LIKE 'ELADÁS: %'"),
+    ]
+
     def init_log_tab(self):
         layout = QVBoxLayout(self.tab_log)
         layout.setContentsMargins(10, 10, 10, 10)
 
         top_bar = QHBoxLayout()
-        lbl_title = QLabel("📜 Raktári események: felvétel, módosítás, törlés, eladás, nyomtatás")
+        lbl_title = QLabel("📜 Raktári események")
         lbl_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #29b6f6;")
         top_bar.addWidget(lbl_title)
+
+        self.db_log_type = QComboBox()
+        for label, _ in self.LOG_FILTERS:
+            self.db_log_type.addItem(label)
+        for pf, cfg in SALES_SHEETS.items():
+            self.db_log_type.addItem(f"💰 {cfg['cim']}")
+        self.db_log_type.currentIndexChanged.connect(self.refresh_db_log_view)
+        top_bar.addWidget(self.db_log_type)
         top_bar.addStretch()
 
         self.db_log_search = QLineEdit()
-        self.db_log_search.setPlaceholderText("🔍 R18-kód / esemény / szöveg")
-        self.db_log_search.setFixedWidth(260)
+        self.db_log_search.setPlaceholderText("🔍 R18-kód / szöveg (Enter)")
+        self.db_log_search.setFixedWidth(240)
         self.db_log_search.returnPressed.connect(self.refresh_db_log_view)
         top_bar.addWidget(self.db_log_search)
 
@@ -5299,80 +5396,170 @@ class RaktarApp(QMainWindow):
         self.db_log_date.dateChanged.connect(self.refresh_db_log_view)
         top_bar.addWidget(self.db_log_date)
 
-        btn_refresh_log = QPushButton("🔄 Napló Frissítése")
+        btn_refresh_log = QPushButton("🔄 Frissítés")
         btn_refresh_log.setStyleSheet("background-color: #00e676; color: black; font-weight: bold; padding: 6px 12px;")
-        btn_refresh_log.clicked.connect(
-            lambda: self.run_button_action(
-                btn_refresh_log, 
-                "🔄 Napló Frissítése", 
-                self.refresh_db_log_view
-            )
-        )
+        btn_refresh_log.clicked.connect(self.refresh_db_log_view)
         top_bar.addWidget(btn_refresh_log)
-
         layout.addLayout(top_bar)
 
-        self.db_log_text = QTextEdit()
-        self.db_log_text.setReadOnly(True)
-        self.db_log_text.setStyleSheet("""
-            QTextEdit {
-                background-color: #0d0d0d;
-                color: #ffffff;
-                font-family: 'Consolas', 'Courier New', monospace;
-                font-size: 14px;
-                border: 1px solid #333;
-                border-radius: 6px;
-                padding: 10px;
-            }
-        """)
-        layout.addWidget(self.db_log_text)
+        self.db_log_count_lbl = QLabel("")
+        self.db_log_count_lbl.setStyleSheet("color: #888;")
+        layout.addWidget(self.db_log_count_lbl)
 
+        table_style = """
+            QTableWidget { background-color: #21252b; alternate-background-color: #282c34; color: #e0e0e0;
+                           gridline-color: #3b4048; font-size: 13px; }
+            QHeaderView::section { background-color: #1b1e23; color: #61afef; font-weight: bold; padding: 6px; border: 1px solid #3b4048; }
+            QTableWidget::item:selected { background-color: #2f5f8f; color: #ffffff; }
+        """
+        from PyQt6.QtWidgets import QSplitter
+        splitter = QSplitter(Qt.Orientation.Vertical)
+
+        self.db_log_table = QTableWidget()
+        self.db_log_table.setColumnCount(7)
+        self.db_log_table.setHorizontalHeaderLabels(["Időpont", "Esemény", "R18-kód", "Márka", "Típus", "Cikkszám", "Mi változott / részletek"])
+        self.db_log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.db_log_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.db_log_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.db_log_table.setAlternatingRowColors(True)
+        self.db_log_table.verticalHeader().setVisible(False)
+        self.db_log_table.setStyleSheet(table_style)
+        for i, w in enumerate([140, 230, 95, 120, 200, 180]):
+            self.db_log_table.setColumnWidth(i, w)
+        self.db_log_table.horizontalHeader().setStretchLastSection(True)
+        self.db_log_table.currentCellChanged.connect(lambda r, *_: self.show_log_entry_detail(r))
+        splitter.addWidget(self.db_log_table)
+
+        detail_box = QWidget()
+        detail_lay = QVBoxLayout(detail_box)
+        detail_lay.setContentsMargins(0, 6, 0, 0)
+        self.db_log_detail_lbl = QLabel("Válassz ki egy eseményt a listában - itt látszik a termék teljes adata ELŐTTE és UTÁNA.")
+        self.db_log_detail_lbl.setStyleSheet("color: #29b6f6; font-weight: bold;")
+        self.db_log_detail_lbl.setWordWrap(True)
+        detail_lay.addWidget(self.db_log_detail_lbl)
+        self.db_log_detail = QTableWidget()
+        self.db_log_detail.setColumnCount(3)
+        self.db_log_detail.setHorizontalHeaderLabels(["Oszlop", "⬅️ ELŐTTE", "➡️ UTÁNA"])
+        self.db_log_detail.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.db_log_detail.verticalHeader().setVisible(False)
+        self.db_log_detail.setStyleSheet(table_style)
+        self.db_log_detail.setColumnWidth(0, 160)
+        self.db_log_detail.setColumnWidth(1, 380)
+        self.db_log_detail.horizontalHeader().setStretchLastSection(True)
+        detail_lay.addWidget(self.db_log_detail)
+        splitter.addWidget(detail_box)
+        splitter.setSizes([450, 330])
+        layout.addWidget(splitter)
+
+        self._db_log_rows = []
         self.refresh_db_log_view()
 
-    def refresh_db_log_view(self):
-        if not hasattr(self, 'db_log_text'):
-            return
+    @staticmethod
+    def _log_event_color(esemeny):
+        e = esemeny.upper()
+        if e.startswith("ELADÁS:"):
+            return "#ffd54f"
+        if "TÖRLÉS" in e or "VISSZAVONÁS" in e:
+            return "#ff5252"
+        if "FELVÉTEL" in e:
+            return "#00e676"
+        if "MÓDOSÍTÁS" in e:
+            return "#29b6f6"
+        return "#bbbbbb"
 
-        self.db_log_text.clear()
+    def refresh_db_log_view(self, *_):
+        if not hasattr(self, 'db_log_table'):
+            return
         try:
-            date_from = self.db_log_date.date().toString("yyyy-MM-dd") if hasattr(self, "db_log_date") else "1900-01-01"
-            search = self.db_log_search.text().strip() if hasattr(self, "db_log_search") else ""
-            sql = "SELECT * FROM naplo WHERE idopont >= ?"
+            date_from = self.db_log_date.date().toString("yyyy-MM-dd")
+            search = self.db_log_search.text().strip()
+            sql = "SELECT id, idopont, r18_kod, esemeny, reszletek, elotte, utana FROM naplo WHERE idopont >= ?"
             params = [f"{date_from} 00:00:00"]
+            idx = self.db_log_type.currentIndex()
+            if idx < len(self.LOG_FILTERS):
+                cond = self.LOG_FILTERS[idx][1]
+                if cond:
+                    sql += f" AND ({cond})"
+            else:
+                pf_cim = list(SALES_SHEETS.values())[idx - len(self.LOG_FILTERS)]["cim"]
+                sql += " AND esemeny = ?"
+                params.append(f"ELADÁS: {pf_cim}")
             if search:
-                sql += " AND (r18_kod LIKE ? OR esemeny LIKE ? OR reszletek LIKE ?)"
-                params += [f"%{search}%"] * 3
+                sql += " AND (r18_kod LIKE ? OR esemeny LIKE ? OR reszletek LIKE ? OR elotte LIKE ? OR utana LIKE ?)"
+                params += [f"%{search}%"] * 5
             sql += " ORDER BY id DESC LIMIT 1000"
             conn = get_db_connection()
-            df_log = pd.read_sql_query(sql, conn, params=params)
+            cursor = conn.cursor()
+            cursor.execute(sql, params)
+            rows = [dict(r) for r in cursor.fetchall()]
             conn.close()
-
-            if len(df_log) == 0:
-                self.db_log_text.setHtml(f"<span style='color: #888;'>Nincs rögzített esemény {date_from} óta"
-                                         f"{' erre a keresésre' if search else ''}.</span>")
-                return
-
-            html_content = ""
-            for _, r in df_log.iterrows():
-                idopont = safe_str(r.get('idopont'))
-                kod = safe_str(r.get('r18_kod'))
-                esemeny = safe_str(r.get('esemeny')).upper()
-                reszletek = safe_str(r.get('reszletek'))
-
-                color = "#00e676"
-                if "TÖRLÉS" in esemeny or "ELADÁS" in esemeny:
-                    color = "#ff5252"
-                elif "VISSZAVONÁS" in esemeny:
-                    color = "#ff9800"
-                elif "MÓDOSÍTÁS" in esemeny or "FRISSÍTÉS" in esemeny:
-                    color = "#29b6f6"
-
-                html_content += f"<p style='margin: 3px 0;'><span style='color: #888;'>[{idopont}]</span> <b style='color: {color};'>[{esemeny}]</b> <b style='color: #fff;'>{kod}</b> | <span style='color: #ccc;'>{reszletek}</span></p>"
-
-            more = " (a legutóbbi 1000 látszik - szűkítsd a dátumot / keresést)" if len(df_log) >= 1000 else ""
-            self.db_log_text.setHtml(f"<p style='color:#888;'>{len(df_log)} esemény {date_from} óta{more}</p>" + html_content)
         except Exception as e:
-            self.db_log_text.setHtml(f"<span style='color: #ff5252;'>Hiba a napló betöltésekor: {e}</span>")
+            self.db_log_count_lbl.setText(f"❌ Hiba a napló betöltésekor: {e}")
+            return
+
+        self._db_log_rows = rows
+        self.db_log_table.setUpdatesEnabled(False)
+        self.db_log_table.setRowCount(len(rows))
+        for ri, r in enumerate(rows):
+            elotte = json.loads(r["elotte"]) if r.get("elotte") else None
+            utana = json.loads(r["utana"]) if r.get("utana") else None
+            prod = utana or elotte or {}
+            esemeny = safe_str(r.get("esemeny"))
+            valtozas = safe_str(r.get("reszletek"))
+            if elotte and utana and not esemeny.upper().startswith("ELADÁS"):
+                valtozas = describe_changes(elotte, utana) or valtozas
+            vals = [safe_str(r.get("idopont")), esemeny, safe_str(r.get("r18_kod")),
+                    prod.get("C", ""), prod.get("D", ""), prod.get("E", ""), valtozas]
+            color = QColor(self._log_event_color(esemeny))
+            for ci, v in enumerate(vals):
+                item = QTableWidgetItem(v)
+                if ci == 1:
+                    item.setForeground(color)
+                    f = item.font(); f.setBold(True); item.setFont(f)
+                if ci == 6:
+                    item.setToolTip(v)
+                self.db_log_table.setItem(ri, ci, item)
+        self.db_log_table.setUpdatesEnabled(True)
+        more = " - csak a legutóbbi 1000 látszik, szűkítsd a dátumot / keresést" if len(rows) >= 1000 else ""
+        self.db_log_count_lbl.setText(f"{len(rows)} esemény {date_from} óta{more}")
+        self.db_log_detail.setRowCount(0)
+        if rows:
+            self.db_log_table.selectRow(0)
+            self.show_log_entry_detail(0)
+
+    def show_log_entry_detail(self, row):
+        """Az alsó részen: a kiválasztott esemény előtte / utána teljes termékadata, a változások kiemelve."""
+        if row < 0 or row >= len(self._db_log_rows):
+            return
+        r = self._db_log_rows[row]
+        elotte = json.loads(r["elotte"]) if r.get("elotte") else None
+        utana = json.loads(r["utana"]) if r.get("utana") else None
+        esemeny = safe_str(r.get("esemeny"))
+        head = f"{safe_str(r.get('idopont'))}  |  {esemeny}  |  {safe_str(r.get('r18_kod'))}"
+        if r.get("reszletek"):
+            head += f"  |  {safe_str(r.get('reszletek'))}"
+        if elotte is None and utana is None:
+            head += "  —  (ehhez a régebbi bejegyzéshez nincs előtte/utána adat)"
+        self.db_log_detail_lbl.setText(head)
+
+        self.db_log_detail.setRowCount(len(NAPLO_COLS))
+        changed_bg, new_bg, gone_bg = QColor("#5c4a00"), QColor("#1b5e20"), QColor("#7f1d1d")
+        for i, c in enumerate(NAPLO_COLS):
+            ov = (elotte or {}).get(c, "") if elotte is not None else ""
+            nv = (utana or {}).get(c, "") if utana is not None else ""
+            items = [QTableWidgetItem(f"{c}: {COLUMN_LABELS.get(c, c)}"),
+                     QTableWidgetItem(ov if elotte is not None else "—"),
+                     QTableWidgetItem(nv if utana is not None else ("— (törölve)" if elotte is not None else "—"))]
+            if elotte is not None and utana is None:
+                items[2].setBackground(gone_bg)
+            elif elotte is None and utana is not None:
+                items[2].setBackground(new_bg)
+            elif elotte is not None and str(ov).strip() != str(nv).strip():
+                for it in items:
+                    it.setBackground(changed_bg)
+                f = items[0].font(); f.setBold(True); items[0].setFont(f)
+            for ci, it in enumerate(items):
+                self.db_log_detail.setItem(i, ci, it)
 
     # -------------------------------------------------------------------
     # TAB 8: FOLYAMAT ÉS SZINKRON NAPLÓ TAB
