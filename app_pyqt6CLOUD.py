@@ -911,7 +911,7 @@ def get_best_label_text(tipus_text="", cikkszam_text=""):
 # -------------------------------------------------------------------
 # CÍMKE ALSÓ SORA: a D (Típus) / E (Cikkszám) mezőkből a lényeges alkatrészszám kinyerése
 # -------------------------------------------------------------------
-LABEL_SUBTEXT_MAX = 30          # ennyi karakter fér el (kisebb betűvel) a címke alján
+LABEL_SUBTEXT_MAX = 19          # LEGFELJEBB ennyi karakter kerül a címke alsó sorába (minden címkén)
 _LABEL_UNITS = {"V", "A", "MA", "KA", "W", "KW", "VA", "VAC", "VDC", "AC", "DC", "HZ", "KHZ",
                 "BAR", "MM", "CM", "M", "KG", "G", "NM", "RPM", "S", "MS", "UF", "OHM"}
 # Ezek után álló szám nem alkatrészszám (szabvány), ill. ezek nem előtagjai az alkatrészszámnak
@@ -972,9 +972,18 @@ def _join_fitting(parts):
         if out and len(" ".join(out + [p])) > LABEL_SUBTEXT_MAX:
             break
         out.append(p)
-    return " ".join(out)[:40]
+    return " ".join(out)
 
 def get_label_subtext(d_val, e_val):
+    """A címke alsó sora - LEGFELJEBB LABEL_SUBTEXT_MAX (19) karakter. Minden címkegenerálás
+    (ZPL, PNG, előnézetek) ezt használja. Hosszú kötőjeles cikkszámnál a 19. karakter után levágja,
+    a végén maradó kötőjelet / perjelet / szóközt pedig eltávolítja (pl. 'A06B-6087-H130-XYZ-' -> 'A06B-6087-H130-XYZ')."""
+    text = _label_subtext_full(d_val, e_val)
+    if len(text) > LABEL_SUBTEXT_MAX:
+        text = text[:LABEL_SUBTEXT_MAX].rstrip(" -/.,_+")
+    return text
+
+def _label_subtext_full(d_val, e_val):
     """A címke alsó sorába (az R18-kód alá) kerülő szöveg a D (Típus) és E (Cikkszám) mezőből.
     Sorrend: 1) kötőjeles alkatrészszámok (előbb E, aztán D), 2) ha a mező rövid és van benne
     szám: a teljes mező, 3) betű+szám vegyes részek, 4) legalább 4 jegyű számok, 5) a mező eleje."""
