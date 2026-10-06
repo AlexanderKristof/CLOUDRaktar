@@ -865,12 +865,18 @@ def _send_outbox_to_vps(op, row_data):
         return "ok"
     if res.status_code == 409 and op == "upsert":
         details = format_row_for_log(row_data)
-        server_msg = ""
+        server_msg, existing_dict = "", None
         try:
-            server_msg = res.json().get("message", "")
+            js = res.json()
+            server_msg = js.get("message", "")
+            existing_dict = js.get("existing")
         except Exception:
             pass
-        existing = _server_conflict_existing(server_msg)
+        if isinstance(existing_dict, dict):
+            existing = " ".join(str(existing_dict.get(k) or "").strip() for k in ("C", "D", "E")
+                                if str(existing_dict.get(k) or "").strip())
+        else:
+            existing = _server_conflict_existing(server_msg)
         new_row = {c: str(row_data.get(c, "")) for c in ROW_COLS}
 
         # 1) A szerveren csak egy FÉLIG kitöltött / üres sor van ezzel az R18-számmal (pl. a Márka már
@@ -3024,6 +3030,7 @@ def _normalize_excel_row(row):
 
 class RaktarApp(QMainWindow):
     excel_rows_signal = pyqtSignal(object)  # háttérszálon beolvasott Excel Live sorok -> fő szál
+    server_items_signal = pyqtSignal(object)  # a VPS összes sora (Szerver adatbázis fül) -> fő szál
     server_status_signal = pyqtSignal(bool, str)
     counter_update_signal = pyqtSignal(str, int, list)
     process_log_signal = pyqtSignal(str)
@@ -3139,6 +3146,7 @@ class RaktarApp(QMainWindow):
         self.tab_local_db = QWidget()
         self.tab_pda = QWidget()
         self.tab_sold = QWidget()
+        self.tab_server = QWidget()
         self.tab_excel = QWidget()
         self.tab_single = QWidget()
         self.tab_map = QWidget()
@@ -3151,6 +3159,7 @@ class RaktarApp(QMainWindow):
         self.tabs.addTab(self.tab_local_db, "💾 Helyi Adatbázis (Élő)")
         self.tabs.addTab(self.tab_pda, "📱 PDA / Eladás")
         self.tabs.addTab(self.tab_sold, "💰 Eladottak")
+        self.tabs.addTab(self.tab_server, "🖥️ Szerver adatbázis")
         self.tabs.addTab(self.tab_excel, "📊 Excel Kezelés")
         self.tabs.addTab(self.tab_single, "🖨️ Egyedi Címke")
         self.tabs.addTab(self.tab_map, "🗺️ Raktártérkép")
@@ -3163,6 +3172,7 @@ class RaktarApp(QMainWindow):
         self.init_local_db_tab()
         self.init_pda_tab()
         self.init_sold_tab()
+        self.init_server_tab()
         self.init_excel_tab()
         self.init_single_tab()
         self.init_map_tab()
@@ -5330,6 +5340,308 @@ class RaktarApp(QMainWindow):
         self.refresh_sold_table()
         self.trigger_toast("🗑️ Eladás törölve")
 
+    # -------------------------------------------------------------------
+    # 🖥️ SZERVER ADATBÁZIS FÜL: a VPS-en lévő adatbázis megtekintése, javítása, törlése
+    # -------------------------------------------------------------------
+    SERVER_STATUS_COLS = ["Állapot"] + [f"{c}: {COLUMN_LABELS.get(c, c)}" for c in "ABCDEFGHIJKLMNOP"] + ["Verzió"]
+
+    def init_server_tab(self):
+        layout = QVBoxLayout(self.tab_server)
+        bar = QHBoxLayout()
+        title = QLabel("🖥️ VPS szerver adatbázis")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #29b6f6;")
+        bar.addWidget(title)
+
+        self.server_search = QLineEdit()
+        self.server_search.setPlaceholderText("🔍 Keresés (R18, márka, típus, cikkszám...) - Enter")
+        self.server_search.returnPressed.connect(self.render_server_table)
+        bar.addWidget(self.server_search, stretch=2)
+
+        self.server_filter = QComboBox()
+        for label in ["Minden sor", "⚠️ Csak ahol eltér a helyi géptől", "⏳ Feltöltésre vár (még nincs fent)",
+                      "❌ Csak helyben van, a szerveren nincs", "🕘 Legutóbb feltöltött 200"]:
+            self.server_filter.addItem(label)
+        self.server_filter.currentIndexChanged.connect(self.render_server_table)
+        bar.addWidget(self.server_filter, stretch=1)
+
+        btn_load = QPushButton("🔄 Betöltés a szerverről")
+        btn_load.setStyleSheet("background-color: #00e676; color: black; font-weight: bold; padding: 6px 12px;")
+        btn_load.clicked.connect(self.load_server_items)
+        bar.addWidget(btn_load)
+
+        btn_del = QPushButton("🗑️ Kijelölt törlése")
+        btn_del.setStyleSheet("background-color: #ff5252; color: white; font-weight: bold; padding: 6px 12px;")
+        btn_del.setToolTip("A kijelölt termék(ek) törlése a szerverről, a Google táblázatból és a helyi gépről is (megerősítéssel)")
+        btn_del.clicked.connect(self.delete_selected_server_items)
+        bar.addWidget(btn_del)
+
+        btn_upload = QPushButton("⬆️ Helyi adat feltöltése")
+        btn_upload.setToolTip("A kijelölt sor(ok) HELYI (ezen a gépen lévő) adatát felküldi a szerverre és a Google táblázatba")
+        btn_upload.clicked.connect(self.upload_selected_local_to_server)
+        bar.addWidget(btn_upload)
+        layout.addLayout(bar)
+
+        self.server_status_lbl = QLabel("Nyomd meg a 🔄 Betöltés gombot. Dupla kattintással a cella szerkeszthető "
+                                        "(a mentés a szerverre ÉS a Google táblázatba is kimegy).")
+        self.server_status_lbl.setStyleSheet("color: #aaaaaa;")
+        self.server_status_lbl.setWordWrap(True)
+        layout.addWidget(self.server_status_lbl)
+
+        self.server_table = QTableWidget()
+        self.server_table.setColumnCount(len(self.SERVER_STATUS_COLS))
+        self.server_table.setHorizontalHeaderLabels(self.SERVER_STATUS_COLS)
+        self.server_table.setAlternatingRowColors(True)
+        self.server_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed)
+        self.server_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.server_table.setStyleSheet("""
+            QTableWidget { background-color: #21252b; alternate-background-color: #282c34; color: #e0e0e0;
+                           gridline-color: #3b4048; font-size: 13px; }
+            QHeaderView::section { background-color: #1b1e23; color: #61afef; font-weight: bold; padding: 6px; border: 1px solid #3b4048; }
+            QTableWidget::item:selected { background-color: #2f5f8f; color: #ffffff; }
+        """)
+        widths = [190, 95, 95, 110, 190, 180, 45, 85, 60, 70, 40, 60, 110, 55, 100, 120, 100, 60]
+        for i, w in enumerate(widths):
+            self.server_table.setColumnWidth(i, w)
+        self.server_table.itemChanged.connect(self.on_server_cell_edited)
+        layout.addWidget(self.server_table)
+
+        self._server_items = []
+        self._server_deleted = []
+        self.server_items_signal.connect(self._on_server_items_loaded)
+
+    def load_server_items(self):
+        if getattr(self, "_server_loading", False):
+            return
+        self._server_loading = True
+        self.server_status_lbl.setText("⏳ Betöltés a VPS szerverről...")
+
+        def job():
+            try:
+                res = requests.get(f"{VPS_URL}/items", timeout=30)
+                if res.status_code == 404:
+                    self.server_items_signal.emit({"error": "A szerveren még a RÉGI server_api.py fut - töltsd fel az újat "
+                                                            "(vps/server_api.py) és indítsd újra a szerver szolgáltatást."})
+                    return
+                js = res.json()
+                if js.get("status") != "ok":
+                    self.server_items_signal.emit({"error": js.get("message", "Ismeretlen hiba")})
+                    return
+                self.server_items_signal.emit(js)
+            except Exception as e:
+                self.server_items_signal.emit({"error": f"A szerver nem érhető el: {e}"})
+        threading.Thread(target=job, daemon=True).start()
+
+    def _on_server_items_loaded(self, js):
+        self._server_loading = False
+        if "error" in js:
+            self.server_status_lbl.setText(f"❌ {js['error']}")
+            self.append_process_log(f"❌ Szerver adatbázis fül: {js['error']}", "#ff5252")
+            return
+        self._server_items = js.get("items", [])
+        self._server_deleted = js.get("torolt", [])
+        self._server_loaded_at = datetime.datetime.now().strftime("%H:%M:%S")
+        self.render_server_table()
+
+    def _server_rows_with_status(self):
+        """Összeveti a szerver sorait a helyi adatbázissal: (állapot, szín, adat-dict, verzió) lista."""
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT {', '.join(ROW_COLS)} FROM termekek")
+            local = {}
+            for r in cursor.fetchall():
+                d = {c: safe_str(r[c]) for c in ROW_COLS}
+                if d["A"]:
+                    local[d["A"].strip().upper()] = d
+            pending = get_pending_outbox_codes(cursor)
+            conn.close()
+        except Exception:
+            local, pending = {}, set()
+
+        out, seen = [], set()
+        for it in self._server_items:
+            code = str(it.get("A", "")).strip().upper()
+            seen.add(code)
+            srv = {c: safe_str(it.get(c)) for c in ROW_COLS}
+            loc = local.get(code)
+            if code in pending:
+                st, col = "⏳ Helyi módosítás feltöltésre vár", "#ffb74d"
+            elif loc is None:
+                st, col = "➕ Csak a szerveren van", "#29b6f6"
+            elif all(str(loc[c]).strip() == str(srv[c]).strip() for c in ROW_COLS):
+                st, col = "✅ Egyezik a helyivel", "#00e676"
+            else:
+                diff = [c for c in ROW_COLS if str(loc[c]).strip() != str(srv[c]).strip()]
+                st, col = f"⚠️ Eltér a helyitől: {', '.join(diff)}", "#ff9800"
+            out.append((st, col, srv, int(it.get("verzio") or 0), loc))
+        for code, loc in local.items():
+            if code not in seen and code.startswith("R18-") and _row_has_product_data(loc):
+                st = "⏳ Feltöltésre vár" if code in pending else "❌ Csak helyben van, a szerveren NINCS"
+                out.append((st, "#ff5252", loc, -1, loc))
+        return out
+
+    def render_server_table(self, *_):
+        if not hasattr(self, "server_table"):
+            return
+        if not self._server_items:
+            return
+        rows = self._server_rows_with_status()
+        f = self.server_filter.currentIndex()
+        if f == 1:
+            rows = [r for r in rows if r[0].startswith("⚠️")]
+        elif f == 2:
+            rows = [r for r in rows if r[0].startswith("⏳")]
+        elif f == 3:
+            rows = [r for r in rows if r[0].startswith("❌")]
+        elif f == 4:
+            rows = sorted([r for r in rows if r[3] >= 0], key=lambda r: -r[3])[:200]
+        q = self.server_search.text().strip().lower()
+        if q:
+            rows = [r for r in rows if q in " ".join(r[2].values()).lower() or q in r[0].lower()]
+        if f != 4:
+            def num(r):
+                m = re.search(r"(\d+)", r[2].get("A", ""))
+                return int(m.group(1)) if m else 0
+            rows.sort(key=num, reverse=True)
+
+        counts = {}
+        for r in self._server_rows_with_status():
+            k = r[0].split(" ")[0]
+            counts[k] = counts.get(k, 0) + 1
+        self.server_status_lbl.setText(
+            f"🖥️ Szerveren: {len(self._server_items)} sor (betöltve {getattr(self, '_server_loaded_at', '')})  |  "
+            f"✅ egyezik: {counts.get('✅', 0)}  |  ⚠️ eltér: {counts.get('⚠️', 0)}  |  ⏳ feltöltésre vár: {counts.get('⏳', 0)}  |  "
+            f"➕ csak szerveren: {counts.get('➕', 0)}  |  ❌ csak helyben: {counts.get('❌', 0)}  |  "
+            f"Megjelenítve: {len(rows)}  —  Dupla kattintás = szerkesztés")
+
+        self._server_view_rows = rows
+        t = self.server_table
+        t.blockSignals(True)
+        t.setUpdatesEnabled(False)
+        t.setRowCount(len(rows))
+        for ri, (st, col, data, ver, loc) in enumerate(rows):
+            it = QTableWidgetItem(st)
+            it.setForeground(QColor(col))
+            it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            if loc and st.startswith("⚠️"):
+                it.setToolTip("Helyi (ezen a gépen):\n" + format_row_for_log(loc) + "\n\nSzerveren:\n" + format_row_for_log(data))
+            t.setItem(ri, 0, it)
+            for ci, c in enumerate(ROW_COLS):
+                cell = QTableWidgetItem(data.get(c, ""))
+                if c in ("A", "B") or ver < 0:
+                    cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if loc and str(loc.get(c, "")).strip() != str(data.get(c, "")).strip() and ver >= 0:
+                    cell.setBackground(QColor("#5c4a00"))
+                    cell.setToolTip(f"Helyi érték: {loc.get(c, '') or '∅'}")
+                t.setItem(ri, ci + 1, cell)
+            vi = QTableWidgetItem(str(ver) if ver >= 0 else "-")
+            vi.setFlags(vi.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            t.setItem(ri, len(ROW_COLS) + 1, vi)
+        t.setUpdatesEnabled(True)
+        t.blockSignals(False)
+
+    def _server_row_data(self, ri):
+        return dict(self._server_view_rows[ri][2]) if 0 <= ri < len(getattr(self, "_server_view_rows", [])) else None
+
+    def on_server_cell_edited(self, item):
+        """Cella javítása a Szerver adatbázis fülön: a teljes sor a megszokott úton megy ki
+        (helyi adatbázis + VPS + Google Sheets), így minden hely egyforma marad."""
+        ri, ci = item.row(), item.column()
+        if ci < 1 or ci > len(ROW_COLS):
+            return
+        data = self._server_row_data(ri)
+        if not data:
+            return
+        col = ROW_COLS[ci - 1]
+        new_val = item.text().strip()
+        old_val = data.get(col, "")
+        if new_val == old_val:
+            return
+        code = data["A"].strip().upper()
+        elotte = get_row_snapshot(code)
+        data[col] = new_val
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(f"UPDATE termekek SET {', '.join(c + '=?' for c in ROW_COLS)} WHERE UPPER(TRIM(A)) = ?",
+                           (*[data[c] for c in ROW_COLS], code))
+            if cursor.rowcount == 0:
+                cursor.execute(f"INSERT INTO termekek ({', '.join(ROW_COLS)}, szin) VALUES ({', '.join('?' * len(ROW_COLS))}, 'FEHÉR')",
+                               [data[c] for c in ROW_COLS])
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            self.trigger_toast(f"❌ Mentési hiba: {e}")
+            return
+        payload = dict(data)
+        payload["_force"] = True
+        enqueue_outbox(payload)
+        flush_outbox_async()
+        log_event(code, "MÓDOSÍTÁS (Szerver adatbázis fül)", f"{col} ({COLUMN_LABELS.get(col, col)}): {old_val or '∅'} → {new_val or '∅'}",
+                  elotte, get_row_snapshot(code), f"🖥️ Szerver adatbázis fül - cella szerkesztés ({col} oszlop)")
+        self._server_view_rows[ri] = ("⏳ Helyi módosítás feltöltésre vár", "#ffb74d", data, self._server_view_rows[ri][3], data)
+        st = self.server_table.item(ri, 0)
+        if st:
+            self.server_table.blockSignals(True)
+            st.setText("⏳ Mentés folyamatban (szerver + Google Sheets)...")
+            st.setForeground(QColor("#ffb74d"))
+            self.server_table.blockSignals(False)
+        self.trigger_toast(f"💾 {code} [{col}] mentve - szerver + Google Sheets")
+        if hasattr(self, "silent_update_excel_table"):
+            self.silent_update_excel_table()
+
+    def _selected_server_rows(self):
+        rows = sorted({i.row() for i in self.server_table.selectedIndexes()})
+        return [(r, self._server_row_data(r)) for r in rows if self._server_row_data(r)]
+
+    def delete_selected_server_items(self):
+        sel = self._selected_server_rows()
+        if not sel:
+            self.trigger_toast("⚠️ Jelölj ki legalább egy sort!")
+            return
+        lista = "\n".join(f"• {d['A']}  |  {d.get('C') or '-'}  |  {d.get('D') or '-'}  |  {d.get('E') or '-'}" for _, d in sel[:12])
+        if len(sel) > 12:
+            lista += f"\n... és még {len(sel) - 12} sor"
+        dlg = SilentConfirmDialog("🗑️ Törlés a szerverről",
+                                  f"Biztosan TÖRLÖD ezt a {len(sel)} terméket?\n\nTörlődik a VPS szerverről, a Google táblázatból "
+                                  f"és erről a gépről is (a másik gépről is). A teljes adatuk a Naplóba és a ToroltSor lapra kerül.\n\n{lista}",
+                                  self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        for _, d in sel:
+            code = d["A"].strip().upper()
+            if not get_row_snapshot(code):
+                # Helyben nincs meg: a naplóhoz / archívumhoz a szerver adatát használjuk
+                archive_deleted_row(d, "Szerver adatbázis fül: törlés")
+                log_event(code, "TÖRLÉS", "Törölve a szerverről (helyben nem volt meg)", d, None,
+                          "🖥️ Szerver adatbázis fül - 🗑️ Kijelölt törlése gomb")
+                enqueue_delete(code)
+            else:
+                DeleteWorker(code, "Törölve a Szerver adatbázis fülön",
+                             "🖥️ Szerver adatbázis fül - 🗑️ Kijelölt törlése gomb").run()
+        flush_outbox_async()
+        codes = {d["A"].strip().upper() for _, d in sel}
+        self._server_items = [it for it in self._server_items if str(it.get("A", "")).strip().upper() not in codes]
+        self.render_server_table()
+        self.trigger_toast(f"🗑️ {len(sel)} termék törölve (szerver + Google Sheets + helyi)")
+        if hasattr(self, "silent_update_excel_table"):
+            self.silent_update_excel_table()
+
+    def upload_selected_local_to_server(self):
+        sel = self._selected_server_rows()
+        done = 0
+        for _, d in sel:
+            code = d["A"].strip().upper()
+            if enqueue_row_from_db(code, force=True):
+                done += 1
+                log_event(code, "MÓDOSÍTÁS (helyi adat feltöltve a szerverre)", "", None, get_row_snapshot(code),
+                          "🖥️ Szerver adatbázis fül - ⬆️ Helyi adat feltöltése gomb")
+        if done:
+            flush_outbox_async()
+            self.trigger_toast(f"⬆️ {done} sor helyi adata feltöltésre küldve (szerver + Google Sheets)")
+        else:
+            self.trigger_toast("⚠️ A kijelölt sor(ok) nincsenek meg ezen a gépen.")
+
     def execute_pda_search(self):
         query_text = self.pda_input.text().strip()
         if not query_text: return
@@ -6195,6 +6507,8 @@ class RaktarApp(QMainWindow):
                 self.silent_update_excel_table()
             elif w is getattr(self, "tab_sold", None):
                 self.refresh_sold_table()
+            elif w is getattr(self, "tab_server", None) and not getattr(self, "_server_items", None):
+                self.load_server_items()
         QTimer.singleShot(30, later)
 
     def refresh_local_db_table_view(self):
