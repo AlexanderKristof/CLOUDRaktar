@@ -476,11 +476,15 @@ EVENT_EXPLANATIONS = [
     ("FELVÉTEL", "Új termék adatai kerültek egy R18-kód alá."),
     ("MÓDOSÍTÁS (GOOGLE SHEETS", "Valaki KÖZVETLENÜL a Google táblázatban írta át, a program a letöltéskor átvette."),
     ("MÓDOSÍTÁS (MÁSIK GÉP", "Egy MÁSIK gépen módosították, és a VPS-en keresztül ide is átjött."),
+    ("MÓDOSÍTÁS (FÉLIG MENTETT", "Az automatikus mentés korábban csak egy részét (pl. csak a Márkát) küldte fel a szerverre. "
+                                 "Ez NEM ütközés: a program a teljes adattal magától kiegészítette."),
+    ("MÓDOSÍTÁS (R18-ÜTKÖZÉS", "Ezen az R18-számon a szerveren MÁSIK termék volt; az ütközés-ablakban a felülírást "
+                               "választották, így most az új adat van fent. A régi adat a Részleteknél látszik."),
     ("MÓDOSÍTÁS", "A termék adatai megváltoztak. Az alsó részen sárga háttérrel látszik, mi változott."),
     ("TÖRÖLT SOR ARCHIVÁLVA", "A törölt termék teljes adata felkerült a ToroltSor munkalapra (biztonsági mentés)."),
     ("R18 ÜTKÖZÉS", "Ezt a terméket NEM sikerült elmenteni a szerverre, mert ott ugyanez az R18-szám már egy MÁSIK "
-                    "termékhez tartozik (pl. két gépen egyszerre ugyanazt a számot használták). Teendő: vedd fel "
-                    "a terméket egy új R18-szám alatt - a teljes adatai a részleteknél vannak."),
+                    "termékhez tartozik. A program ablakban megkérdezi, felülírja-e az új adattal. Ha nem írtad "
+                    "felül, vedd fel egy új R18-szám alatt - a teljes adatai az UTÁNA oszlopban vannak."),
     ("FIGYELMEZTETÉS: SORKONFLIKTUS", "Miközben te ezt a sort szerkesztetted, valaki más a Google táblázatban is "
                                       "átírta. Ellenőrizd, hogy a végleges adat a jó-e (ELŐTTE / UTÁNA)."),
     ("CÍMKE NYOMTATÁS", "Címkét nyomtattak ehhez a termékhez."),
@@ -819,6 +823,26 @@ def flush_sync_outbox():
     with _flush_lock:
         return _flush_sync_outbox_locked()
 
+def _server_conflict_existing(server_msg):
+    """A szerver 409-es üzenetéből: '... foglalt egy MASIK termekkel (REXROTH ).' -> 'REXROTH'
+    (a szerveren most lévő Márka / Típus / Cikkszám)."""
+    m = re.findall(r"\(([^()]*)\)", str(server_msg or ""))
+    return re.sub(r"\s+", " ", m[-1]).strip() if m else None
+
+def _is_fill_in_of(server_existing, row_data):
+    """Igaz, ha a szerveren lévő sor csak egy FÉLIG kitöltött (vagy üres) változata a mostaninak:
+    a szerveren lévő Márka / Típus / Cikkszám mind üres vagy egyezik a most mentendővel.
+    (Tipikus eset: az automatikus mentés már akkor felküldte a sort, amikor még csak a Márka volt beírva.)"""
+    if server_existing is None:
+        return False
+    target = server_existing.upper()
+    vals = [re.sub(r"\s+", " ", str(row_data.get(c, "") or "")).strip().upper() for c in ("C", "D", "E")]
+    for mask in range(8):
+        cand = " ".join(v for i, v in enumerate(vals) if mask & (1 << i) and v)
+        if cand == target:
+            return True
+    return False
+
 def _send_outbox_to_vps(op, row_data):
     """Visszaad: 'ok', 'conflict' vagy 'retry' (nincs net / szerverhiba -> később újra)."""
     code_a = str(row_data.get("A", "")).strip().upper()
@@ -846,8 +870,29 @@ def _send_outbox_to_vps(op, row_data):
             server_msg = res.json().get("message", "")
         except Exception:
             pass
-        log_event(code_a, "R18 ÜTKÖZÉS - NEM MENTVE", f"{server_msg} | Teljes felvitt adatok: {details}",
-                  None, {c: str(row_data.get(c, "")) for c in ROW_COLS}, "Szerver (VPS) elutasította")
+        existing = _server_conflict_existing(server_msg)
+        new_row = {c: str(row_data.get(c, "")) for c in ROW_COLS}
+
+        # 1) A szerveren csak egy FÉLIG kitöltött / üres sor van ezzel az R18-számmal (pl. a Márka már
+        #    felment, a Típus / Cikkszám még nem): ez nem másik termék -> automatikusan kiegészítjük.
+        if _is_fill_in_of(existing, row_data):
+            try:
+                body = {k: v for k, v in row_data.items() if not k.startswith("_")}
+                body["force"] = True
+                res2 = requests.post(f"{VPS_URL}/update_item", json=body, timeout=3)
+            except Exception:
+                return "retry"
+            if res2.status_code == 200:
+                log_event(code_a, "MÓDOSÍTÁS (félig mentett sor kiegészítve)",
+                          f"A szerveren eddig csak ez volt: '{existing or '(üres)'}' - most a teljes adat felment.",
+                          None, new_row, "Automatikus: szerver (VPS) - nem ütközés, csak kiegészítés")
+                return "ok"
+            return "retry"
+
+        # 2) Valódi ütközés: másik termék van ott -> a felhasználó dönt (felülírás / kihagyás)
+        row_data["_server_existing"] = existing or server_msg
+        log_event(code_a, "R18 ÜTKÖZÉS - NEM MENTVE", f"A szerveren most: '{existing or server_msg}' | Új (nem mentett): {details}",
+                  None, new_row, "Szerver (VPS) elutasította - döntésre vár (felülírás / kihagyás)")
         return "conflict"
     return "retry"
 
@@ -1713,6 +1758,66 @@ class SaleDialog(QDialog):
             "reduce_stock": self.chk_stock.isChecked(),
             "datum": self.datum,
         }
+
+
+class ConflictDialog(QDialog):
+    """R18-ütközés: a szerveren ugyanazzal az R18-számmal MÁSIK termék van. Egymás mellett mutatja a
+    RÉGI (szerveren lévő) és az ÚJ adatot; a bejelölt sorokat felülírja az újjal."""
+    def __init__(self, conflicts, parent=None):
+        super().__init__(parent)
+        self.conflicts = conflicts
+        self.setWindowTitle("⚠️ R18-szám ütközés - felülírod?")
+        self.resize(1000, 420)
+        self.setStyleSheet("QDialog { background-color: #121212; color: white; } QLabel { color: white; }")
+        lay = QVBoxLayout(self)
+        info = QLabel(
+            "<b>Ezekkel az R18-számokkal a szerveren már MÁSIK termék van, ezért NEM lettek elmentve.</b><br>"
+            "Pipáld be, amelyiket <b>felül szeretnéd írni az új adattal</b>. A régi adat a 📜 Naplóban megmarad "
+            "(ELŐTTE / UTÁNA). Ami nincs bepipálva, az nem mentődik - azt egy új R18-szám alatt vedd fel.")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+
+        self.table = QTableWidget(len(conflicts), 4)
+        self.table.setHorizontalHeaderLabels(["Felülírás?", "R18-kód", "⬅️ RÉGI (most a szerveren)", "➡️ ÚJ (amit beírtál)"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setStyleSheet("QTableWidget { background-color: #21252b; color: #e0e0e0; gridline-color: #3b4048; }"
+                                 "QHeaderView::section { background-color: #1b1e23; color: #61afef; font-weight: bold; padding: 5px; }")
+        self.checks = []
+        for i, c in enumerate(conflicts):
+            chk = QCheckBox()
+            chk.setChecked(True)
+            chk.setStyleSheet("margin-left: 18px;")
+            self.checks.append(chk)
+            self.table.setCellWidget(i, 0, chk)
+            self.table.setItem(i, 1, QTableWidgetItem(str(c.get("A", ""))))
+            old = QTableWidgetItem(str(c.get("_server_existing", "") or "(ismeretlen)"))
+            old.setBackground(QColor("#7f1d1d"))
+            self.table.setItem(i, 2, old)
+            new = QTableWidgetItem(" | ".join(str(c.get(k, "")) for k in ("C", "D", "E") if str(c.get(k, "")).strip())
+                                   + "   (" + format_row_for_log(c) + ")")
+            new.setBackground(QColor("#1b5e20"))
+            new.setToolTip(format_row_for_log(c))
+            self.table.setItem(i, 3, new)
+        self.table.setColumnWidth(0, 80)
+        self.table.setColumnWidth(1, 100)
+        self.table.setColumnWidth(2, 260)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        lay.addWidget(self.table)
+
+        btns = QHBoxLayout()
+        ok = QPushButton("✅ Bepipáltak felülírása az ÚJ adattal")
+        ok.setStyleSheet("background-color: #00e676; color: black; font-weight: bold; padding: 10px;")
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("Most egyiket sem")
+        cancel.setStyleSheet("background-color: #444; color: white; padding: 10px;")
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(ok, stretch=2)
+        btns.addWidget(cancel, stretch=1)
+        lay.addLayout(btns)
+
+    def selected(self):
+        return [c for c, chk in zip(self.conflicts, self.checks) if chk.isChecked()]
 
 
 class RestoreDialog(QDialog):
@@ -6529,16 +6634,43 @@ class RaktarApp(QMainWindow):
         if not conflicts:
             return
 
-        codes = ", ".join(sorted({str(c.get("A", "?")).strip().upper() for c in conflicts}))
-        QMessageBox.warning(
-            self,
-            "⚠️ R18-szám ütközés",
-            f"Figyelem! {len(conflicts)} tétel NEM lett elmentve, mert a szerveren már létezik "
-            f"MÁS termékkel ugyanaz az R18-szám: {codes}\n\n"
-            f"A teljes, be nem írt adatok bekerültek a Naplóba (\"R18 ÜTKÖZÉS - NEM MENTVE\" bejegyzésként) "
-            f"- onnan átmásolhatod őket egy ÚJ R18-szám alatti újrafelvitelhez, nem kell mindent újra beírnod."
-        )
-        self.trigger_toast(f"⚠️ {len(conflicts)} R18-ütközés — részletek a Naplóban.")
+        # Ugyanarra a kódra csak a legutolsó adat számít; ha már nyitva van az ablak, összegyűjtjük
+        if not hasattr(self, "_pending_conflicts"):
+            self._pending_conflicts = {}
+        for c in conflicts:
+            self._pending_conflicts[str(c.get("A", "")).strip().upper()] = c
+        if getattr(self, "_conflict_dialog_open", False):
+            return
+
+        while self._pending_conflicts:
+            batch = list(self._pending_conflicts.values())
+            self._pending_conflicts = {}
+            self._conflict_dialog_open = True
+            try:
+                dlg = ConflictDialog(batch, self)
+                chosen = dlg.selected() if dlg.exec() == QDialog.DialogCode.Accepted else []
+            finally:
+                self._conflict_dialog_open = False
+
+            for c in chosen:
+                code = str(c.get("A", "")).strip().upper()
+                new_row = {k: str(c.get(k, "")) for k in ROW_COLS}
+                payload = dict(new_row)
+                payload["_force"] = True          # a szerver felülírja a másik terméket
+                enqueue_outbox(payload)
+                log_event(code, "MÓDOSÍTÁS (R18-ütközés: felülírva az új adattal)",
+                          f"Régi (szerveren volt): '{c.get('_server_existing', '')}' → új: {format_row_for_log(new_row)}",
+                          None, new_row, "⚠️ Ütközés-ablak - ✅ Felülírás gomb (a felhasználó döntött)")
+            skipped = [c for c in batch if c not in chosen]
+            for c in skipped:
+                log_event(str(c.get("A", "")).strip().upper(), "R18 ÜTKÖZÉS - NEM MENTVE (kihagyva)",
+                          f"A felhasználó nem írta felül. Régi marad: '{c.get('_server_existing', '')}'",
+                          None, {k: str(c.get(k, "")) for k in ROW_COLS}, "⚠️ Ütközés-ablak - Most egyiket sem")
+            if chosen:
+                flush_outbox_async()
+                self.trigger_toast(f"✅ {len(chosen)} tétel felülírva az új adattal")
+            if skipped:
+                self.trigger_toast(f"⚠️ {len(skipped)} tétel nem mentődött - részletek a 📜 Naplóban")
 
         if hasattr(self, 'refresh_db_log_view'):
             self.refresh_db_log_view()
