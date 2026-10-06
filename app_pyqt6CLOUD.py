@@ -446,6 +446,53 @@ def get_row_snapshot(code, cursor=None):
         return None
     return {c: ("" if v is None or str(v).lower() in ("none", "nan") else str(v)) for c, v in zip(NAPLO_COLS, tuple(row))}
 
+def norm_code(code):
+    """R18-kód összehasonlításhoz: szóközök nélkül, nagybetűvel."""
+    return str(code or "").strip().upper()
+
+def dedupe_local_products():
+    """DUPLIKÁLT R18-SZÁMOK összevonása a helyi adatbázisban: ugyanarra a kódra csak egy sor maradhat.
+    Megmarad a legtöbb adattal kitöltött (egyenlőség esetén a legújabb) sor; a többi törlődik, de a
+    teljes adatuk a Naplóba kerül. Utána egy egyedi index (zár) gondoskodik róla, hogy ne ismétlődjön.
+    Visszaad: [(kód, törölt sor adata, megmaradt sor adata), ...]"""
+    removed = []
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT rowid AS rid, {', '.join(ROW_COLS)} FROM termekek "
+                       f"WHERE A IS NOT NULL AND TRIM(A) != ''")
+        groups = {}
+        for r in cursor.fetchall():
+            d = {c: safe_str(r[c]) for c in ROW_COLS}
+            groups.setdefault(norm_code(d["A"]), []).append((r["rid"], d))
+        for code, rows in groups.items():
+            if len(rows) < 2:
+                continue
+            rows.sort(key=lambda x: (sum(1 for c in "CDEFGHIJKLMNOP" if x[1][c].strip()), x[0]), reverse=True)
+            keep_rid, keep = rows[0]
+            for rid, d in rows[1:]:
+                cursor.execute("DELETE FROM termekek WHERE rowid = ?", (rid,))
+                removed.append((code, d, keep))
+        conn.commit()
+        # Minden kód egységes alakra (szóköz / kisbetű nélkül) - így az egyedi index mindenhol hat.
+        # (A duplikátumok már összevonva, ezért ez nem ütközhet.)
+        cursor.execute("UPDATE termekek SET A = UPPER(TRIM(A)) WHERE A IS NOT NULL AND A != UPPER(TRIM(A))")
+        conn.commit()
+        try:
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_termekek_a ON termekek(A) WHERE A IS NOT NULL AND A != ''")
+            conn.commit()
+        except Exception as e:
+            print(f"[Duplikáció] Egyedi index nem hozható létre: {e}")
+        conn.close()
+    except Exception as e:
+        print(f"[Duplikáció] Összevonási hiba: {e}")
+        return removed
+    for code, d, keep in removed:
+        log_event(code, "DUPLIKÁCIÓ JAVÍTVA (kétszer szereplő R18-szám)",
+                  "Ugyanez az R18-szám kétszer volt a helyi adatbázisban - a kevesebb adatot tartalmazó sor törölve, "
+                  "a teljes adata az ELŐTTE oszlopban van.", d, keep, "Automatikus: duplikáció-javító")
+    return removed
+
 def describe_changes(elotte, utana):
     """'L (Raklap): 573 → 574 | M (Súly): 19 → 20' - csak a megváltozott oszlopok."""
     b, a = elotte or {}, utana or {}
@@ -487,6 +534,9 @@ EVENT_EXPLANATIONS = [
                     "felül, vedd fel egy új R18-szám alatt - a teljes adatai az UTÁNA oszlopban vannak."),
     ("FIGYELMEZTETÉS: SORKONFLIKTUS", "Miközben te ezt a sort szerkesztetted, valaki más a Google táblázatban is "
                                       "átírta. Ellenőrizd, hogy a végleges adat a jó-e (ELŐTTE / UTÁNA)."),
+    ("DUPLIKÁCIÓ JAVÍTVA", "Ugyanez az R18-szám kétszer szerepelt a helyi adatbázisban (ezért látszott duplán az Excel Live "
+                           "munkalapon). A program összevonta: a több adatot tartalmazó sor maradt meg (UTÁNA), a törölt "
+                           "sor teljes adata az ELŐTTE oszlopban van."),
     ("CÍMKE NYOMTATÁS", "Címkét nyomtattak ehhez a termékhez."),
     ("SZÍN MÓDOSÍTÁSA", "Az A-B cellák színjelölését változtatták meg."),
     ("ELADÁS MÓDOSÍTÁSA", "Egy korábbi eladás adatát (vevő, ár, tracking...) javították az 💰 Eladottak fülön."),
@@ -2146,6 +2196,7 @@ class FastCopyLiveToTestWorker(QThread):
     # Az előző letöltött CSV ujjlenyomata: ha a táblázat azóta nem változott, nincs mit feldolgozni
     _last_csv_hash = None
     _first_pull_done = False
+    _warned_sheet_dups = set()
     finished_signal = pyqtSignal(bool, str, float, list) # Szignál kiegészítve a konfliktusos kódok listájával
     process_log_signal = pyqtSignal(str, str)
 
@@ -2180,8 +2231,16 @@ class FastCopyLiveToTestWorker(QThread):
             cursor.execute("BEGIN TRANSACTION")
 
             cursor.execute(f"SELECT {', '.join(ROW_COLS)} FROM termekek")
-            db_full = {safe_str(row["A"]): {c: safe_str(row[c]) for c in ROW_COLS} for row in cursor.fetchall() if row["A"]}
+            db_full = {}
+            for row in cursor.fetchall():
+                d = {c: safe_str(row[c]) for c in ROW_COLS}
+                # A és B kód alapján is (ha a helyi sorban a kód kicsit másképp van írva, vagy csak a B-ben van meg)
+                for k in (norm_code(d["A"]), norm_code(d["B"])):
+                    if k and k not in db_full:
+                        db_full[k] = d
             db_existing = db_full
+            seen_codes = set()           # ugyanaz a kód kétszer a Google táblázatban -> csak az első számít
+            sheet_duplicates = set()
             # A még fel nem töltött (outboxban váró) tételeket a Sheets régebbi állapota nem írhatja
             # felül - és egy helyben törölt tételt sem hozhat vissza, amíg a törlés ki nem ment.
             pending_outbox = get_pending_outbox_codes(cursor)
@@ -2191,9 +2250,13 @@ class FastCopyLiveToTestWorker(QThread):
             sheet_changes = []   # (kód, előtte, utána) a Napló fülre - a Google táblázatban közvetlenül módosítva
 
             for row in df_test.itertuples(index=False, name=None):
-                code = safe_str(row[0]) if len(row) > 0 else ""
+                code = norm_code(safe_str(row[0]) if len(row) > 0 else "")
                 if not code or not code.startswith("R18-"): 
                     continue
+                if code in seen_codes:
+                    sheet_duplicates.add(code)
+                    continue
+                seen_codes.add(code)
 
                 vals = [safe_str(row[i]) if i < len(row) else "" for i in range(16)]
                 while len(vals) < 16: 
@@ -2216,22 +2279,34 @@ class FastCopyLiveToTestWorker(QThread):
                     # (a színjelölést - szin - nem bántjuk, az a CSV-ben nincs benne)
                     if code not in self.pending_rows_data:
                         local_row = db_full[code]
+                        vals[0] = vals[0].strip().upper()
                         # Csak a ténylegesen megváltozott sorokat írjuk (nem mind a több ezret 15 mp-enként)
                         if [local_row[c] for c in ROW_COLS] != vals[:16]:
                             update_data.append((*vals[:16], code, code))
                             sheet_changes.append((code, dict(local_row), dict(zip(ROW_COLS, vals[:16]))))
                 else:
+                    vals[0] = code
                     insert_data.append((*vals[:16], 'FEHÉR'))
+                    db_existing[code] = dict(zip(ROW_COLS, vals[:16]))
+
+            if sheet_duplicates:
+                new_dups = sheet_duplicates - FastCopyLiveToTestWorker._warned_sheet_dups
+                if new_dups:
+                    FastCopyLiveToTestWorker._warned_sheet_dups |= new_dups
+                    self.process_log_signal.emit(
+                        f"⚠️ A Google táblázatban ezek az R18-számok TÖBBSZÖR szerepelnek: {', '.join(sorted(new_dups)[:20])}"
+                        f"{' ...' if len(new_dups) > 20 else ''} - a program csak az ELSŐ sort használja. "
+                        f"Töröld a felesleges sort a táblázatban.", "ERROR")
 
             if update_data:
                 cursor.executemany("""
                     UPDATE termekek SET A=?, B=?, C=?, D=?, E=?, F=?, G=?, H=?, I=?, J=?, K=?, L=?, M=?, N=?, O=?, P=?
-                    WHERE A=? OR B=?
+                    WHERE UPPER(TRIM(A))=? OR UPPER(TRIM(B))=?
                 """, update_data)
 
             if insert_data:
                 cursor.executemany("""
-                    INSERT INTO termekek (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, szin)
+                    INSERT OR IGNORE INTO termekek (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, szin)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, insert_data)
 
@@ -3137,6 +3212,10 @@ class RaktarApp(QMainWindow):
         self.tabs = QTabWidget()
         main_layout.addWidget(self.tabs)
 
+        # 0. Duplikált R18-számok összevonása (mielőtt bármi betöltődik)
+        removed = dedupe_local_products()
+        self._startup_dedupe_count = len(removed)
+
         # 1. Először létrehozzuk az Excel Live Munkalap fület legelöl
         self.setup_excel_style_tab()
 
@@ -3370,7 +3449,7 @@ class RaktarApp(QMainWindow):
                 # A másik gépen törölt (eladott) tétel
                 if item.get("_torolt"):
                     elotte = get_row_snapshot(code, cursor)
-                    cursor.execute("DELETE FROM termekek WHERE A=? OR B=?", (code, code))
+                    cursor.execute("DELETE FROM termekek WHERE UPPER(TRIM(A))=? OR UPPER(TRIM(B))=?", (code, code))
                     if cursor.rowcount:
                         naplo_entries.append((code, "TÖRLÉS (másik gépen)", elotte, None))
                     changed += cursor.rowcount
@@ -3383,7 +3462,7 @@ class RaktarApp(QMainWindow):
 
                 # Helyi adatbázis frissítése csendben
                 cursor.execute(
-                    f"SELECT rowid, {', '.join(cols)} FROM termekek WHERE A=? OR B=?", (code, code)
+                    f"SELECT rowid, {', '.join(cols)} FROM termekek WHERE UPPER(TRIM(A))=? OR UPPER(TRIM(B))=?", (code, code)
                 )
                 existing = cursor.fetchone()
                 if existing:
@@ -3397,7 +3476,7 @@ class RaktarApp(QMainWindow):
                     )
                 else:
                     cursor.execute(
-                        f"INSERT INTO termekek ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                        f"INSERT OR IGNORE INTO termekek ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
                         vals
                     )
                 changed += 1
@@ -3750,6 +3829,12 @@ class RaktarApp(QMainWindow):
         # A Sheets nem változott: nincs mit frissíteni a felületen
         if success and getattr(self.sender(), "unchanged", False):
             return
+        if success and not getattr(self, "pending_dirty_rows", None):
+            # Biztonsági háló: ha mégis kétszer került be egy R18-szám, összevonjuk (csak amíg nem gépelnek)
+            removed = dedupe_local_products()
+            if removed:
+                self.append_process_log(f"🧹 {len(removed)} duplikált R18-sor összevonva: "
+                                        f"{', '.join(sorted({c for c, _, _ in removed})[:15])} (részletek a 📜 Naplóban)", "#ffb74d")
         if success:
             # HA ÜTKÖZÉS VAN A GOOGLE SHEETS ÉS A TE BEÍRÁSOD KÖZÖTT:
             if conflicts:
@@ -4845,7 +4930,7 @@ class RaktarApp(QMainWindow):
             elotte = get_row_snapshot(code_final)
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT rowid FROM termekek WHERE A=? OR B=?", (code_final, code_final))
+            cursor.execute("SELECT rowid FROM termekek WHERE UPPER(TRIM(A))=? OR UPPER(TRIM(B))=?", (code_final, code_final))
             existing_row = cursor.fetchone()
 
             if existing_row:
@@ -5563,8 +5648,8 @@ class RaktarApp(QMainWindow):
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute(f"UPDATE termekek SET {', '.join(c + '=?' for c in ROW_COLS)} WHERE UPPER(TRIM(A)) = ?",
-                           (*[data[c] for c in ROW_COLS], code))
+            cursor.execute(f"UPDATE termekek SET {', '.join(c + '=?' for c in ROW_COLS)} WHERE UPPER(TRIM(A)) = ? OR UPPER(TRIM(B)) = ?",
+                           (*[data[c] for c in ROW_COLS], code, code))
             if cursor.rowcount == 0:
                 cursor.execute(f"INSERT INTO termekek ({', '.join(ROW_COLS)}, szin) VALUES ({', '.join('?' * len(ROW_COLS))}, 'FEHÉR')",
                                [data[c] for c in ROW_COLS])
