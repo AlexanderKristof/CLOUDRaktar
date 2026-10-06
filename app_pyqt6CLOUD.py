@@ -2841,8 +2841,101 @@ class ExcelTableWidget(QTableWidget):
         c = max(0, min(15, c))
         self.setCurrentCell(r, c)
 
+    # ---- Excel-szerű másolás / beillesztés ----
+    DATA_COLS = 16   # 0-15 = A-P (logikai sorrend = a Google táblázat oszlopsorrendje)
+
+    def _selected_rows_cols(self):
+        idx = [i for i in self.selectedIndexes() if i.column() < self.DATA_COLS]
+        if not idx and self.currentRow() >= 0 and 0 <= self.currentColumn() < self.DATA_COLS:
+            idx = [self.model().index(self.currentRow(), self.currentColumn())]
+        rows = sorted({i.row() for i in idx})
+        cells = {(i.row(), i.column()) for i in idx}
+        return rows, cells
+
+    def full_selected_rows(self):
+        """A teljesen kijelölt sorok (sorszámra kattintva / Shift+Szóköz)."""
+        sm = self.selectionModel()
+        return sorted(r for r in {i.row() for i in self.selectedIndexes()} if sm.isRowSelected(r))
+
+    def copy_selection(self):
+        """Ctrl+C: a kijelölt cellák tabulátorral elválasztva, a GOOGLE TÁBLÁZAT oszlopsorrendjében (A-P).
+        Teljes sor kijelölésénél mind a 16 oszlop (A-P, a rejtett J-vel együtt) - így a Sheets-be
+        beillesztve minden a saját oszlopába kerül."""
+        rows, cells = self._selected_rows_cols()
+        if not rows:
+            return 0
+        full = set(self.full_selected_rows())
+        cols = sorted({c for _, c in cells} | (set(range(self.DATA_COLS)) if full else set()))
+        lines = []
+        for r in rows:
+            use = range(self.DATA_COLS) if r in full else cols
+            vals = []
+            for c in use:
+                it = self.item(r, c)
+                vals.append(it.text() if it and ((r, c) in cells or r in full) else "")
+            lines.append("\t".join(vals))
+        QApplication.clipboard().setText("\n".join(lines))
+        w = self.window()
+        if hasattr(w, "trigger_toast"):
+            w.trigger_toast(f"📋 {len(rows)} sor másolva (A-P sorrendben, Sheets-be beilleszthető)")
+        return len(rows)
+
+    def paste_clipboard(self):
+        """Ctrl+V: a vágólap tartalma a kijelölt cellától kezdve (A-P sorrendben).
+        Teljes sor beillesztésekor (16 oszlop / R18-kóddal kezdődő sor) az A-B (R18-kód) NEM íródik felül."""
+        text = QApplication.clipboard().text()
+        if not text or self.currentRow() < 0:
+            return 0
+        lines = [l for l in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+        while lines and lines[-1] == "":
+            lines.pop()
+        start_r, start_c = self.currentRow(), max(self.currentColumn(), 0)
+        if start_c >= self.DATA_COLS:
+            start_c = 0
+        group = []
+        self._edit_source = "📋 Beillesztés (Ctrl+V)"
+        self._suppress_undo = True
+        try:
+            for dr, line in enumerate(lines):
+                r = start_r + dr
+                if r >= self.rowCount():
+                    break
+                vals = line.split("\t")
+                full_row = len(vals) >= self.DATA_COLS or (start_c == 0 and re.fullmatch(r"R18[-/]\d+", vals[0].strip(), re.I))
+                base = 0 if full_row else start_c
+                for dc, v in enumerate(vals):
+                    c = base + dc
+                    if c >= self.DATA_COLS:
+                        break
+                    if c in (0, 1):          # A-B: az R18-kód védett
+                        continue
+                    it = self.item(r, c)
+                    old = it.text() if it else ""
+                    if old == v:
+                        continue
+                    group.append((r, c, old, v))
+                    if it:
+                        it.setText(v)
+                    else:
+                        self.setItem(r, c, QTableWidgetItem(v))
+        finally:
+            self._edit_source = None
+            self._suppress_undo = False
+        if group:
+            self.undo_stack.append(group)
+        return len(group)
+
     def keyPressEvent(self, event):
         editing = self.state() == QAbstractItemView.State.EditingState
+
+        if not editing and event.matches(QKeySequence.StandardKey.Copy):
+            self.copy_selection()
+            event.accept()
+            return
+        if not editing and event.matches(QKeySequence.StandardKey.Paste):
+            self.paste_clipboard()
+            event.accept()
+            return
 
         # CTRL + Z: UTOLSÓ MŰVELET (CELLAMÓDOSÍTÁS/TÖRLÉS) VISSZAVONÁSA
         if event.key() == Qt.Key.Key_Z and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
@@ -2879,12 +2972,18 @@ class ExcelTableWidget(QTableWidget):
 
         # DELETE / BACKSPACE: kijelölt cellák/sorok törlése + mentés az Undo verembe
         if not editing and event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            # Teljes sor(ok) kijelölve: megerősítéssel, az R18-kód megmarad (Adat törlés gomb)
+            if self.full_selected_rows() and hasattr(self.window(), "clear_selected_excel_rows"):
+                self.window().clear_selected_excel_rows()
+                event.accept()
+                return
             items = self.selectedItems()
             if not items and self.currentItem() is not None:
                 items = [self.currentItem()]
 
             deleted_group = []
             self._edit_source = "⌫ Delete / Backspace gomb (cella törlése)"
+            self._suppress_undo = True
             try:
                 for item in items:
                     if item.column() > 0 and item.text(): # A oszlop (F-Kód) védve marad
@@ -2892,6 +2991,7 @@ class ExcelTableWidget(QTableWidget):
                         item.setText("")
             finally:
                 self._edit_source = None
+                self._suppress_undo = False
 
             if deleted_group:
                 self.undo_stack.append(deleted_group)
@@ -6248,6 +6348,15 @@ class RaktarApp(QMainWindow):
         self.btn_print_selected.clicked.connect(self.print_current_excel_row)
         ctrl_layout.addWidget(self.btn_print_selected)
 
+        btn_clear_rows = QPushButton("🗑️ Adat törlés (R18 marad)")
+        btn_clear_rows.setStyleSheet("background-color: #ff5252; color: white; font-weight: bold; font-size: 14px; padding: 5px 12px;")
+        btn_clear_rows.setToolTip("A kijelölt sor(ok) MINDEN adatát törli (Márka, Típus, Cikkszám, DB, Raklap ...),\n"
+                                  "az R18-kód (A-B) megmarad. Előtte rákérdez.\n"
+                                  "Teljes sor kijelölése: kattints a sor számára (bal oldalt), több sor: Shift / Ctrl + kattintás.\n"
+                                  "Másolás: Ctrl+C (A-P sorrendben, Sheets-be beilleszthető) | Beillesztés: Ctrl+V")
+        btn_clear_rows.clicked.connect(self.clear_selected_excel_rows)
+        ctrl_layout.addWidget(btn_clear_rows)
+
         ctrl_layout.addStretch()
         layout.addWidget(ctrl_box)
 
@@ -6482,6 +6591,45 @@ class RaktarApp(QMainWindow):
                 self.excel_table.scrollToItem(target_item, self.excel_table.ScrollHint.PositionAtCenter)
             
             
+    def clear_selected_excel_rows(self):
+        """🗑️ Adat törlés: a kijelölt sorok C-P adatait törli (az R18-kód: A-B megmarad), megerősítés után."""
+        t = self.excel_table
+        t.setFocus()   # ha épp gépel egy cellában, az elmentődik
+        rows = sorted({i.row() for i in t.selectedIndexes()} or ({t.currentRow()} if t.currentRow() >= 0 else set()))
+        rows = [r for r in rows if any((t.item(r, c).text().strip() if t.item(r, c) else "") for c in range(2, 16))]
+        if not rows:
+            self.trigger_toast("⚠️ A kijelölt sor(ok)ban nincs törölhető adat.")
+            return
+
+        def desc(r):
+            g = lambda c: t.item(r, c).text().strip() if t.item(r, c) else ""
+            return f"• {g(0)}  |  {g(2) or '-'}  |  {g(3) or '-'}  |  {g(4) or '-'}"
+        lista = "\n".join(desc(r) for r in rows[:12]) + (f"\n... és még {len(rows) - 12} sor" if len(rows) > 12 else "")
+        dlg = SilentConfirmDialog(
+            "🗑️ Adatok törlése",
+            f"Biztosan TÖRLÖD ennek a {len(rows)} sornak az összes adatát?\n"
+            f"(Az R18-kód megmarad, a régi adatok a Naplóba és a ToroltSor lapra kerülnek.)\n\n{lista}",
+            self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        group = []
+        t._edit_source = "🗑️ Adat törlés gomb (sor adatai törölve, R18 megmarad)"
+        t._suppress_undo = True
+        try:
+            for r in rows:
+                for c in range(2, 16):
+                    it = t.item(r, c)
+                    if it and it.text():
+                        group.append((r, c, it.text(), ""))
+                        it.setText("")
+        finally:
+            t._edit_source = None
+            t._suppress_undo = False
+        if group:
+            t.undo_stack.append(group)
+        self.trigger_toast(f"🗑️ {len(rows)} sor adatai törölve (Ctrl+Z: visszavonás)")
+
     def note_excel_source(self, row, col, old_val, new_val, how):
         """Feljegyzi, HOGYAN változott egy Excel Live cella - a Napló 'Honnan / hogyan' oszlopába kerül."""
         if old_val == new_val:
@@ -6516,7 +6664,7 @@ class RaktarApp(QMainWindow):
                 # Az előzménykezeléshez elmentjük az utolsó egyedi módosítást
                 old_val = getattr(item, '_previous_text', "")
                 new_val = item.text()
-                if old_val != new_val:
+                if old_val != new_val and not getattr(self.excel_table, "_suppress_undo", False):
                     self.excel_table.undo_stack.append([(row, col, old_val, new_val)])
                 item._previous_text = new_val
 
