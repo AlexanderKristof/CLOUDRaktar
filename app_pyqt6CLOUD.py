@@ -952,6 +952,46 @@ def _send_outbox_to_vps(op, row_data):
         return "conflict"
     return "retry"
 
+# -------------------------------------------------------------------
+# IGAZÍTÁS a Google táblázatban és az Excel Live munkalapon:
+#   M (Súly): mindig JOBBRA | L (Raklap): JOBBRA, ha csak szám van benne (pl. 573, 8,65), különben BALRA
+# -------------------------------------------------------------------
+_PURE_NUMBER = re.compile(r"^\s*\d+([.,]\d+)?\s*$")
+
+def is_pure_number(val):
+    return bool(_PURE_NUMBER.match(str(val or "")))
+
+def sheet_alignment_requests(row_num, l_val):
+    """batch_format kérések egy Sheets-sorhoz (L feltételesen, M mindig jobbra)."""
+    return [
+        {"range": f"L{row_num}", "format": {"horizontalAlignment": "RIGHT" if is_pure_number(l_val) else "LEFT"}},
+        {"range": f"M{row_num}", "format": {"horizontalAlignment": "RIGHT"}},
+    ]
+
+def fix_sheet_alignment_all(log=print):
+    """EGYSZERI javítás: a Google táblázat összes sorában beállítja az L / M igazítást.
+    Az egymást követő azonos igazítású L-cellákat egy tartományba vonja (kevés Google-kérés)."""
+    sheet = get_sheet()
+    if sheet is None:
+        return False
+    codes = sheet.col_values(1)
+    l_vals = sheet.col_values(12)
+    n = len(codes)
+    if n < 2:
+        return True
+    reqs = [{"range": f"M2:M{n}", "format": {"horizontalAlignment": "RIGHT"}}]
+    start, cur = 2, None
+    for r in range(2, n + 2):
+        al = None if r > n else ("RIGHT" if is_pure_number(l_vals[r - 1] if r - 1 < len(l_vals) else "") else "LEFT")
+        if al != cur:
+            if cur is not None:
+                reqs.append({"range": f"L{start}:L{r - 1}", "format": {"horizontalAlignment": cur}})
+            start, cur = r, al
+    for i in range(0, len(reqs), 500):
+        sheet.batch_format(reqs[i:i + 500])
+    log(f"✔ Google táblázat igazítás javítva: {n - 1} sor (M jobbra, L számnál jobbra / szövegnél balra)", "SUCCESS")
+    return True
+
 def _send_outbox_to_sheets(op, row_data, sheet, all_a, deleted_ws_holder=None):
     """A Sheets-be írja a műveletet. Az all_a (A oszlop) listát helyben frissíti. True, ha sikerült."""
     code_a = str(row_data.get("A", "")).strip().upper()
@@ -991,6 +1031,9 @@ def _send_outbox_to_sheets(op, row_data, sheet, all_a, deleted_ws_holder=None):
                 all_a.append(code_a)
             row_vals = [row_data.get(k, "") for k in ROW_COLS]
             sheet.update(range_name=f"A{target_row}:P{target_row}", values=[row_vals])
+            # L / M igazítás - a flush végén egyetlen kérésben megy ki (lásd _flush_sync_outbox_locked)
+            if deleted_ws_holder is not None:
+                deleted_ws_holder.setdefault("_fmt", []).extend(sheet_alignment_requests(target_row, row_data.get("L", "")))
         return True
     except Exception as e:
         print(f"[Outbox] Sheets írási hiba ({op} {code_a}): {e}")
@@ -1072,6 +1115,12 @@ def _flush_sync_outbox_locked():
             conn2.close()
         except Exception as e:
             print(f"[Outbox] Állapot-frissítési hiba: {e}")
+
+    if sheet is not None and deleted_ws_holder.get("_fmt"):
+        try:
+            sheet.batch_format(deleted_ws_holder["_fmt"])
+        except Exception as e:
+            print(f"[Outbox] Igazítási hiba (nem kritikus): {e}")
 
     if conflicts:
         try:
@@ -3098,6 +3147,15 @@ class ExcelTableWidget(QTableWidget):
 # -------------------------------------------------------------------
 # FŐ ABLAK (PYQT6)
 # -------------------------------------------------------------------
+def align_excel_item(item, col):
+    """Excel Live / Helyi DB cella: M (12) mindig jobbra, L (11) jobbra ha csak szám, különben balra."""
+    if item is None:
+        return
+    if col == 12 or (col == 11 and is_pure_number(item.text())):
+        item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    elif col == 11:
+        item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
 def _normalize_excel_row(row):
     """Egy A-P adatbázis-sort az Excel Live táblában megjelenő szövegekké alakít (tuple, gyors összevetéshez)."""
     return tuple(str(v) if v is not None and str(v).lower() != "none" else "" for v in row[:16])
@@ -3262,6 +3320,16 @@ class RaktarApp(QMainWindow):
         self.tabs.setCurrentIndex(0)
         # Elhalasztott (nem látható fülre szóló) frissítések elvégzése fülváltáskor
         self.tabs.currentChanged.connect(self.on_tab_changed)
+
+        # Google táblázat L / M igazításának EGYSZERI javítása a régi sorokon (háttérben)
+        if SHEETS_ENABLED and not load_config_value("sheets_igazitas_javitva_v1"):
+            def _fix_align():
+                try:
+                    if fix_sheet_alignment_all(lambda m, t="INFO": self.process_log_signal.emit(m)):
+                        save_config_value("sheets_igazitas_javitva_v1", True)
+                except Exception as e:
+                    self.process_log_signal.emit(f"⚠️ Google táblázat igazítás javítása sikertelen (később újra próbálja): {e}")
+            QTimer.singleShot(20000, lambda: threading.Thread(target=_fix_align, daemon=True).start())
 
         # TÖRÖLT SOROK FIGYELÉSE a figyelt (élő) táblázatban - háttérszálon, csak olvasással
         if DELETED_WATCH_SPREADSHEET_ID.strip() and SHEETS_ENABLED:
@@ -3918,7 +3986,10 @@ class RaktarApp(QMainWindow):
                     if item.text() != val:
                         item.setText(val)
                 else:
-                    self.excel_table.setItem(r_idx, c_idx, QTableWidgetItem(val))
+                    item = QTableWidgetItem(val)
+                    self.excel_table.setItem(r_idx, c_idx, item)
+                if c_idx in (11, 12):
+                    align_excel_item(item, c_idx)
         self.excel_table.blockSignals(False)
 
         if len(new_cache) != len(old) or any(a is None or a[0] != (b[0] if b else None) for a, b in zip(new_cache, old)):
@@ -6952,7 +7023,10 @@ class RaktarApp(QMainWindow):
 
         for r_idx, row in enumerate(rows):
             for c_idx in range(16):
-                self.excel_table.setItem(r_idx, c_idx, QTableWidgetItem(row[c_idx]))
+                it = QTableWidgetItem(row[c_idx])
+                if c_idx in (11, 12):
+                    align_excel_item(it, c_idx)
+                self.excel_table.setItem(r_idx, c_idx, it)
 
         self.excel_table.blockSignals(False)
         self.excel_table.setUpdatesEnabled(True)
@@ -7049,6 +7123,13 @@ class RaktarApp(QMainWindow):
             row = item.row()
             col = item.column()
             self.pending_dirty_rows.add(row)
+
+            # L / M igazítás (jelzések nélkül, hogy ne számítson újabb módosításnak)
+            if col in (11, 12):
+                was = self.excel_table.signalsBlocked()
+                self.excel_table.blockSignals(True)
+                align_excel_item(item, col)
+                self.excel_table.blockSignals(was)
 
             # Napló: honnan / hogyan változott (a régi érték az utoljára betöltött adatbázis-állapotból)
             if not self.excel_table.signalsBlocked():
