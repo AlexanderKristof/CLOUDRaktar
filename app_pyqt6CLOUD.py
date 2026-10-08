@@ -4257,6 +4257,7 @@ class RaktarApp(QMainWindow):
         pater = safe_str(row.get('I'))
         polc = safe_str(row.get('K'))
         hely = safe_str(row.get('L')) or pater
+        ebay_nr = safe_str(row.get('N')).strip()
         
         left_box = QWidget()
         left_layout = QVBoxLayout(left_box)
@@ -4267,6 +4268,35 @@ class RaktarApp(QMainWindow):
         lbl_code = QLabel(f"🏷️ <b>KÓD:</b> {code}")
         lbl_code.setStyleSheet("font-size: 15px; font-weight: bold; color: #fff;")
         row1.addWidget(lbl_code)
+
+        # 🛒 eBay item number (N oszlop): jól látható, egy kattintással másolható
+        ebay_box = QWidget()
+        ebay_box.setStyleSheet("background-color: #3a2f00; border: 1px solid #ffd600; border-radius: 4px;")
+        ebay_lay = QHBoxLayout(ebay_box)
+        ebay_lay.setContentsMargins(6, 2, 4, 2)
+        ebay_lay.setSpacing(4)
+        lbl_ebay = QLabel(f"🛒 eBay: <b>{ebay_nr}</b>" if ebay_nr else "🛒 eBay: <i>nincs</i>")
+        lbl_ebay.setStyleSheet("color: #ffd600; border: none; font-size: 14px;")
+        lbl_ebay.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        ebay_lay.addWidget(lbl_ebay)
+        if ebay_nr:
+            btn_copy_ebay = QPushButton("📋 Másolás")
+            btn_copy_ebay.setToolTip("Az eBay item number vágólapra másolása (Ctrl+V-vel beilleszthető)")
+            btn_copy_ebay.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_copy_ebay.setStyleSheet("background-color: #ffd600; color: black; font-weight: bold; padding: 2px 8px; border-radius: 3px;")
+            def copy_ebay(checked=False, nr=ebay_nr, c=code):
+                QApplication.clipboard().setText(nr)
+                self.trigger_toast(f"📋 eBay szám másolva: {nr} [{c}]")
+            btn_copy_ebay.clicked.connect(copy_ebay)
+            ebay_lay.addWidget(btn_copy_ebay)
+            if re.fullmatch(r"\d{9,15}", ebay_nr):
+                btn_open_ebay = QPushButton("🌐")
+                btn_open_ebay.setToolTip("Hirdetés megnyitása az eBay-en")
+                btn_open_ebay.setFixedWidth(30)
+                btn_open_ebay.setStyleSheet("background-color: #444; color: white; padding: 2px; border-radius: 3px;")
+                btn_open_ebay.clicked.connect(lambda checked=False, nr=ebay_nr: QDesktopServices.openUrl(QUrl(f"https://www.ebay.com/itm/{nr}")))
+                ebay_lay.addWidget(btn_open_ebay)
+        row1.addWidget(ebay_box)
 
         db_box = QWidget()
         db_box.setStyleSheet("background-color: #29b6f6; border-radius: 4px; padding: 2px;")
