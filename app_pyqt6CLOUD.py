@@ -1131,8 +1131,18 @@ def _flush_sync_outbox_locked():
     return conflicts
 
 def safe_str(val):
-    if val is None or pd.isna(val):
+    # Ha egy lekérdezésben két azonos nevű oszlop van, a pandas Series-t ad vissza egyetlen érték helyett
+    if isinstance(val, pd.Series):
+        val = val.iloc[0] if len(val) else None
+    elif isinstance(val, (list, tuple)):
+        val = val[0] if val else None
+    if val is None:
         return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
     s = str(val).strip()
     if s.lower() in ("nan", "none", "null"):
         return ""
@@ -3668,7 +3678,7 @@ class RaktarApp(QMainWindow):
 
             conn = get_db_connection()
             query = """
-                SELECT rowid, * FROM termekek 
+                SELECT * FROM termekek 
                 WHERE C IS NOT NULL AND TRIM(C) != '' AND LOWER(TRIM(C)) != 'none' AND LOWER(TRIM(C)) != 'nan'
             """
             cursor = conn.cursor()
@@ -4689,7 +4699,7 @@ class RaktarApp(QMainWindow):
         try:
             conn = get_db_connection()
             query = """
-                SELECT rowid, * FROM termekek 
+                SELECT * FROM termekek 
                 WHERE C IS NOT NULL AND TRIM(C) != '' AND LOWER(TRIM(C)) != 'none' AND LOWER(TRIM(C)) != 'nan'
             """
             cursor = conn.cursor()
@@ -4748,7 +4758,7 @@ class RaktarApp(QMainWindow):
                 widget.deleteLater()
 
         conn = get_db_connection()
-        df = pd.read_sql_query("SELECT rowid, * FROM termekek WHERE C IS NOT NULL AND C != ''", conn)
+        df = pd.read_sql_query("SELECT * FROM termekek WHERE C IS NOT NULL AND C != ''", conn)
         conn.close()
 
         matched_rows = []
@@ -5840,7 +5850,7 @@ class RaktarApp(QMainWindow):
                 widget.deleteLater()
 
         conn = get_db_connection()
-        df = pd.read_sql_query("SELECT rowid, * FROM termekek WHERE C IS NOT NULL AND C != ''", conn)
+        df = pd.read_sql_query("SELECT * FROM termekek WHERE C IS NOT NULL AND C != ''", conn)
         conn.close()
 
         matched_rows = []
