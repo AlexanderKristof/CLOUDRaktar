@@ -2324,10 +2324,16 @@ class FastCopyLiveToTestWorker(QThread):
                 cloud_c, cloud_d, cloud_e = vals[2], vals[3], vals[4]
 
                 # ÜTKÖZÉS-VIZSGÁLAT: Ha a felhasználónál pending (szerkesztés alatti) módosítás van erre a sorra
+                # Csak VALÓDI ütközés: a táblázatban MÁS van, mint ami ezen a gépen utoljára el volt mentve
+                # (vagyis valaki más írta át), ÉS más, mint amit most gépelsz. Az, hogy a táblázatban még a
+                # régi érték van, amíg a te gépelésed fel nem ment, NEM ütközés.
                 if code in self.pending_rows_data:
                     local_p = self.pending_rows_data[code]
-                    # Ha a felhőben lévő adat eltér mind a helyitől, mind a szerkesztéstől, ütközés van!
-                    if cloud_c and (cloud_c != local_p.get("C") or cloud_d != local_p.get("D")):
+                    saved = db_full.get(code) or {}
+                    cloud_cd = (cloud_c.strip().upper(), cloud_d.strip().upper())
+                    saved_cd = (str(saved.get("C", "")).strip().upper(), str(saved.get("D", "")).strip().upper())
+                    typed_cd = (str(local_p.get("C", "")).strip().upper(), str(local_p.get("D", "")).strip().upper())
+                    if saved and cloud_c and cloud_cd != saved_cd and cloud_cd != typed_cd:
                         conflicts.append(code)
 
                 if code.upper() in pending_outbox:
@@ -3915,16 +3921,19 @@ class RaktarApp(QMainWindow):
                                         f"{', '.join(sorted({c for c, _, _ in removed})[:15])} (részletek a 📜 Naplóban)", "#ffb74d")
         if success:
             # HA ÜTKÖZÉS VAN A GOOGLE SHEETS ÉS A TE BEÍRÁSOD KÖZÖTT:
+            # Ugyanarra a sorra 2 percen belül csak egyszer szólunk
+            now_t = time.monotonic()
+            if not hasattr(self, "_conflict_notified"):
+                self._conflict_notified = {}
+            conflicts = [cc for cc in conflicts if now_t - self._conflict_notified.get(cc, -1e9) > 120]
             if conflicts:
+                for cc in conflicts:
+                    self._conflict_notified[cc] = now_t
                 conflict_codes = ", ".join(conflicts)
-                QMessageBox.warning(
-                    self,
-                    "⚠️ FIGYELEM: SORKONFLIKTUS / PÁRHUZAMOS MÓDOSÍTÁS!",
-                    f"Valaki más is módosította a Google Sheets-ben az alábbi sor(oka)t, miközben te gépeltél:\n\n"
-                    f"📌 Érintett kódok: {conflict_codes}\n\n"
-                    f"Kérlek ellenőrizd ezeket a sorokat a felülírás elkerülése érdekében!"
-                )
-                self.trigger_toast(f"⚠️ Sorkonfliktus detektálva: {conflict_codes}!")
+                # Nem felugró ablak: csak értesítés, nem kell rákattintani
+                self.trigger_toast(f"⚠️ Valaki más is ír ebbe a sorba: {conflict_codes} - ellenőrizd mentés után!", duration=6000)
+                self.append_process_log(f"⚠️ Párhuzamos módosítás: a Google táblázatban is átírták, miközben itt "
+                                        f"szerkesztették: {conflict_codes}", "#ffb74d")
                 for cc in conflicts:
                     log_event(cc, "FIGYELMEZTETÉS: SORKONFLIKTUS", "Szerkesztés közben a Google táblázatban is átírták",
                               None, get_row_snapshot(cc), "📊 Google Sheets + Excel Live egyszerre")
@@ -4176,9 +4185,9 @@ class RaktarApp(QMainWindow):
         elif log_type == "INFO": color = "#aaaaaa"
         self.append_process_log(msg, color)
 
-    def trigger_toast(self, message):
+    def trigger_toast(self, message, duration=2500):
         toast = ToastNotification(message, self)
-        toast.show_toast(duration=2500)
+        toast.show_toast(duration=duration)
 
     def append_process_log(self, text, color="#00e676"):
         """⚙️ Folyamat napló: CSAK technikai üzenetek (szinkron, VPS, hibák). Naponta külön fájlba
