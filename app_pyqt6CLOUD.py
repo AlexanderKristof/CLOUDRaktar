@@ -27,7 +27,8 @@ from PyQt6.QtWidgets import (
     QFormLayout, QGroupBox, QSpinBox, QDialog, QScrollArea, QFrame,
     QFileDialog, QCheckBox, QMessageBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QGraphicsOpacityEffect, QTextEdit, QDateEdit, QListWidget, QInputDialog, QAbstractItemView,
-    QStyledItemDelegate, QAbstractItemDelegate, QComboBox, QPlainTextEdit, QAbstractSpinBox, QStyle
+    QStyledItemDelegate, QAbstractItemDelegate, QComboBox, QPlainTextEdit, QAbstractSpinBox, QStyle,
+    QToolButton, QMenu, QSplitter
 )
 from PyQt6.QtGui import QColor, QPixmap, QFont, QDesktopServices, QCloseEvent, QShortcut, QKeySequence, QIntValidator, QPainter
 from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -3305,19 +3306,23 @@ class RaktarApp(QMainWindow):
         self.tab_map = QWidget()
         self.tab_log = QWidget()
         self.tab_process_log = QWidget()
+        self.tab_admin = QWidget()
 
         # Fülek hozzáadása a kívánt sorrendben
+        # FŐ FÜLEK (mindig látszanak): Excel Live, Gyorskereső, PDA / Eladás, Eladottak
         self.tabs.addTab(self.tab_search, "⚡ Gyorskereső")
-        self.tabs.addTab(self.tab_add, "📝 Új Termék Felvitele")
-        self.tabs.addTab(self.tab_local_db, "💾 Helyi Adatbázis (Élő)")
         self.tabs.addTab(self.tab_pda, "📱 PDA / Eladás")
         self.tabs.addTab(self.tab_sold, "💰 Eladottak")
+        # TOVÁBBI FÜLEK (a "☰ További fülek" menüből nyílnak)
+        self.tabs.addTab(self.tab_add, "📝 Új Termék Felvitele")
+        self.tabs.addTab(self.tab_local_db, "💾 Helyi Adatbázis (Élő)")
         self.tabs.addTab(self.tab_server, "🖥️ Szerver adatbázis")
         self.tabs.addTab(self.tab_excel, "📊 Excel Kezelés")
         self.tabs.addTab(self.tab_single, "🖨️ Egyedi Címke")
         self.tabs.addTab(self.tab_map, "🗺️ Raktártérkép")
         self.tabs.addTab(self.tab_log, "📜 Napló")
         self.tabs.addTab(self.tab_process_log, "⚙️ Folyamat & Szinkron Napló")
+        self.tabs.addTab(self.tab_admin, "🛡️ Admin")
 
         # Fülek tartalmának inicializálása
         self.init_search_tab()
@@ -3331,6 +3336,8 @@ class RaktarApp(QMainWindow):
         self.init_map_tab()
         self.init_log_tab()
         self.init_process_log_tab()
+        self.init_admin_tab()
+        self.setup_tab_menu()
 
         # GARANTÁLTAN AZ 1. FÜLRE (Excel Live Munkalap) FÓKUSZÁL INDÍTÁSKOR:
         self.tabs.setCurrentIndex(0)
@@ -6396,7 +6403,10 @@ class RaktarApp(QMainWindow):
         """Az alsó részen: a kiválasztott esemény előtte / utána teljes termékadata, a változások kiemelve."""
         if row < 0 or row >= len(self._db_log_rows):
             return
-        r = self._db_log_rows[row]
+        self.render_log_detail(self._db_log_rows[row], self.db_log_detail_lbl, self.db_log_detail)
+
+    def render_log_detail(self, r, lbl, table):
+        """Egy napló-bejegyzés fejléce + az ELŐTTE / UTÁNA táblázat (a Napló és az Admin fül használja)."""
         elotte = json.loads(r["elotte"]) if r.get("elotte") else None
         utana = json.loads(r["utana"]) if r.get("utana") else None
         esemeny = safe_str(r.get("esemeny"))
@@ -6411,10 +6421,10 @@ class RaktarApp(QMainWindow):
             head += f"<br><span style='color:#ffe082;'>💡 <b>Mit jelent:</b> {_html.escape(expl)}</span>"
         if elotte is None and utana is None:
             head += "<br><span style='color:#888;'>(ehhez a bejegyzéshez nincs előtte/utána termékadat)</span>"
-        self.db_log_detail_lbl.setTextFormat(Qt.TextFormat.RichText)
-        self.db_log_detail_lbl.setText(head)
+        lbl.setTextFormat(Qt.TextFormat.RichText)
+        lbl.setText(head)
 
-        self.db_log_detail.setRowCount(len(NAPLO_COLS))
+        table.setRowCount(len(NAPLO_COLS))
         changed_bg, new_bg, gone_bg = QColor("#5c4a00"), QColor("#1b5e20"), QColor("#7f1d1d")
         for i, c in enumerate(NAPLO_COLS):
             ov = (elotte or {}).get(c, "") if elotte is not None else ""
@@ -6431,7 +6441,356 @@ class RaktarApp(QMainWindow):
                     it.setBackground(changed_bg)
                 f = items[0].font(); f.setBold(True); items[0].setFont(f)
             for ci, it in enumerate(items):
-                self.db_log_detail.setItem(i, ci, it)
+                table.setItem(i, ci, it)
+
+    # -------------------------------------------------------------------
+    # 🛡️ ADMIN FÜL: minden változás, törölt termékek (visszaállítással), termék-történet, feltöltésre váró
+    # -------------------------------------------------------------------
+    ADMIN_TABLE_STYLE = """
+        QTableWidget { background-color: #21252b; alternate-background-color: #282c34; color: #e0e0e0;
+                       gridline-color: #3b4048; font-size: 13px; }
+        QHeaderView::section { background-color: #1b1e23; color: #61afef; font-weight: bold; padding: 6px; border: 1px solid #3b4048; }
+        QTableWidget::item:selected { background-color: #2f5f8f; color: #ffffff; }
+    """
+
+    def _admin_table(self, headers, widths=None):
+        t = QTableWidget()
+        t.setColumnCount(len(headers))
+        t.setHorizontalHeaderLabels(headers)
+        t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        t.setAlternatingRowColors(True)
+        t.verticalHeader().setVisible(False)
+        t.setStyleSheet(self.ADMIN_TABLE_STYLE)
+        for i, w in enumerate(widths or []):
+            t.setColumnWidth(i, w)
+        t.horizontalHeader().setStretchLastSection(True)
+        return t
+
+    def _detail_widgets(self):
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 6, 0, 0)
+        lbl = QLabel("Válassz ki egy sort - itt látszik a termék teljes adata ELŐTTE és UTÁNA.")
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("color: #29b6f6; font-weight: bold;")
+        lay.addWidget(lbl)
+        tbl = self._admin_table(["Oszlop", "⬅️ ELŐTTE", "➡️ UTÁNA"], [160, 380])
+        lay.addWidget(tbl)
+        return box, lbl, tbl
+
+    def init_admin_tab(self):
+        layout = QVBoxLayout(self.tab_admin)
+        title = QLabel("🛡️ Admin - minden változás, minden törölt termék teljes adattal, termék-történet")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #29b6f6;")
+        layout.addWidget(title)
+        self.admin_tabs = QTabWidget()
+        layout.addWidget(self.admin_tabs)
+
+        # --- 1. Minden változás ---
+        w1 = QWidget(); l1 = QVBoxLayout(w1)
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("Ettől:"))
+        self.adm_from = QDateEdit(); self.adm_from.setCalendarPopup(True); self.adm_from.setDate(QDate.currentDate().addDays(-30))
+        bar.addWidget(self.adm_from)
+        bar.addWidget(QLabel("Eddig:"))
+        self.adm_to = QDateEdit(); self.adm_to.setCalendarPopup(True); self.adm_to.setDate(QDate.currentDate())
+        bar.addWidget(self.adm_to)
+        self.adm_type = QComboBox()
+        for label, _ in self.LOG_FILTERS:
+            self.adm_type.addItem(label)
+        bar.addWidget(self.adm_type)
+        self.adm_search = QLineEdit(); self.adm_search.setPlaceholderText("🔍 R18 / szöveg / forrás (Enter)")
+        self.adm_search.returnPressed.connect(self.admin_load_all)
+        bar.addWidget(self.adm_search, stretch=1)
+        b = QPushButton("🔄 Lekérés"); b.setStyleSheet("background-color: #00e676; color: black; font-weight: bold;")
+        b.clicked.connect(self.admin_load_all); bar.addWidget(b)
+        b = QPushButton("📤 Export (CSV / Excel)"); b.clicked.connect(self.admin_export_all); bar.addWidget(b)
+        l1.addLayout(bar)
+        self.adm_all_count = QLabel(""); self.adm_all_count.setStyleSheet("color: #888;")
+        l1.addWidget(self.adm_all_count)
+        sp = QSplitter(Qt.Orientation.Vertical)
+        self.adm_all = self._admin_table(["Időpont", "Esemény", "Honnan / hogyan", "R18-kód", "Márka", "Típus", "Cikkszám", "Mi változott"],
+                                         [140, 220, 260, 95, 110, 170, 160])
+        self.adm_all.currentCellChanged.connect(lambda r, *_: self._admin_show(self._adm_all_rows, r, self.adm_all_lbl, self.adm_all_det))
+        sp.addWidget(self.adm_all)
+        box, self.adm_all_lbl, self.adm_all_det = self._detail_widgets()
+        sp.addWidget(box); sp.setSizes([420, 320])
+        l1.addWidget(sp)
+        self._adm_all_rows = []
+        self.admin_tabs.addTab(w1, "📜 Minden változás")
+
+        # --- 2. Törölt termékek ---
+        w2 = QWidget(); l2 = QVBoxLayout(w2)
+        bar = QHBoxLayout()
+        self.adm_del_search = QLineEdit(); self.adm_del_search.setPlaceholderText("🔍 R18 / márka / típus / cikkszám (Enter)")
+        self.adm_del_search.returnPressed.connect(self.admin_load_deleted)
+        bar.addWidget(self.adm_del_search, stretch=1)
+        b = QPushButton("🔄 Lekérés"); b.setStyleSheet("background-color: #00e676; color: black; font-weight: bold;")
+        b.clicked.connect(self.admin_load_deleted); bar.addWidget(b)
+        b = QPushButton("♻️ Kijelölt visszaállítása"); b.setStyleSheet("background-color: #ff9800; color: black; font-weight: bold;")
+        b.setToolTip("A törölt termék teljes adatát visszaírja az R18-kódja alá (helyi + szerver + Google Sheets)")
+        b.clicked.connect(self.admin_restore_deleted); bar.addWidget(b)
+        l2.addLayout(bar)
+        self.adm_del_count = QLabel(""); self.adm_del_count.setStyleSheet("color: #888;")
+        l2.addWidget(self.adm_del_count)
+        self.adm_del = self._admin_table(["Törlés ideje", "Honnan / hogyan"] + [f"{c}: {COLUMN_LABELS.get(c, c)}" for c in NAPLO_COLS],
+                                         [140, 240, 95, 95, 110, 190, 170, 45, 85, 60, 70, 40, 60, 110, 55, 100, 120])
+        l2.addWidget(self.adm_del)
+        self._adm_del_rows = []
+        self.admin_tabs.addTab(w2, "🗑️ Törölt termékek")
+
+        # --- 3. Termék története ---
+        w3 = QWidget(); l3 = QVBoxLayout(w3)
+        bar = QHBoxLayout()
+        self.adm_hist_code = QLineEdit(); self.adm_hist_code.setPlaceholderText("R18-kód (pl. R18-12960) - Enter / csippantás")
+        self.adm_hist_code.returnPressed.connect(self.admin_load_history)
+        bar.addWidget(self.adm_hist_code, stretch=1)
+        b = QPushButton("🔎 Történet"); b.setStyleSheet("background-color: #29b6f6; color: black; font-weight: bold;")
+        b.clicked.connect(self.admin_load_history); bar.addWidget(b)
+        l3.addLayout(bar)
+        self.adm_hist_now = QLabel(""); self.adm_hist_now.setWordWrap(True); self.adm_hist_now.setTextFormat(Qt.TextFormat.RichText)
+        self.adm_hist_now.setStyleSheet("background: #1e1e1e; padding: 8px; border: 1px solid #333; border-radius: 6px;")
+        l3.addWidget(self.adm_hist_now)
+        sp = QSplitter(Qt.Orientation.Vertical)
+        self.adm_hist = self._admin_table(["Időpont", "Esemény", "Honnan / hogyan", "Mi változott"], [140, 240, 300])
+        self.adm_hist.currentCellChanged.connect(lambda r, *_: self._admin_show(self._adm_hist_rows, r, self.adm_hist_lbl, self.adm_hist_det))
+        sp.addWidget(self.adm_hist)
+        box, self.adm_hist_lbl, self.adm_hist_det = self._detail_widgets()
+        sp.addWidget(box); sp.setSizes([360, 320])
+        l3.addWidget(sp)
+        self._adm_hist_rows = []
+        self.admin_tabs.addTab(w3, "🔎 Termék története")
+
+        # --- 4. Feltöltésre vár ---
+        w4 = QWidget(); l4 = QVBoxLayout(w4)
+        bar = QHBoxLayout()
+        b = QPushButton("🔄 Lekérés"); b.setStyleSheet("background-color: #00e676; color: black; font-weight: bold;")
+        b.clicked.connect(self.admin_load_outbox); bar.addWidget(b)
+        b = QPushButton("🔁 Újrapróbálás most")
+        b.clicked.connect(lambda: (flush_outbox_async(), sync_sales_async(), self.trigger_toast("🔁 Feltöltés elindítva"),
+                                   QTimer.singleShot(4000, self.admin_load_outbox)))
+        bar.addWidget(b)
+        bar.addStretch()
+        l4.addLayout(bar)
+        self.adm_out_count = QLabel(""); self.adm_out_count.setStyleSheet("color: #888;")
+        l4.addWidget(self.adm_out_count)
+        self.adm_out = self._admin_table(["Felvéve", "Művelet", "R18-kód", "VPS", "Google Sheets", "Próbálkozás", "Utolsó próba", "Adat"],
+                                         [140, 90, 95, 60, 110, 90, 140])
+        l4.addWidget(self.adm_out)
+        self.admin_tabs.addTab(w4, "⏳ Feltöltésre vár")
+
+        self.admin_tabs.currentChanged.connect(self._admin_tab_changed)
+
+    def _admin_tab_changed(self, i):
+        [self.admin_load_all, self.admin_load_deleted, lambda: None, self.admin_load_outbox][i]()
+
+    def _admin_show(self, rows, r, lbl, tbl):
+        if 0 <= r < len(rows):
+            self.render_log_detail(rows[r], lbl, tbl)
+
+    def _admin_fill_events(self, table, rows, cols):
+        table.setUpdatesEnabled(False)
+        table.setRowCount(len(rows))
+        for ri, r in enumerate(rows):
+            elotte = json.loads(r["elotte"]) if r.get("elotte") else None
+            utana = json.loads(r["utana"]) if r.get("utana") else None
+            prod = utana or elotte or {}
+            esemeny = safe_str(r.get("esemeny"))
+            valt = safe_str(r.get("reszletek"))
+            if elotte and utana and not esemeny.upper().startswith("ELADÁS"):
+                valt = describe_changes(elotte, utana) or valt
+            data = {"idopont": safe_str(r.get("idopont")), "esemeny": esemeny, "forras": safe_str(r.get("forras")),
+                    "kod": safe_str(r.get("r18_kod")), "C": prod.get("C", ""), "D": prod.get("D", ""), "E": prod.get("E", ""), "valt": valt}
+            for ci, key in enumerate(cols):
+                it = QTableWidgetItem(data[key])
+                if key == "esemeny":
+                    it.setForeground(QColor(self._log_event_color(esemeny)))
+                    expl = explain_event(esemeny)
+                    if expl:
+                        it.setToolTip("💡 " + expl)
+                if key in ("valt", "forras"):
+                    it.setToolTip(data[key])
+                table.setItem(ri, ci, it)
+        table.setUpdatesEnabled(True)
+
+    def _admin_query_events(self):
+        sql = "SELECT * FROM naplo WHERE idopont >= ? AND idopont <= ?"
+        params = [self.adm_from.date().toString("yyyy-MM-dd") + " 00:00:00", self.adm_to.date().toString("yyyy-MM-dd") + " 23:59:59"]
+        cond = self.LOG_FILTERS[self.adm_type.currentIndex()][1]
+        if cond:
+            sql += f" AND ({cond})"
+        q = self.adm_search.text().strip()
+        if q:
+            sql += " AND (r18_kod LIKE ? OR esemeny LIKE ? OR reszletek LIKE ? OR elotte LIKE ? OR utana LIKE ? OR forras LIKE ?)"
+            params += [f"%{q}%"] * 6
+        sql += " ORDER BY id DESC LIMIT 20000"
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+
+    def admin_load_all(self):
+        try:
+            self._adm_all_rows = self._admin_query_events()
+        except Exception as e:
+            self.adm_all_count.setText(f"❌ Hiba: {e}")
+            return
+        self._admin_fill_events(self.adm_all, self._adm_all_rows, ["idopont", "esemeny", "forras", "kod", "C", "D", "E", "valt"])
+        self.adm_all_count.setText(f"{len(self._adm_all_rows)} esemény (legfeljebb 20 000 a kiválasztott időszakban)")
+
+    def admin_export_all(self):
+        import csv
+        rows = self._admin_query_events()
+        path, _ = QFileDialog.getSaveFileName(self, "Változások exportálása",
+                                              f"raktar_valtozasok_{datetime.date.today().isoformat()}.csv", "CSV (*.csv)")
+        if not path:
+            return
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:   # utf-8-sig: az Excel helyesen nyitja meg
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["Időpont", "Esemény", "Honnan / hogyan", "R18-kód", "Részletek"]
+                       + [f"ELŐTTE {c}" for c in NAPLO_COLS] + [f"UTÁNA {c}" for c in NAPLO_COLS])
+            for r in rows:
+                b = json.loads(r["elotte"]) if r.get("elotte") else {}
+                a = json.loads(r["utana"]) if r.get("utana") else {}
+                w.writerow([safe_str(r.get("idopont")), safe_str(r.get("esemeny")), safe_str(r.get("forras")),
+                            safe_str(r.get("r18_kod")), safe_str(r.get("reszletek"))]
+                           + [b.get(c, "") for c in NAPLO_COLS] + [a.get(c, "") for c in NAPLO_COLS])
+        self.trigger_toast(f"📤 {len(rows)} esemény exportálva: {os.path.basename(path)}")
+
+    def admin_load_deleted(self):
+        """Minden törölt / kiürített termék teljes adata (ToroltSor archívum + napló törlés-bejegyzések)."""
+        rows, seen = [], set()
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT idopont, r18_kod, forras, payload FROM torolt_archiv ORDER BY id DESC")
+            for r in cur.fetchall():
+                d = json.loads(r["payload"]) if r["payload"] else {}
+                sig = json.dumps(d, sort_keys=True, ensure_ascii=False)
+                if d and sig not in seen:
+                    seen.add(sig); rows.append((safe_str(r["idopont"]), safe_str(r["forras"]), d))
+            cur.execute("SELECT idopont, esemeny, forras, elotte FROM naplo WHERE elotte IS NOT NULL AND "
+                        "(esemeny LIKE 'TÖRLÉS%' OR esemeny LIKE 'DUPLIKÁCIÓ%') ORDER BY id DESC")
+            for r in cur.fetchall():
+                d = json.loads(r["elotte"])
+                sig = json.dumps(d, sort_keys=True, ensure_ascii=False)
+                if d and _row_has_product_data(d) and sig not in seen:
+                    seen.add(sig); rows.append((safe_str(r["idopont"]), f"{safe_str(r['esemeny'])} | {safe_str(r['forras'])}", d))
+            conn.close()
+        except Exception as e:
+            self.adm_del_count.setText(f"❌ Hiba: {e}")
+            return
+        rows.sort(key=lambda x: x[0], reverse=True)
+        q = self.adm_del_search.text().strip().lower()
+        if q:
+            rows = [r for r in rows if q in (" ".join(r[2].values()) + " " + r[1]).lower()]
+        self._adm_del_rows = rows
+        t = self.adm_del
+        t.setUpdatesEnabled(False)
+        t.setRowCount(len(rows))
+        for ri, (ido, forras, d) in enumerate(rows):
+            for ci, v in enumerate([ido, forras] + [d.get(c, "") for c in NAPLO_COLS]):
+                it = QTableWidgetItem(str(v))
+                if ci == 1:
+                    it.setToolTip(str(v))
+                t.setItem(ri, ci, it)
+        t.setUpdatesEnabled(True)
+        self.adm_del_count.setText(f"{len(rows)} törölt / kiürített termék (teljes adattal). Kijelölés + ♻️ = visszaállítás.")
+
+    def admin_restore_deleted(self):
+        sel = sorted({i.row() for i in self.adm_del.selectedIndexes()})
+        if not sel:
+            self.trigger_toast("⚠️ Jelölj ki egy törölt terméket!")
+            return
+        ri = sel[0]
+        _, _, d = self._adm_del_rows[ri]
+        code = norm_code(d.get("A"))
+        now = get_row_snapshot(code)
+        msg = (f"Visszaállítod a(z) {code} terméket ezekkel az adatokkal?\n\n{format_row_for_log(d)}")
+        if now and _row_has_product_data(now):
+            msg += f"\n\n⚠️ FIGYELEM: ezen az R18-számon most ez van, ami FELÜLÍRÓDIK:\n{format_row_for_log(now)}"
+        if SilentConfirmDialog("♻️ Visszaállítás", msg, self).exec() != QDialog.DialogCode.Accepted:
+            return
+        data = {c: str(d.get(c, "")) for c in NAPLO_COLS}
+        data["A"] = code
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute(f"UPDATE termekek SET {', '.join(c + '=?' for c in NAPLO_COLS)} WHERE UPPER(TRIM(A))=? OR UPPER(TRIM(B))=?",
+                        (*[data[c] for c in NAPLO_COLS], code, code))
+            if cur.rowcount == 0:
+                cur.execute(f"INSERT INTO termekek ({', '.join(NAPLO_COLS)}, szin) VALUES ({', '.join('?' * 16)}, 'FEHÉR')",
+                            [data[c] for c in NAPLO_COLS])
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            self.trigger_toast(f"❌ Visszaállítási hiba: {e}")
+            return
+        payload = dict(data); payload["_force"] = True
+        enqueue_outbox(payload)
+        flush_outbox_async()
+        log_event(code, "FELVÉTEL (törölt termék visszaállítva)", "", now, get_row_snapshot(code),
+                  "🛡️ Admin fül - ♻️ Kijelölt visszaállítása gomb")
+        self.trigger_toast(f"♻️ {code} visszaállítva (helyi + szerver + Google Sheets)")
+        if hasattr(self, "silent_update_excel_table"):
+            self.silent_update_excel_table()
+
+    def admin_load_history(self):
+        code = norm_code(self.adm_hist_code.text())
+        if not code:
+            return
+        self.adm_hist_code.selectAll()
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM naplo WHERE UPPER(TRIM(r18_kod)) = ? ORDER BY id DESC", (code,))
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.execute("SELECT datum, platform, vevo, ar, darab, tracking FROM eladasok WHERE UPPER(TRIM(A)) = ? AND torolve = 0", (code,))
+        sales = cur.fetchall()
+        conn.close()
+        now = get_row_snapshot(code)
+        import html as _html
+        txt = f"<b>{_html.escape(code)}</b> - jelenleg: "
+        txt += (_html.escape(format_row_for_log(now)) if now and _row_has_product_data(now)
+                else "<span style='color:#ff5252;'>nincs (törölve / üres)</span>")
+        if sales:
+            txt += "<br>💰 Eladások: " + " | ".join(
+                _html.escape(f"{s['datum']} {SALES_SHEETS.get(s['platform'], {}).get('cim', s['platform'])} {s['darab']} db, "
+                             f"vevő: {s['vevo'] or '-'}, ár: {s['ar'] or '-'}") for s in sales)
+        txt += f"<br>📜 {len(rows)} esemény a naplóban"
+        self.adm_hist_now.setText(txt)
+        self._adm_hist_rows = rows
+        self._admin_fill_events(self.adm_hist, rows, ["idopont", "esemeny", "forras", "valt"])
+        if rows:
+            self.adm_hist.selectRow(0)
+
+    def admin_load_outbox(self):
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM sync_outbox ORDER BY id")
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.execute("SELECT COUNT(*) FROM eladasok WHERE sheets_synced = 0")
+        sales_pending = cur.fetchone()[0]
+        conn.close()
+        t = self.adm_out
+        t.setRowCount(len(rows))
+        op_names = {"upsert": "Mentés", "delete": "Törlés", "color": "Szín", "archive": "ToroltSor"}
+        for ri, r in enumerate(rows):
+            try:
+                pl = json.loads(r["payload"])
+            except Exception:
+                pl = {}
+            vals = [safe_str(r.get("created_at")), op_names.get(pl.get("_op", "upsert"), pl.get("_op", "")),
+                    safe_str(pl.get("A")), "✅" if r.get("vps_synced") else "⏳", "✅" if r.get("sheets_synced") else "⏳",
+                    str(r.get("attempts") or 0), safe_str(r.get("last_attempt")),
+                    format_row_for_log({k: v for k, v in pl.items() if not str(k).startswith("_")})]
+            for ci, v in enumerate(vals):
+                t.setItem(ri, ci, QTableWidgetItem(v))
+        self.adm_out_count.setText(f"{len(rows)} tétel vár feltöltésre (VPS / Google Sheets)  |  💰 {sales_pending} eladás vár az "
+                                   f"eladási munkalapokra. Ha sokáig itt marad valami: nincs internet vagy hiba van - "
+                                   f"lásd ⚙️ Folyamat napló.")
 
     # -------------------------------------------------------------------
     # TAB 8: FOLYAMAT ÉS SZINKRON NAPLÓ TAB
@@ -6693,6 +7052,43 @@ class RaktarApp(QMainWindow):
         self.local_filter_color_all.setChecked(True)
         self.refresh_local_db_table_view()
 
+    # -------------------------------------------------------------------
+    # FÜLSOR: 4 fő fül mindig látszik, a többi a "☰ További fülek" menüből nyílik
+    # -------------------------------------------------------------------
+    def setup_tab_menu(self):
+        self._main_tabs = [w for w in (getattr(self, "tab_excel_live", None), self.tab_search, self.tab_pda, self.tab_sold) if w]
+        self._extra_tabs = [self.tabs.widget(i) for i in range(self.tabs.count()) if self.tabs.widget(i) not in self._main_tabs]
+
+        self.btn_more_tabs = QToolButton()
+        self.btn_more_tabs.setText("☰ További fülek ▾")
+        self.btn_more_tabs.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.btn_more_tabs.setStyleSheet("QToolButton { background-color: #2D2D2D; color: #29b6f6; font-weight: bold; "
+                                         "padding: 6px 14px; border: 1px solid #29b6f6; border-radius: 4px; }"
+                                         "QToolButton::menu-indicator { image: none; }")
+        menu = QMenu(self.btn_more_tabs)
+        menu.setStyleSheet("QMenu { background-color: #1E1E1E; color: white; font-size: 15px; border: 1px solid #29b6f6; }"
+                           "QMenu::item { padding: 8px 24px; } QMenu::item:selected { background-color: #29b6f6; color: black; }")
+        for w in self._extra_tabs:
+            act = menu.addAction(self.tabs.tabText(self.tabs.indexOf(w)))
+            act.triggered.connect(lambda checked=False, tw=w: self.open_extra_tab(tw))
+        self.btn_more_tabs.setMenu(menu)
+        self.tabs.setCornerWidget(self.btn_more_tabs, Qt.Corner.TopRightCorner)
+        self._hide_extra_tabs()
+
+    def _hide_extra_tabs(self, keep=None):
+        bar = self.tabs.tabBar()
+        for w in self._extra_tabs:
+            idx = self.tabs.indexOf(w)
+            if idx >= 0 and w is not keep and w is not self.tabs.currentWidget():
+                bar.setTabVisible(idx, False)
+
+    def open_extra_tab(self, w):
+        """A menüből választott fül: ideiglenesen megjelenik a fülsoron (hogy lásd, hol vagy), és rá vált."""
+        self.tabs.tabBar().setTabVisible(self.tabs.indexOf(w), True)
+        self.tabs.setCurrentWidget(w)
+        self._hide_extra_tabs(keep=w)
+        self.btn_more_tabs.setText(f"☰ {self.tabs.tabText(self.tabs.indexOf(w))} ▾")
+
     def _tab_is_current(self, tab_attr):
         """Igaz, ha a megadott fül látszik (a fülek létrehozása előtt mindig igaz)."""
         if not hasattr(self, "tabs") or not hasattr(self, tab_attr):
@@ -6702,6 +7098,10 @@ class RaktarApp(QMainWindow):
     def on_tab_changed(self, index):
         """Fülváltás: a háttérben elhalasztott frissítéseket csak most, a fül megjelenése UTÁN végezzük el."""
         w = self.tabs.widget(index)
+        # Fő fülre lépve a menüből nyitott fül újra elrejtőzik
+        if hasattr(self, "_main_tabs") and w in self._main_tabs:
+            QTimer.singleShot(0, self._hide_extra_tabs)
+            self.btn_more_tabs.setText("☰ További fülek ▾")
 
         def later():
             if w is getattr(self, "tab_search", None) and getattr(self, "_cards_dirty", False):
@@ -6714,6 +7114,8 @@ class RaktarApp(QMainWindow):
                 self.refresh_sold_table()
             elif w is getattr(self, "tab_server", None) and not getattr(self, "_server_items", None):
                 self.load_server_items()
+            elif w is getattr(self, "tab_admin", None):
+                self._admin_tab_changed(self.admin_tabs.currentIndex())
         QTimer.singleShot(30, later)
 
     def refresh_local_db_table_view(self):
@@ -7296,7 +7698,7 @@ class RaktarApp(QMainWindow):
             self.silent_update_excel_table()
 
         # 2. A kártyákat csak akkor frissítjük, ha a Gyorskereső fülön vagyunk
-        if hasattr(self, 'tabs') and self.tabs.currentIndex() == 1:
+        if hasattr(self, 'tabs') and self.tabs.currentWidget() is getattr(self, "tab_search", None):
             if hasattr(self, 'update_cards_only'):
                 self.update_cards_only()
 
