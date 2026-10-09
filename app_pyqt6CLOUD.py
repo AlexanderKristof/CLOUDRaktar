@@ -63,6 +63,8 @@ PHOTOS_ENABLED = True
 PHOTO_MAX_PARALLEL_LOADS = 2
 _photo_load_slots = threading.Semaphore(PHOTO_MAX_PARALLEL_LOADS)
 PHOTO_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
+# Az előnézet mérete a kártyán (pixel)
+PHOTO_THUMB_W, PHOTO_THUMB_H = 80, 70
 PHOTO_INDEX_REFRESH_SEC = 600          # ennyi időnként újraolvassa a mappákat (új fotók)
 _PHOTO_CODE_RE = re.compile(r"R18\s*[-_/ ]?\s*0*(\d{1,6})(?!\d)", re.IGNORECASE)
 
@@ -148,18 +150,40 @@ photo_index = PhotoIndex()
 _thumb_cache = {}
 _thumb_req = [0]
 
+# Windows "csak a felhőben" fájl (Synology Drive / OneDrive igény szerinti szinkron) jelzői
+_CLOUD_ONLY_ATTRS = 0x00400000 | 0x00040000 | 0x00001000   # RECALL_ON_DATA_ACCESS | RECALL_ON_OPEN | OFFLINE
+
+def is_cloud_only(path):
+    """Igaz, ha a fájl csak a felhőben van (a gépen nincs letöltve). A vizsgálat NEM indít letöltést."""
+    try:
+        attrs = getattr(os.stat(path), "st_file_attributes", 0)
+        return bool(attrs & _CLOUD_ONLY_ATTRS)
+    except OSError:
+        return True
+
 def load_image_scaled(path, max_w, max_h):
-    """Kép betöltése MÁR KICSINYÍTVE (gyors, kevés memória) - háttérszálon is hívható (QImage)."""
-    reader = QImageReader(path)
+    """Kép betöltése MÁR KICSINYÍTVE (gyors, kevés memória) - háttérszálon is hívható (QImage).
+    A fájlt a Python olvassa be (közben a többi szál - a felület - fut tovább, akkor is, ha a
+    Synology Drive épp letölti vagy engedélyre vár), a dekódolás már a memóriából megy."""
+    from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+    with open(path, "rb") as f:
+        data = f.read()
+    buf = QBuffer()
+    buf.setData(QByteArray(data))
+    buf.open(QIODevice.OpenModeFlag.ReadOnly)
+    reader = QImageReader(buf)
     reader.setAutoTransform(True)                       # telefonos fotók elforgatása (EXIF)
     size = reader.size()
     if size.isValid() and (size.width() > max_w or size.height() > max_h):
         size.scale(max_w, max_h, Qt.AspectRatioMode.KeepAspectRatio)
         reader.setScaledSize(size)
-    return reader.read()
+    img = reader.read()
+    buf.close()
+    return img
 
-def request_thumbnail(path, max_w=120, max_h=120):
-    """Előnézet kérése háttérszálon; a kész QImage a photo_bus.thumb_ready jelzésen jön. Visszaad: kérés-azonosító."""
+def request_thumbnail(path, max_w=120, max_h=120, allow_download=False):
+    """Előnézet kérése háttérszálon; a kész QImage a photo_bus.thumb_ready jelzésen jön. Visszaad: kérés-azonosító.
+    allow_download=False: ha a fájl csak a felhőben van, NEM tölti le, hanem "CLOUD" jelzést küld."""
     _thumb_req[0] += 1
     rid = _thumb_req[0]
     key = (path, max_w, max_h)
@@ -168,6 +192,9 @@ def request_thumbnail(path, max_w=120, max_h=120):
         return rid
 
     def job():
+        if not allow_download and is_cloud_only(path):
+            photo_bus.thumb_ready.emit(rid, "CLOUD")
+            return
         with _photo_load_slots:              # egyszerre legfeljebb PHOTO_MAX_PARALLEL_LOADS kép
             try:
                 img = load_image_scaled(path, max_w, max_h)
@@ -2103,14 +2130,15 @@ class PhotoDialog(QDialog):
             return
         self.i = i % len(self.paths)
         self.info.setText(f"{self.code}  |  {self.i + 1} / {len(self.paths)}  |  {os.path.basename(self.paths[self.i])}")
-        self.img.setText("⏳ Betöltés...")
-        self._req = request_thumbnail(self.paths[self.i], 1600, 1200)
+        cloud = is_cloud_only(self.paths[self.i])
+        self.img.setText("☁️ Letöltés a NAS-ról... (a program közben használható)" if cloud else "⏳ Betöltés...")
+        self._req = request_thumbnail(self.paths[self.i], 1600, 1200, allow_download=True)
 
     def _on_img(self, rid, img):
         if rid != self._req:
             return
         try:
-            if img is None or img.isNull():
+            if not isinstance(img, QImage) or img.isNull():
                 self.img.setText("❌ A kép nem olvasható (lehet, hogy a Synology Drive még nem töltötte le).")
                 return
             pm = QPixmap.fromImage(img).scaled(self.img.width(), self.img.height(), Qt.AspectRatioMode.KeepAspectRatio,
@@ -4891,14 +4919,15 @@ class RaktarApp(QMainWindow):
     def create_photo_widget(self, code):
         """📷 Termékfotó a kártyán: kicsinyített előnézet (háttérben töltve), kattintásra nagy nézet."""
         box = QWidget()
-        box.setFixedWidth(130)
+        box.setFixedWidth(PHOTO_THUMB_W + 6)
         lay = QVBoxLayout(box)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(2)
         thumb = QPushButton()
-        thumb.setFixedSize(124, 110)
+        thumb.setFixedSize(PHOTO_THUMB_W, PHOTO_THUMB_H)
         thumb.setCursor(Qt.CursorShape.PointingHandCursor)
-        thumb.setStyleSheet("QPushButton { background-color: #111; border: 1px solid #444; border-radius: 6px; color: #777; }"
+        thumb.setStyleSheet("QPushButton { background-color: #111; border: 1px solid #444; border-radius: 6px; color: #888; "
+                            "font-size: 10px; padding: 0px; }"
                             "QPushButton:hover { border: 2px solid #29b6f6; }")
         lay.addWidget(thumb)
         cap = QLabel("")
@@ -4907,12 +4936,12 @@ class RaktarApp(QMainWindow):
         lay.addWidget(cap)
 
         if not photo_index.dirs():
-            thumb.setText("📁\nFotómappa\nbeállítása")
+            thumb.setText("📁 Fotó-\nmappa")
             thumb.clicked.connect(self.choose_photo_dir)
             return box
         paths = photo_index.photos(code)
         if not paths:
-            thumb.setText("📷\nnincs fotó" if photo_index.built_at else "📷\n⏳")
+            thumb.setText("📷\nnincs" if photo_index.built_at else "📷\n⏳")
             thumb.setToolTip("Nincs fotó ehhez az R18-számhoz a fotómappában\n(a fájl- vagy mappanévben kell szerepelnie, pl. "
                              f"{code}.jpg)")
             thumb.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(photo_index.dirs()[0])))
@@ -4921,26 +4950,32 @@ class RaktarApp(QMainWindow):
         cap.setText(f"📷 {len(paths)} fotó")
         thumb.setToolTip(f"{len(paths)} fotó - kattints a nagy nézethez")
         thumb.clicked.connect(lambda: PhotoDialog(code, paths, 0, self).exec())
-        rid = request_thumbnail(paths[0], 124, 110)
+        holder = {}
 
-        def on_ready(r, img, rid=rid, t=thumb):
-            if r != rid:
+        def on_ready(r, img, t=thumb):
+            if r != holder.get("rid"):
                 return
             try:
                 photo_bus.thumb_ready.disconnect(on_ready)
             except Exception:
                 pass
             try:
-                if img is not None and not img.isNull():
+                if img == "CLOUD":
+                    t.setText("☁️ NAS\nkattints")
+                    t.setToolTip("A fotó csak a NAS-on van, ezen a gépen nincs letöltve.\nKattints, és letölti / megmutatja.\n"
+                                 "Tipp: a Synology Drive-ban a fotómappára 'Mindig a gépen tartás' -> előnézet is lesz.")
+                elif isinstance(img, QImage) and not img.isNull():
                     from PyQt6.QtGui import QIcon
                     t.setText("")
                     t.setIcon(QIcon(QPixmap.fromImage(img)))
                     t.setIconSize(img.size())
                 else:
-                    t.setText("📷\n(nem olvasható)")
+                    t.setText("📷 ❌")
             except RuntimeError:
                 pass   # a kártya közben megszűnt
+        # ELŐBB feliratkozunk, csak utána kérjük a képet (különben a gyors válasz elveszhet)
         photo_bus.thumb_ready.connect(on_ready)
+        holder["rid"] = request_thumbnail(paths[0], PHOTO_THUMB_W, PHOTO_THUMB_H)
         return box
 
     def choose_photo_dir(self):
