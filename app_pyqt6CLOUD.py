@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QAbstractItemDelegate, QComboBox, QPlainTextEdit, QAbstractSpinBox, QStyle,
     QToolButton, QMenu, QSplitter
 )
-from PyQt6.QtGui import QColor, QPixmap, QFont, QDesktopServices, QCloseEvent, QShortcut, QKeySequence, QIntValidator, QPainter
+from PyQt6.QtGui import QColor, QPixmap, QFont, QDesktopServices, QCloseEvent, QShortcut, QKeySequence, QIntValidator, QPainter, QImageReader, QImage
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEnginePage
 
@@ -50,6 +50,121 @@ class OutboxSignalBus(QObject):
     conflicts_detected = pyqtSignal(list)
 
 outbox_signal_bus = OutboxSignalBus()
+
+# -------------------------------------------------------------------
+# 📷 TERMÉKFOTÓK a NAS-ról (Synology Drive szinkronizált mappa)
+# A fotó akkor tartozik egy termékhez, ha a FÁJLNEVÉBEN vagy valamelyik MAPPANEVÉBEN szerepel az
+# R18-szám (R18-12960, R18_12960, R18 12960, r18/12960 ...). A mappák a beallitasok.json-ban
+# ("foto_mappak") vannak, a kártyán a "📁 Fotómappa" gombbal állíthatók.
+# -------------------------------------------------------------------
+PHOTO_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
+PHOTO_INDEX_REFRESH_SEC = 600          # ennyi időnként újraolvassa a mappákat (új fotók)
+_PHOTO_CODE_RE = re.compile(r"R18\s*[-_/ ]?\s*0*(\d{1,6})(?!\d)", re.IGNORECASE)
+
+class PhotoBus(QObject):
+    thumb_ready = pyqtSignal(int, object)      # (kérés-azonosító, QImage)
+    index_ready = pyqtSignal(int)              # fotók száma
+
+photo_bus = PhotoBus()
+
+class PhotoIndex:
+    """R18-kód -> fotófájlok listája (háttérszálon építve, a kártyák csak kiolvassák)."""
+    def __init__(self):
+        self.by_code = {}
+        self.built_at = 0.0
+        self.building = False
+        self.lock = threading.Lock()
+
+    @staticmethod
+    def default_dirs():
+        dirs = []
+        home = os.path.expanduser("~")
+        for name in ("SynologyDrive", "Synology Drive"):
+            p = os.path.join(home, name)
+            if os.path.isdir(p):
+                dirs.append(p)
+        return dirs
+
+    def dirs(self):
+        saved = load_config_value("foto_mappak")
+        if isinstance(saved, list) and saved:
+            return [d for d in saved if d]
+        return self.default_dirs()
+
+    def build(self):
+        if self.building:
+            return
+        self.building = True
+        try:
+            idx = {}
+            for root_dir in self.dirs():
+                if not os.path.isdir(root_dir):
+                    continue
+                for dirpath, dirnames, filenames in os.walk(root_dir):
+                    dirnames[:] = [d for d in dirnames if not d.startswith(("#", "@", "."))]   # Synology rendszermappák
+                    folder_codes = {f"R18-{int(m)}" for m in _PHOTO_CODE_RE.findall(os.path.relpath(dirpath, root_dir))}
+                    for fn in filenames:
+                        if not fn.lower().endswith(PHOTO_EXTENSIONS):
+                            continue
+                        codes = {f"R18-{int(m)}" for m in _PHOTO_CODE_RE.findall(fn)} or folder_codes
+                        for c in codes:
+                            idx.setdefault(c, []).append(os.path.join(dirpath, fn))
+            for c in idx:
+                idx[c].sort()
+            with self.lock:
+                self.by_code = idx
+                self.built_at = time.monotonic()
+            photo_bus.index_ready.emit(sum(len(v) for v in idx.values()))
+        except Exception as e:
+            print(f"[Fotó] Index hiba: {e}")
+        finally:
+            self.building = False
+
+    def build_async(self, force=False):
+        if force or time.monotonic() - self.built_at > PHOTO_INDEX_REFRESH_SEC:
+            threading.Thread(target=self.build, daemon=True).start()
+
+    def photos(self, code):
+        m = _PHOTO_CODE_RE.search(str(code or ""))
+        key = f"R18-{int(m.group(1))}" if m else norm_code(code)
+        with self.lock:
+            return list(self.by_code.get(key, []))
+
+photo_index = PhotoIndex()
+_thumb_cache = {}
+_thumb_req = [0]
+
+def load_image_scaled(path, max_w, max_h):
+    """Kép betöltése MÁR KICSINYÍTVE (gyors, kevés memória) - háttérszálon is hívható (QImage)."""
+    reader = QImageReader(path)
+    reader.setAutoTransform(True)                       # telefonos fotók elforgatása (EXIF)
+    size = reader.size()
+    if size.isValid() and (size.width() > max_w or size.height() > max_h):
+        size.scale(max_w, max_h, Qt.AspectRatioMode.KeepAspectRatio)
+        reader.setScaledSize(size)
+    return reader.read()
+
+def request_thumbnail(path, max_w=120, max_h=120):
+    """Előnézet kérése háttérszálon; a kész QImage a photo_bus.thumb_ready jelzésen jön. Visszaad: kérés-azonosító."""
+    _thumb_req[0] += 1
+    rid = _thumb_req[0]
+    key = (path, max_w, max_h)
+    if key in _thumb_cache:
+        QTimer.singleShot(0, lambda: photo_bus.thumb_ready.emit(rid, _thumb_cache[key]))
+        return rid
+
+    def job():
+        try:
+            img = load_image_scaled(path, max_w, max_h)
+        except Exception:
+            img = QImage()
+        if not img.isNull():
+            if len(_thumb_cache) > 500:
+                _thumb_cache.clear()
+            _thumb_cache[key] = img
+        photo_bus.thumb_ready.emit(rid, img)
+    threading.Thread(target=job, daemon=True).start()
+    return rid
 
 # -------------------------------------------------------------------
 # ALAPÉRTÉKEK ÉS BEÁLLÍTÁSOK
@@ -1936,6 +2051,74 @@ class ConflictDialog(QDialog):
         return [c for c, chk in zip(self.conflicts, self.checks) if chk.isChecked()]
 
 
+class PhotoDialog(QDialog):
+    """📷 Termékfotók nagyban, lapozással (← → / gombok)."""
+    def __init__(self, code, paths, start=0, parent=None):
+        super().__init__(parent)
+        self.code, self.paths, self.i = code, paths, start
+        self.setWindowTitle(f"📷 {code} - fotók")
+        self.resize(1000, 760)
+        self.setStyleSheet("QDialog { background-color: #121212; color: white; } QLabel { color: white; }")
+        lay = QVBoxLayout(self)
+        self.info = QLabel("")
+        self.info.setStyleSheet("color: #29b6f6; font-weight: bold; font-size: 14px;")
+        lay.addWidget(self.info)
+        self.img = QLabel("⏳")
+        self.img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.img.setMinimumSize(400, 300)
+        lay.addWidget(self.img, stretch=1)
+        bar = QHBoxLayout()
+        b_prev = QPushButton("◀ Előző"); b_prev.clicked.connect(lambda: self.show_i(self.i - 1)); bar.addWidget(b_prev)
+        b_next = QPushButton("Következő ▶"); b_next.clicked.connect(lambda: self.show_i(self.i + 1)); bar.addWidget(b_next)
+        bar.addStretch()
+        b_file = QPushButton("🖼️ Megnyitás képnézegetőben")
+        b_file.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.paths[self.i])))
+        bar.addWidget(b_file)
+        b_dir = QPushButton("📂 Mappa megnyitása")
+        b_dir.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(self.paths[self.i]))))
+        bar.addWidget(b_dir)
+        lay.addLayout(bar)
+        self._req = None
+        photo_bus.thumb_ready.connect(self._on_img)
+        self.show_i(start)
+
+    def show_i(self, i):
+        if not self.paths:
+            return
+        self.i = i % len(self.paths)
+        self.info.setText(f"{self.code}  |  {self.i + 1} / {len(self.paths)}  |  {os.path.basename(self.paths[self.i])}")
+        self.img.setText("⏳ Betöltés...")
+        self._req = request_thumbnail(self.paths[self.i], 1600, 1200)
+
+    def _on_img(self, rid, img):
+        if rid != self._req:
+            return
+        try:
+            if img is None or img.isNull():
+                self.img.setText("❌ A kép nem olvasható (lehet, hogy a Synology Drive még nem töltötte le).")
+                return
+            pm = QPixmap.fromImage(img).scaled(self.img.width(), self.img.height(), Qt.AspectRatioMode.KeepAspectRatio,
+                                               Qt.TransformationMode.SmoothTransformation)
+            self.img.setPixmap(pm)
+        except RuntimeError:
+            pass
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Left:
+            self.show_i(self.i - 1)
+        elif e.key() == Qt.Key.Key_Right:
+            self.show_i(self.i + 1)
+        else:
+            super().keyPressEvent(e)
+
+    def done(self, r):
+        try:
+            photo_bus.thumb_ready.disconnect(self._on_img)
+        except Exception:
+            pass
+        super().done(r)
+
+
 class RestoreDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3381,6 +3564,14 @@ class RaktarApp(QMainWindow):
         self.init_admin_tab()
         self.setup_tab_menu()
 
+        # 📷 Termékfotók: a fotómappa beolvasása háttérben, 10 percenként frissítve
+        photo_bus.index_ready.connect(self._on_photo_index_ready)
+        photo_index.build_async(force=True)
+        self.photo_timer = QTimer()
+        self.photo_timer.setInterval(PHOTO_INDEX_REFRESH_SEC * 1000)
+        self.photo_timer.timeout.connect(lambda: photo_index.build_async(force=True))
+        self.photo_timer.start()
+
         # GARANTÁLTAN AZ 1. FÜLRE (Excel Live Munkalap) FÓKUSZÁL INDÍTÁSKOR:
         self.tabs.setCurrentIndex(0)
         # Elhalasztott (nem látható fülre szóló) frissítések elvégzése fülváltáskor
@@ -4625,6 +4816,8 @@ class RaktarApp(QMainWindow):
 
         main_card_layout.addWidget(left_box, stretch=3)
 
+        main_card_layout.addWidget(self.create_photo_widget(code))
+
         qr_bytes, bar_bytes = generate_codes_in_memory(code, cikkszam_text=cikkszam, tipus_text=tipus)
         if qr_bytes and bar_bytes:
             codes_box = QWidget()
@@ -4677,6 +4870,76 @@ class RaktarApp(QMainWindow):
         main_card_layout.addWidget(print_box)
 
         return card
+
+    def create_photo_widget(self, code):
+        """📷 Termékfotó a kártyán: kicsinyített előnézet (háttérben töltve), kattintásra nagy nézet."""
+        box = QWidget()
+        box.setFixedWidth(130)
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        thumb = QPushButton()
+        thumb.setFixedSize(124, 110)
+        thumb.setCursor(Qt.CursorShape.PointingHandCursor)
+        thumb.setStyleSheet("QPushButton { background-color: #111; border: 1px solid #444; border-radius: 6px; color: #777; }"
+                            "QPushButton:hover { border: 2px solid #29b6f6; }")
+        lay.addWidget(thumb)
+        cap = QLabel("")
+        cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cap.setStyleSheet("color: #aaa; font-size: 11px;")
+        lay.addWidget(cap)
+
+        if not photo_index.dirs():
+            thumb.setText("📁\nFotómappa\nbeállítása")
+            thumb.clicked.connect(self.choose_photo_dir)
+            return box
+        paths = photo_index.photos(code)
+        if not paths:
+            thumb.setText("📷\nnincs fotó" if photo_index.built_at else "📷\n⏳")
+            thumb.setToolTip("Nincs fotó ehhez az R18-számhoz a fotómappában\n(a fájl- vagy mappanévben kell szerepelnie, pl. "
+                             f"{code}.jpg)")
+            thumb.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(photo_index.dirs()[0])))
+            return box
+        thumb.setText("⏳")
+        cap.setText(f"📷 {len(paths)} fotó")
+        thumb.setToolTip(f"{len(paths)} fotó - kattints a nagy nézethez")
+        thumb.clicked.connect(lambda: PhotoDialog(code, paths, 0, self).exec())
+        rid = request_thumbnail(paths[0], 124, 110)
+
+        def on_ready(r, img, rid=rid, t=thumb):
+            if r != rid:
+                return
+            try:
+                photo_bus.thumb_ready.disconnect(on_ready)
+            except Exception:
+                pass
+            try:
+                if img is not None and not img.isNull():
+                    from PyQt6.QtGui import QIcon
+                    t.setText("")
+                    t.setIcon(QIcon(QPixmap.fromImage(img)))
+                    t.setIconSize(img.size())
+                else:
+                    t.setText("📷\n(nem olvasható)")
+            except RuntimeError:
+                pass   # a kártya közben megszűnt
+        photo_bus.thumb_ready.connect(on_ready)
+        return box
+
+    def choose_photo_dir(self):
+        start = (photo_index.dirs() or [os.path.expanduser("~")])[0]
+        d = QFileDialog.getExistingDirectory(self, "Válaszd ki a fotók mappáját (Synology Drive)", start)
+        if not d:
+            return
+        save_config_value("foto_mappak", [d])
+        self.trigger_toast("📷 Fotómappa beállítva - fotók beolvasása...")
+        photo_index.build_async(force=True)
+
+    def _on_photo_index_ready(self, count):
+        self.append_process_log(f"📷 Fotók beolvasva: {count} kép, {len(photo_index.by_code)} termékhez "
+                                f"({'; '.join(photo_index.dirs())})", "#29b6f6")
+        if self._tab_is_current("tab_search"):
+            self.update_cards_only()
 
     def save_card_data_action(self, row_id, code, new_m, new_d, new_e, new_s, clean_a, new_db, new_i="", new_k="", new_l=""):
         self.card_worker = CardUpdateWorker(row_id, code, new_m, new_d, new_e, new_s, clean_a, new_db, new_i, new_k, new_l)
