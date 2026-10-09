@@ -7266,14 +7266,6 @@ class RaktarApp(QMainWindow):
             self.process_log_text.clear()
 
     def closeEvent(self, event: QCloseEvent):
-        # Ablak állapotának megjegyzése (teljes méret / saját méret és hely) a következő indításhoz
-        try:
-            maxed = self.isMaximized() or self.isFullScreen()
-            save_config_value("ablak_maximalizalva", bool(maxed))
-            if not maxed:
-                save_config_value("ablak_geometria", bytes(self.saveGeometry().toHex()).decode())
-        except Exception:
-            pass
         for worker in list(self.active_workers):
             if worker.isRunning():
                 worker.quit()
@@ -8127,19 +8119,9 @@ class RaktarApp(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = RaktarApp()
-    # Indítás: alapból TELJES MÉRETBEN; ha legutóbb saját méretben zárták be, abban a méretben és helyen
-    if load_config_value("ablak_maximalizalva", True):
-        window.showMaximized()
-        # Windowson az első megjelenítéskor a teljes méret néha elveszik (miközben a tartalom még töltődik) -
-        # fél másodperc múlva ellenőrizzük és szükség esetén újra teljes méretre állítjuk
-        QTimer.singleShot(500, lambda: None if window.isMaximized() else window.showMaximized())
-    else:
-        geo = load_config_value("ablak_geometria")
-        if geo:
-            try:
-                from PyQt6.QtCore import QByteArray
-                window.restoreGeometry(QByteArray.fromHex(geo.encode()))
-            except Exception:
-                pass
-        window.show()
+    # MINDIG TELJES MÉRETBEN indul. Windowson az első megjelenítéskor a teljes méret néha elveszik
+    # (miközben a tartalom még töltődik), ezért kétszer is ellenőrizzük és szükség esetén újra beállítjuk.
+    window.showMaximized()
+    for delay in (300, 1500):
+        QTimer.singleShot(delay, lambda: None if (window.isMaximized() or window.isFullScreen()) else window.showMaximized())
     sys.exit(app.exec())
