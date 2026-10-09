@@ -2905,20 +2905,60 @@ class PrintButtonDelegate(QStyledItemDelegate):
         return super().editorEvent(event, model, option, index)
 
 
+# G (Állapot) oszlop választható értékei az Excel Live munkalapon
+ALLAPOT_OPTIONS = ["ÚJ", "HASZNÁLT", "FELÚJÍTOTT"]
+ALLAPOT_COL = 6   # G
+
+
 class ExcelCellDelegate(QStyledItemDelegate):
-    """Cellaszerkesztő: a nyilak szerkesztés közben is átléptetnek a szomszéd cellába"""
+    """Cellaszerkesztő: a nyilak szerkesztés közben is átléptetnek a szomszéd cellába.
+    A G (Állapot) oszlopban legördülő lista: ÚJ / HASZNÁLT / FELÚJÍTOTT."""
 
     _ARROWS = (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down)
     _MODS = (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier |
              Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.MetaModifier)
 
     def createEditor(self, parent, option, index):
+        if index.column() == ALLAPOT_COL:
+            combo = QComboBox(parent)
+            combo.addItems(ALLAPOT_OPTIONS)
+            combo.setStyleSheet("QComboBox { background-color: #2b2b2b; color: white; font-weight: bold; } "
+                                "QComboBox QAbstractItemView { background-color: #1e1e1e; color: white; font-size: 15px; "
+                                "selection-background-color: #29b6f6; selection-color: black; }")
+            # Választás után azonnal ment és bezárul (nem kell Entert nyomni)
+            def chosen(_i, c=combo):
+                table = self.parent()
+                table._edit_source = "🖱️ Állapot választólista (G)"
+                try:
+                    self.commitData.emit(c)
+                finally:
+                    table._edit_source = None
+                self.closeEditor.emit(c, QAbstractItemDelegate.EndEditHint.NoHint)
+            combo.activated.connect(chosen)
+            QTimer.singleShot(0, combo.showPopup)   # a lista rögtön lenyílik
+            return combo
         editor = super().createEditor(parent, option, index)
         table = self.parent()
         if editor is not None:
             # gépeléssel indult a szerkesztés (nem dupla kattintással / F2-vel)?
             editor.setProperty("typing_mode", bool(getattr(table, "_typing_edit", False)))
         return editor
+
+    def setEditorData(self, editor, index):
+        if isinstance(editor, QComboBox):
+            cur = str(index.data() or "").strip().upper()
+            if cur and editor.findText(cur) < 0:
+                editor.insertItem(0, cur)          # régi, listán kívüli érték is megmarad választhatónak
+            editor.setCurrentIndex(max(editor.findText(cur), 0) if cur else editor.findText("HASZNÁLT"))
+            return
+        super().setEditorData(editor, index)
+
+    def setModelData(self, editor, model, index):
+        if isinstance(editor, QComboBox):
+            if str(index.data() or "") != editor.currentText():
+                model.setData(index, editor.currentText())
+            return
+        super().setModelData(editor, model, index)
 
     @staticmethod
     def _should_leave_cell(editor, key):
@@ -2938,6 +2978,8 @@ class ExcelCellDelegate(QStyledItemDelegate):
         return False
 
     def eventFilter(self, editor, event):
+        if isinstance(editor, QComboBox):
+            return super().eventFilter(editor, event)   # a lista nyilakkal a saját elemei között lép
         if event.type() == QEvent.Type.KeyPress and not (event.modifiers() & self._MODS):
             key = event.key()
             if key == Qt.Key.Key_F2:
@@ -7302,6 +7344,10 @@ class RaktarApp(QMainWindow):
         self.excel_print_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.excel_print_shortcut.activated.connect(self.print_current_excel_row)
         self.excel_table.currentCellChanged.connect(self.update_print_selected_label)
+        # G (Állapot): egy kattintásra lenyílik a választólista (ÚJ / HASZNÁLT / FELÚJÍTOTT)
+        self.excel_table.cellClicked.connect(
+            lambda r, c: self.excel_table.editItem(self.excel_table.item(r, c))
+            if c == ALLAPOT_COL and self.excel_table.item(r, c) is not None else None)
 
         # STÍLUS: Szürkés háttér, jól látható rácsvonalak és kontrasztos kijelölés
         self.excel_table.setAlternatingRowColors(True) # Váltakozó sormegvilágítás bekapcsolása
