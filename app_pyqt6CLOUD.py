@@ -3554,6 +3554,8 @@ class RaktarApp(QMainWindow):
 
         # FÜLEK LÉTREHOZÁSA ÉS SORRENDJE (Excel Live Munkalap a legelső!)
         self.tabs = QTabWidget()
+        # A fülek tartalma ne szabja az ablak legkisebb méretét a képernyőnél nagyobbra
+        self.tabs.setMinimumSize(700, 300)
         main_layout.addWidget(self.tabs)
 
         # 0. Duplikált R18-számok összevonása (mielőtt bármi betöltődik)
@@ -6510,14 +6512,29 @@ class RaktarApp(QMainWindow):
         self._map_last_query = None
         self._map_pending_query = None
 
+        # A beépített böngésző CSAK a fül első megnyitásakor indul (lásd ensure_map_view): induláskor
+        # Windowson újraépítené az ablakot (elveszne a teljes méret), és sok memóriát / időt venne el.
+        self._map_layout = layout
+        self._map_placeholder = QLabel("🗺️ A térkép betöltése...")
+        self._map_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._map_placeholder, stretch=1)
+
+    def ensure_map_view(self):
+        if hasattr(self, "web_view"):
+            return True
         try:
             self.web_view = QWebEngineView()
             self.web_view.setPage(SilentWebEnginePage(self.web_view))
             embed_url = f"https://docs.google.com/spreadsheets/d/{MAP_SHEETS_ID}/htmlembed?widget=true&headers=false"
             self.web_view.setUrl(QUrl(embed_url))
-            layout.addWidget(self.web_view)
+            self._map_layout.replaceWidget(self._map_placeholder, self.web_view)
+            self._map_placeholder.deleteLater()
         except Exception:
-            layout.addWidget(QLabel("🗺️ A beágyazott böngésző nem érhető el."))
+            self._map_placeholder.setText("🗺️ A beágyazott böngésző nem érhető el.")
+            return False
+        # A böngésző első megjelenése újraépítheti az ablakot - ha emiatt kicsi lett, vissza teljes méretre
+        QTimer.singleShot(400, lambda: ensure_maximized(self))
+        return True
 
     def search_on_map(self, *_, force_reload=False):
         """🔍 Raktártérkép kereső: a pontosan egyező cellá(ka)t színesen kiemeli és odagörget."""
@@ -6525,7 +6542,7 @@ class RaktarApp(QMainWindow):
         if not query:
             self.map_search_status.setText("⚠️ Írj be egy keresett értéket!")
             return
-        if not hasattr(self, "web_view"):
+        if not self.ensure_map_view():
             return
 
         # Ugyanaz a keresés újra (és már látszik): a következő találatra lép
@@ -7471,6 +7488,8 @@ class RaktarApp(QMainWindow):
                 self.refresh_sold_table()
             elif w is getattr(self, "tab_server", None) and not getattr(self, "_server_items", None):
                 self.load_server_items()
+            elif w is getattr(self, "tab_map", None):
+                self.ensure_map_view()
             elif w is getattr(self, "tab_admin", None):
                 self._admin_tab_changed(self.admin_tabs.currentIndex())
         QTimer.singleShot(30, later)
@@ -7636,7 +7655,17 @@ class RaktarApp(QMainWindow):
         ctrl_layout.addWidget(btn_clear_rows)
 
         ctrl_layout.addStretch()
-        layout.addWidget(ctrl_box)
+        # Keskenyebb képernyőn (pl. Windows 125-150% nagyítás) a gombsor vízszintesen görgethető,
+        # így nem ez szabja meg az ablak legkisebb szélességét (különben nem lehetne teljes méretre állítani)
+        ctrl_scroll = QScrollArea()
+        ctrl_scroll.setWidget(ctrl_box)
+        ctrl_scroll.setWidgetResizable(True)
+        ctrl_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        ctrl_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        ctrl_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        ctrl_scroll.setFixedHeight(ctrl_box.sizeHint().height() + 18)
+        ctrl_scroll.setMinimumWidth(300)
+        layout.addWidget(ctrl_scroll)
 
         # 2. Excel-szerű Táblázat testreszabása
         self.excel_table = ExcelTableWidget()
@@ -8116,12 +8145,28 @@ class RaktarApp(QMainWindow):
             self.refresh_db_log_view()
             
             
+def ensure_maximized(win):
+    """A TÉNYLEGES méret alapján ellenőriz (nem az isMaximized() jelzés alapján, ami Windowson az ablak
+    újraépítése után tévesen 'igaz' maradhat): ha az ablak jóval kisebb a képernyőnél, újra teljes méretre állítja."""
+    try:
+        if win.isMinimized() or win.isFullScreen():
+            return
+        scr = (win.screen() or QApplication.primaryScreen()).availableGeometry()
+        if win.width() < scr.width() * 0.9 or win.height() < scr.height() * 0.85:
+            win.showNormal()
+            win.showMaximized()
+    except Exception as e:
+        print(f"[Ablak] Teljes méretre állítási hiba: {e}")
+
+
 if __name__ == "__main__":
+    # A beépített böngésző (Raktártérkép) ajánlott beállítása - a QApplication létrehozása ELŐTT kell
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
     window = RaktarApp()
     # MINDIG TELJES MÉRETBEN indul. Windowson az első megjelenítéskor a teljes méret néha elveszik
     # (miközben a tartalom még töltődik), ezért kétszer is ellenőrizzük és szükség esetén újra beállítjuk.
     window.showMaximized()
-    for delay in (300, 1500):
-        QTimer.singleShot(delay, lambda: None if (window.isMaximized() or window.isFullScreen()) else window.showMaximized())
+    for delay in (300, 1500, 4000):
+        QTimer.singleShot(delay, lambda: ensure_maximized(window))
     sys.exit(app.exec())
