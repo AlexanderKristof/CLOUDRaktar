@@ -57,6 +57,11 @@ outbox_signal_bus = OutboxSignalBus()
 # R18-szám (R18-12960, R18_12960, R18 12960, r18/12960 ...). A mappák a beallitasok.json-ban
 # ("foto_mappak") vannak, a kártyán a "📁 Fotómappa" gombbal állíthatók.
 # -------------------------------------------------------------------
+# Fotók be/ki - ha egy gépen nem kellenek (pl. nagyon régi gép), írd át False-ra
+PHOTOS_ENABLED = True
+# Egyszerre legfeljebb ennyi kép töltődik a háttérben (régebbi gépen se terhelje a processzort)
+PHOTO_MAX_PARALLEL_LOADS = 2
+_photo_load_slots = threading.Semaphore(PHOTO_MAX_PARALLEL_LOADS)
 PHOTO_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
 PHOTO_INDEX_REFRESH_SEC = 600          # ennyi időnként újraolvassa a mappákat (új fotók)
 _PHOTO_CODE_RE = re.compile(r"R18\s*[-_/ ]?\s*0*(\d{1,6})(?!\d)", re.IGNORECASE)
@@ -86,6 +91,8 @@ class PhotoIndex:
         return dirs
 
     def dirs(self):
+        if not PHOTOS_ENABLED:
+            return []
         saved = load_config_value("foto_mappak")
         if isinstance(saved, list) and saved:
             return [d for d in saved if d]
@@ -97,12 +104,17 @@ class PhotoIndex:
         self.building = True
         try:
             idx = {}
+            seen = 0
             for root_dir in self.dirs():
                 if not os.path.isdir(root_dir):
                     continue
                 for dirpath, dirnames, filenames in os.walk(root_dir):
                     dirnames[:] = [d for d in dirnames if not d.startswith(("#", "@", "."))]   # Synology rendszermappák
                     folder_codes = {f"R18-{int(m)}" for m in _PHOTO_CODE_RE.findall(os.path.relpath(dirpath, root_dir))}
+                    seen += len(filenames)
+                    if seen > 400:
+                        seen = 0
+                        time.sleep(0.005)   # "szusszanás": a felület ne akadjon meg nagy mappánál
                     for fn in filenames:
                         if not fn.lower().endswith(PHOTO_EXTENSIONS):
                             continue
@@ -121,6 +133,8 @@ class PhotoIndex:
             self.building = False
 
     def build_async(self, force=False):
+        if not PHOTOS_ENABLED:
+            return
         if force or time.monotonic() - self.built_at > PHOTO_INDEX_REFRESH_SEC:
             threading.Thread(target=self.build, daemon=True).start()
 
@@ -154,11 +168,13 @@ def request_thumbnail(path, max_w=120, max_h=120):
         return rid
 
     def job():
-        try:
-            img = load_image_scaled(path, max_w, max_h)
-        except Exception:
-            img = QImage()
-        if not img.isNull():
+        with _photo_load_slots:              # egyszerre legfeljebb PHOTO_MAX_PARALLEL_LOADS kép
+            try:
+                img = load_image_scaled(path, max_w, max_h)
+            except Exception:
+                img = QImage()
+        # Csak a kis előnézeteket tartjuk meg (a nagy nézet képei sok memóriát foglalnának)
+        if not img.isNull() and max_w <= 200 and max_h <= 200:
             if len(_thumb_cache) > 500:
                 _thumb_cache.clear()
             _thumb_cache[key] = img
@@ -4816,7 +4832,8 @@ class RaktarApp(QMainWindow):
 
         main_card_layout.addWidget(left_box, stretch=3)
 
-        main_card_layout.addWidget(self.create_photo_widget(code))
+        if PHOTOS_ENABLED:
+            main_card_layout.addWidget(self.create_photo_widget(code))
 
         qr_bytes, bar_bytes = generate_codes_in_memory(code, cikkszam_text=cikkszam, tipus_text=tipus)
         if qr_bytes and bar_bytes:
