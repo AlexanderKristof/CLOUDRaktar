@@ -629,6 +629,19 @@ def fix_scanner_text(text):
         return text
     return fixed
 
+
+def attach_scanner_fix(line_edit):
+    """Vonalkód-olvasónak szánt mezőnél már gépelés közben kicseréli az ü → -, ö → 0 karaktereket."""
+    def _fix(text):
+        fixed = text.translate(_SCANNER_FIX)
+        if fixed != text:
+            pos = line_edit.cursorPosition()
+            line_edit.blockSignals(True)
+            line_edit.setText(fixed)
+            line_edit.setCursorPosition(pos)
+            line_edit.blockSignals(False)
+    line_edit.textChanged.connect(_fix)
+
 def dedupe_local_products():
     """DUPLIKÁLT R18-SZÁMOK összevonása a helyi adatbázisban: ugyanarra a kódra csak egy sor maradhat.
     Megmarad a legtöbb adattal kitöltött (egyenlőség esetén a legújabb) sor; a többi törlődik, de a
@@ -1981,6 +1994,7 @@ class SaleDialog(QDialog):
         self.inp_darab.setValidator(QIntValidator(1, 100000, self))
         self.inp_tracking = QLineEdit()
         self.inp_tracking.setPlaceholderText("Tracking number")
+        attach_scanner_fix(self.inp_tracking)
         self.inp_megj = QLineEdit()
         self.inp_megj.setPlaceholderText("(nem kötelező)")
 
@@ -5564,6 +5578,7 @@ class RaktarApp(QMainWindow):
         self.pda_input = QLineEdit()
         self.pda_input.setPlaceholderText("Pittyents ide a PDA olvasóval...")
         self.pda_input.returnPressed.connect(self.execute_pda_search)
+        attach_scanner_fix(self.pda_input)
         pda_layout.addWidget(self.pda_input)
 
         pda_btn = QPushButton("📱 PDA Keresés")
@@ -6236,7 +6251,8 @@ class RaktarApp(QMainWindow):
             self.trigger_toast("⚠️ A kijelölt sor(ok) nincsenek meg ezen a gépen.")
 
     def execute_pda_search(self):
-        query_text = fix_scanner_text(self.pda_input.text())
+        # A PDA mező a vonalkód-olvasóé: itt mindig javítjuk az ü → -, ö → 0 elgépelést
+        query_text = self.pda_input.text().strip().translate(_SCANNER_FIX)
         if not query_text: return
         if query_text != self.pda_input.text().strip():
             self.pda_input.setText(query_text)
