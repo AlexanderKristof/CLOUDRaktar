@@ -609,6 +609,26 @@ def norm_code(code):
     """R18-kód összehasonlításhoz: szóközök nélkül, nagybetűvel."""
     return str(code or "").strip().upper()
 
+
+# A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
+# kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
+_SCANNER_FIX = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
+
+
+def fix_scanner_text(text):
+    """Vonalkód-olvasó elgépeléseinek javítása (ü → -, ö → 0).
+
+    Csak kód-jellegű szövegnél cserél (nincs benne szóköz, és a csere után
+    nem marad ékezetes betű), így a kézzel beírt magyar szavak érintetlenek.
+    """
+    text = str(text or "").strip()
+    if not text or not any(ch in text for ch in "üÜöÖ"):
+        return text
+    fixed = text.translate(_SCANNER_FIX)
+    if " " in fixed or not fixed.isascii():
+        return text
+    return fixed
+
 def dedupe_local_products():
     """DUPLIKÁLT R18-SZÁMOK összevonása a helyi adatbázisban: ugyanarra a kódra csak egy sor maradhat.
     Megmarad a legtöbb adattal kitöltött (egyenlőség esetén a legújabb) sor; a többi törlődik, de a
@@ -5118,7 +5138,9 @@ class RaktarApp(QMainWindow):
             self.results_area.setUpdatesEnabled(True)
 
     def execute_search(self):
-        query_text = self.search_input.text().strip().replace("ü", "-").replace("Ü", "-")
+        query_text = fix_scanner_text(self.search_input.text())
+        if query_text != self.search_input.text().strip():
+            self.search_input.setText(query_text)
         if not query_text or query_text.strip().upper() == "R18-": 
             self.load_latest_200_items()
             return
@@ -6214,8 +6236,10 @@ class RaktarApp(QMainWindow):
             self.trigger_toast("⚠️ A kijelölt sor(ok) nincsenek meg ezen a gépen.")
 
     def execute_pda_search(self):
-        query_text = self.pda_input.text().strip()
+        query_text = fix_scanner_text(self.pda_input.text())
         if not query_text: return
+        if query_text != self.pda_input.text().strip():
+            self.pda_input.setText(query_text)
         clean_query = clean_part_number(query_text)
 
         while self.pda_results_layout.count():
@@ -7113,7 +7137,7 @@ class RaktarApp(QMainWindow):
             self.silent_update_excel_table()
 
     def admin_load_history(self):
-        code = norm_code(self.adm_hist_code.text())
+        code = norm_code(fix_scanner_text(self.adm_hist_code.text()))
         if not code:
             return
         self.adm_hist_code.selectAll()
