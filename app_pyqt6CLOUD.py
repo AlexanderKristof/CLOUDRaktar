@@ -3,6 +3,7 @@ import sys
 import io
 import os
 import re
+import unicodedata
 import sqlite3
 import time
 import datetime
@@ -612,7 +613,14 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-_SCANNER_FIX = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
+APP_VERSION = "v2026.10.12-vonalkod"
+
+_SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
+
+
+def _scanner_translate(text):
+    """ü → -, ö → 0 csere (a felbontott „u + ¨” alakot is kezeli)."""
+    return unicodedata.normalize("NFC", str(text or "")).translate(_SCANNER_MAP)
 
 
 def fix_scanner_text(text):
@@ -622,9 +630,9 @@ def fix_scanner_text(text):
     nem marad ékezetes betű), így a kézzel beírt magyar szavak érintetlenek.
     """
     text = str(text or "").strip()
-    if not text or not any(ch in text for ch in "üÜöÖ"):
+    if not text:
         return text
-    fixed = text.translate(_SCANNER_FIX)
+    fixed = _scanner_translate(text)
     if " " in fixed or not fixed.isascii():
         return text
     return fixed
@@ -633,7 +641,7 @@ def fix_scanner_text(text):
 def attach_scanner_fix(line_edit):
     """Vonalkód-olvasónak szánt mezőnél már gépelés közben kicseréli az ü → -, ö → 0 karaktereket."""
     def _fix(text):
-        fixed = text.translate(_SCANNER_FIX)
+        fixed = _scanner_translate(text)
         if fixed != text:
             pos = line_edit.cursorPosition()
             line_edit.blockSignals(True)
@@ -3491,7 +3499,7 @@ class RaktarApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("📦 Raktári Rendszer (PyQt6 Ultra-Fast)")
+        self.setWindowTitle(f"📦 Raktári Rendszer (PyQt6 Ultra-Fast) – {APP_VERSION}")
         self.zoom_factor = load_saved_zoom_factor()
 
         self.active_workers = []
@@ -6252,7 +6260,7 @@ class RaktarApp(QMainWindow):
 
     def execute_pda_search(self):
         # A PDA mező a vonalkód-olvasóé: itt mindig javítjuk az ü → -, ö → 0 elgépelést
-        query_text = self.pda_input.text().strip().translate(_SCANNER_FIX)
+        query_text = _scanner_translate(self.pda_input.text().strip())
         if not query_text: return
         if query_text != self.pda_input.text().strip():
             self.pda_input.setText(query_text)
