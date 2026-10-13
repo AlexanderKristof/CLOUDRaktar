@@ -84,6 +84,16 @@ def safe_str(val):
         s = s[:-2]
     return s
 
+# Masolaskor lathatatlan karakterek / "hosszu" kotojelek kerulhetnek a cellaba
+_CODE_FIX = {0xfeff: None, 0x200b: None, 0x200c: None, 0x200d: None, 0x2060: None, 0xad: None,
+             0x2010: "-", 0x2011: "-", 0x2012: "-", 0x2013: "-", 0x2014: "-", 0x2212: "-", 0xa0: " "}
+
+def clean_code(code):
+    return str(code or "").translate(_CODE_FIX).strip().upper()
+
+def has_product_data(vals):
+    return any(str(v).strip() for v in vals[2:5])
+
 def run_background_sync():
     try:
         live_csv_url = f"https://docs.google.com/spreadsheets/d/{LIVE_SHEETS_ID}/export?format=csv"
@@ -96,33 +106,45 @@ def run_background_sync():
             cursor = conn.cursor()
             changed = 0
 
+            # Ha egy R18-szam tobbszor szerepel a tablazatban, az ADATOT tartalmazo sor szamit
+            # (ugyanugy, mint a programban), kulonben a ket oldal mast latna.
+            best_rows = {}
             for idx, row in df.iterrows():
-                code = safe_str(row.get(0)) or safe_str(row.get(1))
-                if code and code.startswith("R18-"):
-                    vals = [safe_str(row.get(i)) for i in range(16)]
-                    cursor.execute("""
-                        SELECT rowid, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P
-                        FROM termekek WHERE A=? OR B=?
-                    """, (code, code))
-                    existing = cursor.fetchone()
+                code = clean_code(safe_str(row.get(0)) or safe_str(row.get(1)))
+                if not code.startswith("R18-"):
+                    continue
+                vals = [safe_str(row.get(i)) for i in range(16)]
+                if clean_code(vals[0]) == code:
+                    vals[0] = code
+                prev = best_rows.get(code)
+                if prev is not None and (has_product_data(prev) or not has_product_data(vals)):
+                    continue
+                best_rows[code] = vals
 
-                    # Csak a tenylegesen valtozott sorok kapnak uj verziot, kulonben
-                    # minden teljes szinkron utan az osszes sort ujra letoltene minden kliens.
-                    if existing:
-                        if [safe_str(v) for v in existing[1:]] == vals:
-                            continue
-                        cursor.execute(f"""
-                            UPDATE termekek
-                            SET A=?, B=?, C=?, D=?, E=?, F=?, G=?, H=?, I=?, J=?, K=?, L=?, M=?, N=?, O=?, P=?,
-                                verzio={NEXT_VERZIO}
-                            WHERE rowid=?
-                        """, (*vals, existing[0]))
-                    else:
-                        cursor.execute(f"""
-                            INSERT INTO termekek (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, szin, verzio)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FEHER', {NEXT_VERZIO})
-                        """, vals)
-                    changed += 1
+            for code, vals in best_rows.items():
+                cursor.execute("""
+                    SELECT rowid, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P
+                    FROM termekek WHERE A=? OR B=?
+                """, (code, code))
+                existing = cursor.fetchone()
+
+                # Csak a tenylegesen valtozott sorok kapnak uj verziot, kulonben
+                # minden teljes szinkron utan az osszes sort ujra letoltene minden kliens.
+                if existing:
+                    if [safe_str(v) for v in existing[1:]] == vals:
+                        continue
+                    cursor.execute(f"""
+                        UPDATE termekek
+                        SET A=?, B=?, C=?, D=?, E=?, F=?, G=?, H=?, I=?, J=?, K=?, L=?, M=?, N=?, O=?, P=?,
+                            verzio={NEXT_VERZIO}
+                        WHERE rowid=?
+                    """, (*vals, existing[0]))
+                else:
+                    cursor.execute(f"""
+                        INSERT INTO termekek (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, szin, verzio)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FEHER', {NEXT_VERZIO})
+                    """, vals)
+                changed += 1
 
             conn.commit()
             conn.close()

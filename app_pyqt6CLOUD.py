@@ -606,9 +606,16 @@ def get_row_snapshot(code, cursor=None):
         return None
     return {c: ("" if v is None or str(v).lower() in ("none", "nan") else str(v)) for c, v in zip(NAPLO_COLS, tuple(row))}
 
+# Másoláskor (Excel / Word / weboldal) a cellába láthatatlan karakterek vagy "hosszú" kötőjelek
+# kerülhetnek - ezek miatt az R18-kód nem ismerhető fel, pedig ugyanúgy néz ki.
+_INVISIBLE_CHARS = dict.fromkeys(map(ord, "\ufeff\u200b\u200c\u200d\u2060\u00ad"), None)
+_INVISIBLE_CHARS.update({ord(ch): "-" for ch in "\u2010\u2011\u2012\u2013\u2014\u2212"})
+_INVISIBLE_CHARS[0xa0] = " "
+
+
 def norm_code(code):
-    """R18-kód összehasonlításhoz: szóközök nélkül, nagybetűvel."""
-    return str(code or "").strip().upper()
+    """R18-kód összehasonlításhoz: szóközök és láthatatlan karakterek nélkül, nagybetűvel."""
+    return str(code or "").translate(_INVISIBLE_CHARS).strip().upper()
 
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
@@ -2568,7 +2575,6 @@ class FastCopyLiveToTestWorker(QThread):
                     if k and k not in db_full:
                         db_full[k] = d
             db_existing = db_full
-            seen_codes = set()           # ugyanaz a kód kétszer a Google táblázatban -> csak az első számít
             sheet_duplicates = set()
             # A még fel nem töltött (outboxban váró) tételeket a Sheets régebbi állapota nem írhatja
             # felül - és egy helyben törölt tételt sem hozhat vissza, amíg a törlés ki nem ment.
@@ -2578,19 +2584,24 @@ class FastCopyLiveToTestWorker(QThread):
             insert_data = []
             sheet_changes = []   # (kód, előtte, utána) a Napló fülre - a Google táblázatban közvetlenül módosítva
 
+            # Ha egy R18-szám TÖBBSZÖR szerepel a táblázatban (pl. sorok bemásolásakor az üres R18-sor is
+            # megmaradt), akkor az ADATOT TARTALMAZÓ sor számít - nem az üres. Különben a bemásolt termék
+            # nem látszana az Excel Live-on, a szerveren viszont ott lenne (-> "felülírod?" kérdés).
+            sheet_rows = {}     # kód -> a táblázat 16 értéke (A-P)
             for row in df_test.itertuples(index=False, name=None):
                 code = norm_code(safe_str(row[0]) if len(row) > 0 else "")
-                if not code or not code.startswith("R18-"): 
+                if not code or not code.startswith("R18-"):
                     continue
-                if code in seen_codes:
-                    sheet_duplicates.add(code)
-                    continue
-                seen_codes.add(code)
-
                 vals = [safe_str(row[i]) if i < len(row) else "" for i in range(16)]
-                while len(vals) < 16: 
-                    vals.append("")
+                vals[0] = code
+                if code in sheet_rows:
+                    sheet_duplicates.add(code)
+                    if _row_has_product_data(dict(zip(ROW_COLS, sheet_rows[code]))) \
+                            or not _row_has_product_data(dict(zip(ROW_COLS, vals))):
+                        continue
+                sheet_rows[code] = vals
 
+            for code, vals in sheet_rows.items():
                 cloud_c, cloud_d, cloud_e = vals[2], vals[3], vals[4]
 
                 # ÜTKÖZÉS-VIZSGÁLAT: Ha a felhasználónál pending (szerkesztés alatti) módosítás van erre a sorra
@@ -2614,13 +2625,11 @@ class FastCopyLiveToTestWorker(QThread):
                     # (a színjelölést - szin - nem bántjuk, az a CSV-ben nincs benne)
                     if code not in self.pending_rows_data:
                         local_row = db_full[code]
-                        vals[0] = vals[0].strip().upper()
                         # Csak a ténylegesen megváltozott sorokat írjuk (nem mind a több ezret 15 mp-enként)
                         if [local_row[c] for c in ROW_COLS] != vals[:16]:
                             update_data.append((*vals[:16], code, code))
                             sheet_changes.append((code, dict(local_row), dict(zip(ROW_COLS, vals[:16]))))
                 else:
-                    vals[0] = code
                     insert_data.append((*vals[:16], 'FEHÉR'))
                     db_existing[code] = dict(zip(ROW_COLS, vals[:16]))
 
@@ -2630,7 +2639,7 @@ class FastCopyLiveToTestWorker(QThread):
                     FastCopyLiveToTestWorker._warned_sheet_dups |= new_dups
                     self.process_log_signal.emit(
                         f"⚠️ A Google táblázatban ezek az R18-számok TÖBBSZÖR szerepelnek: {', '.join(sorted(new_dups)[:20])}"
-                        f"{' ...' if len(new_dups) > 20 else ''} - a program csak az ELSŐ sort használja. "
+                        f"{' ...' if len(new_dups) > 20 else ''} - a program az adatot tartalmazó sort használja. "
                         f"Töröld a felesleges sort a táblázatban.", "ERROR")
 
             if update_data:
