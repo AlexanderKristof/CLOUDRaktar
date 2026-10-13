@@ -3188,6 +3188,11 @@ ALLAPOT_OPTIONS = ["ÚJ", "HASZNÁLT", "FELÚJÍTOTT"]
 ALLAPOT_COL = 6   # G
 
 
+def allapot_dropdown_enabled():
+    """Be van-e kapcsolva a G (Állapot) legördülő lista ezen a gépen (Excel Live: ☑ jelölőnégyzet)."""
+    return bool(load_config_value("allapot_legordulo", True))
+
+
 class ExcelCellDelegate(QStyledItemDelegate):
     """Cellaszerkesztő: a nyilak szerkesztés közben is átléptetnek a szomszéd cellába.
     A G (Állapot) oszlopban legördülő lista: ÚJ / HASZNÁLT / FELÚJÍTOTT."""
@@ -3197,7 +3202,7 @@ class ExcelCellDelegate(QStyledItemDelegate):
              Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.MetaModifier)
 
     def createEditor(self, parent, option, index):
-        if index.column() == ALLAPOT_COL:
+        if index.column() == ALLAPOT_COL and allapot_dropdown_enabled():
             combo = QComboBox(parent)
             combo.addItems(ALLAPOT_OPTIONS)
             combo.setStyleSheet("QComboBox { background-color: #2b2b2b; color: white; font-weight: bold; } "
@@ -7711,6 +7716,16 @@ class RaktarApp(QMainWindow):
         btn_clear_rows.clicked.connect(self.clear_selected_excel_rows)
         ctrl_layout.addWidget(btn_clear_rows)
 
+        # G (Állapot) legördülő lista ki/be - gépenként megjegyzi (beallitasok.json)
+        self.chk_allapot_dropdown = QCheckBox("▾ G legördülő (Új / Használt / Felújított)")
+        self.chk_allapot_dropdown.setStyleSheet("color: white; font-size: 13px; padding-left: 8px;")
+        self.chk_allapot_dropdown.setToolTip("Bepipálva: a G (Állapot) cellára kattintva lenyílik a választólista.\n"
+                                             "Kikapcsolva: a G oszlopba ugyanúgy gépelni kell, mint a többibe.\n"
+                                             "A beállítást ez a gép megjegyzi.")
+        self.chk_allapot_dropdown.setChecked(allapot_dropdown_enabled())
+        self.chk_allapot_dropdown.toggled.connect(lambda on: save_config_value("allapot_legordulo", bool(on)))
+        ctrl_layout.addWidget(self.chk_allapot_dropdown)
+
         ctrl_layout.addStretch()
         # Keskenyebb képernyőn (pl. Windows 125-150% nagyítás) a gombsor vízszintesen görgethető,
         # így nem ez szabja meg az ablak legkisebb szélességét (különben nem lehetne teljes méretre állítani)
@@ -7748,7 +7763,8 @@ class RaktarApp(QMainWindow):
         # G (Állapot): egy kattintásra lenyílik a választólista (ÚJ / HASZNÁLT / FELÚJÍTOTT)
         self.excel_table.cellClicked.connect(
             lambda r, c: self.excel_table.editItem(self.excel_table.item(r, c))
-            if c == ALLAPOT_COL and self.excel_table.item(r, c) is not None else None)
+            if c == ALLAPOT_COL and self.excel_table.item(r, c) is not None
+            and self.chk_allapot_dropdown.isChecked() else None)
 
         # STÍLUS: Szürkés háttér, jól látható rácsvonalak és kontrasztos kijelölés
         self.excel_table.setAlternatingRowColors(True) # Váltakozó sormegvilágítás bekapcsolása
