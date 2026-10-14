@@ -4,6 +4,7 @@ import io
 import os
 import re
 import unicodedata
+import socket
 import sqlite3
 import time
 import datetime
@@ -236,6 +237,8 @@ SALES_SHEETS = {
     "EBAY":        {"cim": "eBay eladás",           "spreadsheet_id": TEST_SHEETS_ID, "worksheet": "Eladas_Ebay"},
     "WEBSHOP":     {"cim": "Webshop eladás",        "spreadsheet_id": TEST_SHEETS_ID, "worksheet": "Eladas_Webshop"},
 }
+# A Zebra PDA-n rögzített eladásokat a program ilyen gyakran nézi meg a VPS-en (és veszi át)
+PDA_SALES_POLL_MS = 20000
 # Az eladási munkalapok oszlopai (sorrendben) - (belső kulcs, fejléc)
 SALES_COLUMNS = [
     ("eladas_id", "Eladás ID"), ("datum", "Eladás dátuma"), ("platform", "Platform"),
@@ -3510,6 +3513,7 @@ class RaktarApp(QMainWindow):
     counter_update_signal = pyqtSignal(str, int, list)
     process_log_signal = pyqtSignal(str)
     print_result_signal = pyqtSignal(str)   # nyomtatás eredménye (háttérszálból) -> toast
+    pda_sales_signal = pyqtSignal(list)     # a Zebra PDA-n rögzített, ez a gép által átvett eladások -> fő szál
 
     def __init__(self):
         super().__init__()
@@ -3600,6 +3604,14 @@ class RaktarApp(QMainWindow):
         self.auto_vps_worker = AutoVPSPollWorker()
         self.auto_vps_worker.data_updated_signal.connect(self.on_auto_vps_data_received)
         self.auto_vps_worker.start()
+
+        # --- ZEBRA PDA ELADÁSOK ÁTVÉTELE (20 mp-enként) ---
+        self.pda_sales_signal.connect(self.apply_pda_sales)
+        self._pda_poll_busy = False
+        self.pda_poll_timer = QTimer(self)
+        self.pda_poll_timer.timeout.connect(self.poll_pda_sales)
+        self.pda_poll_timer.start(PDA_SALES_POLL_MS)
+        QTimer.singleShot(5000, self.poll_pda_sales)
 
         self.close_btn = QPushButton("🚪 Bezárás")
         self.close_btn.setStyleSheet("background-color: #ff5252; color: white;")
@@ -5679,9 +5691,11 @@ class RaktarApp(QMainWindow):
         v = dlg.values()
         self.record_sale(platform, product, stock, v)
 
-    def record_sale(self, platform, product, stock, v):
+    def store_sale(self, platform, product, stock, v, eladas_id=None, sale_src=""):
+        """Eladás mentése (eladasok tábla -> Sheets), készlet levonása és naplózás.
+        Visszaad: a készletről szóló üzenet (pl. ' | Maradt: 2 db'), hiba esetén None."""
         code = product.get("A", "").strip().upper()
-        eladas_id = f"E{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}-{code}-{os.urandom(2).hex()}"
+        eladas_id = eladas_id or f"E{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}-{code}-{os.urandom(2).hex()}"
         try:
             conn = get_db_connection()
             cursor = conn.cursor()
@@ -5694,19 +5708,20 @@ class RaktarApp(QMainWindow):
                   product.get("N", ""), v["vevo"], v["ar"], str(v["darab"]), v["tracking"], v["megjegyzes"]))
             conn.commit()
             conn.close()
+        except sqlite3.IntegrityError:
+            return ""          # ez az eladás már rögzítve van ezen a gépen
         except Exception as e:
             self.trigger_toast(f"❌ Eladás mentési hiba: {e}")
-            return
+            return None
 
         cim = SALES_SHEETS[platform]["cim"]
         sale_details = (f"{v['darab']} db | Vevő: {v['vevo'] or '(később)'} | Ár: {v['ar'] or '(később)'} | "
                         f"Tracking: {v['tracking'] or '(később)'}")
         elotte = get_row_snapshot(code) or {c: product.get(c, "") for c in NAPLO_COLS}
-        sale_src = f"PDA / Eladás fül - 💰 {cim} gomb"
 
         # Készlet levonása
         stock_msg = ""
-        if v["reduce_stock"]:
+        if v["reduce_stock"] and stock is not None:
             remaining = stock - v["darab"]
             if remaining > 0:
                 try:
@@ -5725,9 +5740,86 @@ class RaktarApp(QMainWindow):
                 log_event(code, f"ELADÁS: {cim}", sale_details + " | Elfogyott - törölve a raktárból", elotte, None, sale_src)
                 self.delete_item_action(code, reason=f"Eladás ({cim}) után elfogyott - 0 db maradt", forras=sale_src)
                 stock_msg = " | Elfogyott - törölve a raktárból"
+        elif v["reduce_stock"]:
+            stock_msg = " | A termék nincs meg ezen a gépen - készlet nem változott"
+            log_event(code, f"ELADÁS: {cim}", sale_details + stock_msg, elotte, elotte, sale_src)
         else:
             log_event(code, f"ELADÁS: {cim}", sale_details + " | Készlet nem változott (a levonás ki volt kapcsolva)",
                       elotte, elotte, sale_src)
+        return stock_msg
+
+    def poll_pda_sales(self):
+        """A PDA-n (Zebra TC27) rögzített eladásokat a VPS-ről átveszi (háttérszálon). Egy eladást csak
+        egy gép vehet át, így a készlet akkor sem vonódik le kétszer, ha több gépen fut a program."""
+        if self._pda_poll_busy:
+            return
+        self._pda_poll_busy = True
+
+        def job():
+            claimed = []
+            try:
+                res = requests.get(f"{VPS_URL}/pda/sales", params={"pending": 1, "limit": 50}, timeout=5)
+                if res.status_code == 200:
+                    gep = socket.gethostname() or "asztali gep"
+                    for sale in res.json().get("sales", []):
+                        r = requests.post(f"{VPS_URL}/pda/sales/claim",
+                                          json={"eladas_id": sale.get("eladas_id"), "gep": gep}, timeout=5)
+                        if r.status_code == 200:
+                            claimed.append(sale)
+            except Exception:
+                pass
+            finally:
+                self._pda_poll_busy = False
+            if claimed:
+                self.pda_sales_signal.emit(claimed)
+
+        threading.Thread(target=job, daemon=True).start()
+
+    def apply_pda_sales(self, sales):
+        """Az átvett PDA-eladások rögzítése ezen a gépen: Eladottak + Sheets eladási lap, készlet levonása."""
+        for sale in sales:
+            try:
+                platform = str(sale.get("platform", "")).strip().upper()
+                if platform not in SALES_SHEETS:
+                    continue
+                code = norm_code(sale.get("A"))
+                local = get_row_snapshot(code)
+                if local:
+                    product = dict(local)
+                    f_match = re.search(r"\d+", product.get("F", ""))
+                    stock = int(f_match.group(0)) if f_match else 1
+                else:
+                    product = {c: safe_str(sale.get(c, "")) for c in ROW_COLS}
+                    stock = None
+                product["A"] = code
+                try:
+                    darab = max(1, int(str(sale.get("darab", "1")).strip() or 1))
+                except ValueError:
+                    darab = 1
+                v = {"datum": safe_str(sale.get("datum")), "vevo": safe_str(sale.get("vevo")),
+                     "ar": safe_str(sale.get("ar")), "darab": darab, "tracking": safe_str(sale.get("tracking")),
+                     "megjegyzes": safe_str(sale.get("megjegyzes")),
+                     "reduce_stock": bool(int(sale.get("keszlet_levonas", 1) or 0))}
+                cim = SALES_SHEETS[platform]["cim"]
+                eszkoz = safe_str(sale.get("eszkoz")) or "PDA"
+                stock_msg = self.store_sale(platform, product, stock, v, eladas_id=sale.get("eladas_id"),
+                                            sale_src=f"📱 Zebra PDA ({eszkoz}) - 💰 {cim} gomb")
+                if stock_msg is None:
+                    continue
+                self.trigger_toast(f"📱 PDA eladás: {code} ({cim}, {darab} db){stock_msg}")
+                self.append_process_log(f"📱 PDA eladás átvéve: {code} - {cim} - {darab} db{stock_msg}", "#00e676")
+            except Exception as e:
+                self.append_process_log(f"❌ PDA eladás átvételi hiba ({sale.get('eladas_id')}): {e}", "#ff5252")
+        sync_sales_async()
+        if hasattr(self, "refresh_sold_table"):
+            self.refresh_sold_table()
+
+    def record_sale(self, platform, product, stock, v):
+        code = product.get("A", "").strip().upper()
+        cim = SALES_SHEETS[platform]["cim"]
+        stock_msg = self.store_sale(platform, product, stock, v, sale_src=f"PDA / Eladás fül - 💰 {cim} gomb")
+        if stock_msg is None:
+            return
 
         sync_sales_async()
         self.trigger_toast(f"💰 {code} eladva ({cim}, {v['darab']} db){stock_msg}")

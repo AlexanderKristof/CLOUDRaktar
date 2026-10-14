@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 # FIGYELEM: a fajl szandekosan ekezet nelkuli (ASCII), hogy a WinSCP szerkesztoje se rontsa el.
+import os
+import re
 import threading
 import sqlite3
+import datetime
 import time
 import requests
 import io
 import pandas as pd
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 
 app = Flask(__name__)
 
@@ -418,6 +421,185 @@ def add_munkalap():
 
         return jsonify({"status": "success", "message": f"DRI-{data.get('dri_szam')} Munkalap elmentve a VPS-en"}), 200
 
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ==========================================
+# PDA (Zebra TC27) - csippantas, kereses, eladas rogzitese
+# A PDA app a /pda oldalt tolti be (pda.html, ugyanebben a mappaban).
+# Az eladasokat a VPS eltarolja; az asztali program atveszi oket (/pda/sales/claim),
+# o vonja le a keszletet es irja ki a Google Sheets eladasi lapjaira.
+# ==========================================
+PDA_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pda.html")
+PDA_PLATFORMS = ("EBAY_KIVULI", "EBAY", "WEBSHOP")
+PDA_SALE_FIELDS = ("eladas_id", "datum", "platform", "A", "C", "D", "E", "F", "G", "L", "M", "N",
+                   "vevo", "ar", "darab", "tracking", "megjegyzes", "keszlet_levonas", "eszkoz",
+                   "atvette", "atvetel_ido")
+
+
+def pda_now():
+    """Magyar ido (a VPS orajara UTC is lehet)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.datetime.now(ZoneInfo("Europe/Budapest")).replace(tzinfo=None)
+    except Exception:
+        return datetime.datetime.now()
+
+
+def init_pda_db():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pda_eladasok (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                eladas_id TEXT UNIQUE,
+                datum TEXT, platform TEXT,
+                A TEXT, C TEXT, D TEXT, E TEXT, F TEXT, G TEXT, L TEXT, M TEXT, N TEXT,
+                vevo TEXT, ar TEXT, darab TEXT, tracking TEXT, megjegyzes TEXT,
+                keszlet_levonas INTEGER NOT NULL DEFAULT 1,
+                eszkoz TEXT,
+                atvette TEXT,
+                atvetel_ido TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[VPS] PDA tabla inicializalasi hiba: {e}")
+
+init_pda_db()
+
+
+def _clean_part(text):
+    return re.sub(r"[\s\-_/.,]+", "", str(text or "")).upper()
+
+
+def _pda_row(row):
+    return {k: safe_str(row[k]) for k in "ABCDEFGHIJKLMNOP"}
+
+
+@app.route('/pda', methods=['GET'])
+def pda_page():
+    """A PDA app felulete (pda.html)."""
+    resp = send_file(PDA_HTML, mimetype="text/html")
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+@app.route('/pda/search', methods=['GET'])
+def pda_search():
+    """Kereses a PDA-rol: pontos R18 / B egyezes elore, kulonben szoveg + cikkszam egyezes (max 15)."""
+    try:
+        q = clean_code(request.args.get('q', ''))
+        if not q:
+            return jsonify({"status": "ok", "items": []}), 200
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P FROM termekek "
+                       "WHERE C IS NOT NULL AND TRIM(C) != ''")
+        rows = [_pda_row(r) for r in cursor.fetchall()]
+        conn.close()
+
+        exact = [r for r in rows if clean_code(r["A"]) == q or clean_code(r["B"]) == q]
+        items = list(exact)
+        if not (re.match(r"^R18-\d+$", q) and exact):
+            q_low, q_part = q.lower(), _clean_part(q)
+            for r in rows:
+                if len(items) >= 15:
+                    break
+                if r in exact:
+                    continue
+                text = " ".join(r.values())
+                if q_low in text.lower() or (q_part and q_part in _clean_part(text)):
+                    items.append(r)
+        return jsonify({"status": "ok", "items": items[:15]}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/pda/sale', methods=['POST'])
+def pda_sale():
+    """Eladas rogzitese a PDA-rol. A termek adatait a VPS adatbazisbol veszi."""
+    try:
+        data = request.json or {}
+        platform = str(data.get('platform', '')).strip().upper()
+        code = clean_code(data.get('A', ''))
+        if platform not in PDA_PLATFORMS:
+            return jsonify({"status": "error", "message": "Ismeretlen platform"}), 400
+        try:
+            darab = int(str(data.get('darab', '1')).strip() or 1)
+        except ValueError:
+            darab = 0
+        if darab < 1:
+            return jsonify({"status": "error", "message": "Hibas darabszam"}), 400
+
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P FROM termekek "
+                       "WHERE UPPER(TRIM(A))=? OR UPPER(TRIM(B))=?", (code, code))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"status": "error", "message": f"{code} nem talalhato a raktarban"}), 404
+        prod = _pda_row(row)
+        now = pda_now()
+        eladas_id = f"E{now.strftime('%Y%m%d%H%M%S')}-{code}-{os.urandom(2).hex()}"
+        cursor.execute("""
+            INSERT INTO pda_eladasok (eladas_id, datum, platform, A, C, D, E, F, G, L, M, N,
+                                      vevo, ar, darab, tracking, megjegyzes, keszlet_levonas, eszkoz)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (eladas_id, now.strftime("%Y-%m-%d %H:%M"), platform, code,
+              prod["C"], prod["D"], prod["E"], prod["F"], prod["G"], prod["L"], prod["M"], prod["N"],
+              str(data.get('vevo', '')).strip(), str(data.get('ar', '')).strip(), str(darab),
+              str(data.get('tracking', '')).strip(), str(data.get('megjegyzes', '')).strip(),
+              1 if data.get('keszlet_levonas', True) else 0, str(data.get('eszkoz', 'PDA')).strip()))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "eladas_id": eladas_id}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/pda/sales', methods=['GET'])
+def pda_sales():
+    """A PDA-rol rogzitett eladasok (legujabb elol). ?pending=1: csak a meg at nem vett eladasok."""
+    try:
+        limit = min(request.args.get('limit', default=50, type=int), 500)
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        if request.args.get('pending'):
+            cursor.execute("SELECT * FROM pda_eladasok WHERE atvette IS NULL ORDER BY id LIMIT ?", (limit,))
+        else:
+            cursor.execute("SELECT * FROM pda_eladasok ORDER BY id DESC LIMIT ?", (limit,))
+        sales = [{k: (r[k] if r[k] is not None else "") for k in PDA_SALE_FIELDS} for r in cursor.fetchall()]
+        conn.close()
+        return jsonify({"status": "ok", "sales": sales}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/pda/sales/claim', methods=['POST'])
+def pda_sales_claim():
+    """Az asztali program atveszi az eladast. Csak EGY gep veheti at (a keszlet ne vonodjon le ketszer)."""
+    try:
+        data = request.json or {}
+        eladas_id = str(data.get('eladas_id', '')).strip()
+        gep = str(data.get('gep', '')).strip() or "ismeretlen gep"
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE pda_eladasok SET atvette=?, atvetel_ido=? WHERE eladas_id=? AND atvette IS NULL",
+                       (gep, pda_now().strftime("%Y-%m-%d %H:%M:%S"), eladas_id))
+        ok = cursor.rowcount == 1
+        conn.commit()
+        conn.close()
+        if ok:
+            return jsonify({"status": "ok"}), 200
+        return jsonify({"status": "taken", "message": "Mar atvette egy masik gep (vagy nincs ilyen)"}), 409
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 

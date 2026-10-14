@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Rakt&#xE1;r PDA</title>
+<style>
+  :root { --bg:#121212; --card:#1e1e1e; --line:#333; --txt:#fff; --dim:#aaa; --ok:#00e676; --warn:#ff9800; --err:#ff5252; --blue:#29b6f6; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; background:var(--bg); color:var(--txt); font-family: Roboto, Arial, sans-serif; font-size:16px; }
+  header { position:sticky; top:0; z-index:5; background:#0b0b0b; border-bottom:1px solid var(--line); padding:8px 10px; }
+  .toprow { display:flex; align-items:center; gap:8px; }
+  .title { font-weight:bold; font-size:18px; flex:1; }
+  .dot { width:12px; height:12px; border-radius:50%; background:#666; display:inline-block; }
+  .dot.ok { background:var(--ok); } .dot.bad { background:var(--err); }
+  .tabs { display:flex; gap:6px; margin-top:8px; }
+  .tabs button { flex:1; padding:10px; font-size:15px; font-weight:bold; border:none; border-radius:6px; background:#2b2b2b; color:var(--txt); }
+  .tabs button.on { background:var(--blue); color:#000; }
+  main { padding:10px; }
+  .scan { display:flex; gap:6px; }
+  .scan input { flex:1; min-width:0; font-size:20px; padding:12px; border-radius:8px; border:2px solid #444; background:#2b2b2b; color:#fff; }
+  .scan input:focus { border-color:var(--ok); outline:none; }
+  .scan button { font-size:18px; padding:0 14px; border:none; border-radius:8px; background:var(--blue); color:#000; font-weight:bold; }
+  .msg { margin:10px 0; padding:12px; border-radius:8px; font-size:15px; }
+  .msg.ok { background:#1b5e20; } .msg.err { background:#b71c1c; } .msg.info { background:#263238; color:var(--dim); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; margin:10px 0; }
+  .code { font-size:22px; font-weight:bold; color:var(--blue); }
+  .name { font-size:17px; font-weight:bold; margin:4px 0 8px; }
+  .grid { display:grid; grid-template-columns: auto 1fr; gap:3px 10px; font-size:15px; }
+  .grid span:nth-child(odd) { color:var(--dim); }
+  .sell { display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px; margin-top:12px; }
+  .sell button { padding:14px 4px; font-size:14px; font-weight:bold; border:none; border-radius:8px; color:#000; }
+  .b-kivul { background:#ffb74d; } .b-ebay { background:#29b6f6; } .b-web { background:#ba68c8; }
+  .overlay { position:fixed; inset:0; background:var(--bg); z-index:20; overflow-y:auto; padding:12px; display:none; }
+  .overlay.on { display:block; }
+  .ohead { font-size:19px; font-weight:bold; margin-bottom:8px; }
+  .pinfo { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px; font-size:14px; margin-bottom:10px; }
+  label.f { display:block; color:var(--dim); font-size:14px; margin:10px 0 4px; }
+  .frow { display:flex; gap:6px; }
+  .frow input, .fin { flex:1; min-width:0; width:100%; font-size:18px; padding:11px; border-radius:8px; border:2px solid #444; background:#2b2b2b; color:#fff; }
+  .frow input:focus, .fin:focus { border-color:var(--ok); outline:none; }
+  .later { border:none; border-radius:8px; background:var(--warn); color:#000; font-weight:bold; padding:0 10px; font-size:14px; }
+  .chk { display:flex; gap:10px; align-items:flex-start; margin:14px 0; color:#ffb74d; font-weight:bold; font-size:14px; }
+  .chk input { width:24px; height:24px; flex:none; }
+  .actions { display:flex; gap:8px; margin-top:14px; }
+  .actions button { padding:15px; font-size:17px; font-weight:bold; border:none; border-radius:8px; }
+  .go { flex:3; background:var(--ok); color:#000; } .cancel { flex:1; background:#444; color:#fff; }
+  .go:disabled { opacity:.5; }
+  .sale { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px; margin:8px 0; font-size:14px; }
+  .sale .top { display:flex; justify-content:space-between; gap:6px; font-weight:bold; }
+  .sale .st { font-size:13px; margin-top:4px; }
+  .pend { color:var(--warn); } .done { color:var(--ok); }
+  .miss { color:var(--warn); }
+  .hidden { display:none; }
+  .settings { color:var(--dim); font-size:13px; margin-top:20px; }
+  .settings input { font-size:15px; padding:8px; border-radius:6px; border:1px solid #444; background:#2b2b2b; color:#fff; width:100%; }
+</style>
+</head>
+<body>
+<header>
+  <div class="toprow">
+    <div class="title">&#x1F4E6; Rakt&#xE1;r PDA</div>
+    <span id="srv" class="dot" title="Szerver"></span>
+  </div>
+  <div class="tabs">
+    <button id="tab-sell" class="on" onclick="showTab('sell')">&#x1F4B0; Elad&#xE1;s</button>
+    <button id="tab-list" onclick="showTab('list')">&#x1F4CB; Elad&#xE1;sok</button>
+  </div>
+</header>
+
+<main>
+  <section id="page-sell">
+    <form class="scan" onsubmit="event.preventDefault(); doSearch(scanInput.value);">
+      <input id="scan" autocomplete="off" autocapitalize="characters" spellcheck="false"
+             placeholder="Csippants a vonalk&#xF3;dra&#x2026;">
+      <button type="submit">&#x1F50D;</button>
+    </form>
+    <div id="status"></div>
+    <div id="results"></div>
+  </section>
+
+  <section id="page-list" class="hidden">
+    <div class="msg info">A PDA-n r&#xF6;gz&#xED;tett elad&#xE1;sok. A rakt&#xE1;rk&#xE9;szletet &#xE9;s a Google t&#xE1;bl&#xE1;zatot az asztali program friss&#xED;ti, amikor &#xE1;tveszi &#x151;ket (&#x23F3; &#x2192; &#x2714;).</div>
+    <div id="sales"></div>
+    <div class="settings">
+      <label class="f">Eszk&#xF6;z neve (az elad&#xE1;sokn&#xE1;l ez l&#xE1;tszik):</label>
+      <input id="devname" placeholder="PDA">
+    </div>
+  </section>
+</main>
+
+<div id="sale" class="overlay">
+  <div class="ohead" id="s-title">Elad&#xE1;s</div>
+  <div class="pinfo" id="s-info"></div>
+  <label class="f">&#x1F464; Vev&#x151;</label>
+  <div class="frow"><input id="s-vevo" placeholder="Vev&#x151; neve / felhaszn&#xE1;l&#xF3;neve"><button class="later" type="button" onclick="later('s-vevo')">&#x23ED; K&#xE9;s&#x151;bb</button></div>
+  <label class="f">&#x1F4B6; Elad&#xE1;si &#xE1;r</label>
+  <div class="frow"><input id="s-ar" placeholder="pl. 120 EUR"><button class="later" type="button" onclick="later('s-ar')">&#x23ED; K&#xE9;s&#x151;bb</button></div>
+  <label class="f">&#x1F522; Eladott darab</label>
+  <input id="s-darab" class="fin" type="number" inputmode="numeric" min="1" value="1">
+  <label class="f">&#x1F69A; Tracking number (csippanthat&#xF3;)</label>
+  <div class="frow"><input id="s-tracking" placeholder="Tracking number" autocapitalize="characters"><button class="later" type="button" onclick="later('s-tracking')">&#x23ED; K&#xE9;s&#x151;bb</button></div>
+  <label class="f">&#x1F4DD; Megjegyz&#xE9;s</label>
+  <input id="s-megj" class="fin" placeholder="(nem k&#xF6;telez&#x151;)">
+  <label class="chk"><input type="checkbox" id="s-stock" checked>
+    <span>Eladott darabsz&#xE1;m levon&#xE1;sa a rakt&#xE1;rk&#xE9;szletb&#x151;l (0 db eset&#xE9;n a term&#xE9;k t&#xF6;rl&#x151;dik &#xE9;s a ToroltSor lapra ker&#xFC;l)</span></label>
+  <div class="actions">
+    <button class="go" id="s-go" type="button" onclick="submitSale()">&#x2705; Elad&#xE1;s r&#xF6;gz&#xED;t&#xE9;se</button>
+    <button class="cancel" type="button" onclick="closeSale()">M&#xE9;gse</button>
+  </div>
+</div>
+
+<script>
+var PLATFORMS = {
+  EBAY_KIVULI: { cim: "eBay-en k\u00edv\u00fcli elad\u00e1s", gomb: "eBay-en k\u00edv\u00fcli", cls: "b-kivul" },
+  EBAY:        { cim: "eBay elad\u00e1s",           gomb: "eBay",           cls: "b-ebay" },
+  WEBSHOP:     { cim: "Webshop elad\u00e1s",        gomb: "Webshop",        cls: "b-web" }
+};
+var scanInput = document.getElementById("scan");
+var lastItems = [];
+var current = null;   // { platform, item }
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+// Magyar billenty\u0171zetre \u00e1ll\u00edtott olvas\u00f3: '-' helyett '\u00fc', '0' helyett '\u00f6' j\u00f6het
+function fixScan(t) {
+  t = String(t || "").normalize("NFC").trim();
+  var f = t.replace(/[\u00fc\u00dc]/g, "-").replace(/[\u00f6\u00d6]/g, "0");
+  return (/\s/.test(f) || /[^\x00-\x7f]/.test(f)) ? t : f;
+}
+function api(method, url, body) {
+  var opt = { method: method, headers: { "Content-Type": "application/json" } };
+  if (body) opt.body = JSON.stringify(body);
+  return fetch(url, opt).then(function (r) {
+    return r.json().catch(function () { return {}; }).then(function (js) {
+      setServer(true);
+      if (!r.ok) throw new Error(js.message || ("HTTP " + r.status));
+      return js;
+    });
+  }, function (e) { setServer(false); throw new Error("Nincs kapcsolat a szerverrel"); });
+}
+function setServer(ok) { document.getElementById("srv").className = "dot " + (ok ? "ok" : "bad"); }
+function status(html, cls) { document.getElementById("status").innerHTML = html ? '<div class="msg ' + cls + '">' + html + "</div>" : ""; }
+function focusScan() { if (!saleOpen()) { scanInput.focus(); scanInput.select(); } }
+function saleOpen() { return document.getElementById("sale").classList.contains("on"); }
+
+function showTab(t) {
+  document.getElementById("page-sell").classList.toggle("hidden", t !== "sell");
+  document.getElementById("page-list").classList.toggle("hidden", t !== "list");
+  document.getElementById("tab-sell").classList.toggle("on", t === "sell");
+  document.getElementById("tab-list").classList.toggle("on", t === "list");
+  if (t === "list") loadSales(); else focusScan();
+}
+
+// ---- Keres\u00e9s ----
+function doSearch(q) {
+  q = fixScan(q);
+  scanInput.value = q;
+  if (!q) return;
+  showTab("sell");
+  status("\ud83d\udd0d Keres\u00e9s: <b>" + esc(q) + "</b>\u2026", "info");
+  document.getElementById("results").innerHTML = "";
+  api("GET", "/pda/search?q=" + encodeURIComponent(q)).then(function (js) {
+    lastItems = js.items || [];
+    if (!lastItems.length) { status("\u274c Nincs tal\u00e1lat: <b>" + esc(q) + "</b>", "err"); }
+    else status("", "");
+    document.getElementById("results").innerHTML = lastItems.map(card).join("");
+    focusScan();
+  }).catch(function (e) { status("\u274c " + esc(e.message), "err"); focusScan(); });
+}
+function card(it, i) {
+  var name = [it.C, it.D].filter(Boolean).join(" ");
+  var rows = [["Cikksz\u00e1m", it.E], ["\u00c1llapot", it.G], ["Rakt\u00e1ron", (it.F || "1") + " db"], ["Raklap", it.L],
+              ["S\u00faly", it.M], ["eBay sz\u00e1m", it.N]].filter(function (r) { return r[1]; });
+  var btns = Object.keys(PLATFORMS).map(function (p) {
+    return '<button class="' + PLATFORMS[p].cls + '" onclick="openSale(\'' + p + '\',' + i + ')">\ud83d\udcb0 ' + esc(PLATFORMS[p].gomb) + "</button>";
+  }).join("");
+  return '<div class="card"><div class="code">' + esc(it.A || it.B) + '</div><div class="name">' + esc(name || "-") + "</div>" +
+         '<div class="grid">' + rows.map(function (r) { return "<span>" + esc(r[0]) + "</span><span>" + esc(r[1]) + "</span>"; }).join("") +
+         '</div><div class="sell">' + btns + "</div></div>";
+}
+function stockOf(it) { var m = String(it.F || "").match(/\d+/); return m ? parseInt(m[0], 10) : 1; }
+
+// ---- Elad\u00e1s ablak ----
+function openSale(platform, i) {
+  var it = lastItems[i];
+  current = { platform: platform, item: it };
+  var now = new Date();
+  var d = now.getFullYear() + "-" + ("0" + (now.getMonth() + 1)).slice(-2) + "-" + ("0" + now.getDate()).slice(-2) + " " +
+          ("0" + now.getHours()).slice(-2) + ":" + ("0" + now.getMinutes()).slice(-2);
+  document.getElementById("s-title").textContent = "\ud83d\udcb0 " + PLATFORMS[platform].cim;
+  document.getElementById("s-info").innerHTML = "\ud83c\udff7\ufe0f <b>" + esc(it.A) + "</b> | " + esc(it.C || "-") + " | " + esc(it.D || "-") +
+      " | " + esc(it.E || "-") + "<br>\ud83d\udce6 Rakt\u00e1ron: <b>" + stockOf(it) + " db</b> | \ud83d\udcc5 " + d + " (automatikus)";
+  ["s-vevo", "s-ar", "s-tracking", "s-megj"].forEach(function (id) {
+    var el = document.getElementById(id); el.value = ""; el.dataset.ph = el.dataset.ph || el.placeholder; el.placeholder = el.dataset.ph;
+  });
+  document.getElementById("s-darab").value = "1";
+  document.getElementById("s-stock").checked = true;
+  document.getElementById("s-go").disabled = false;
+  document.getElementById("s-go").textContent = "\u2705 Elad\u00e1s r\u00f6gz\u00edt\u00e9se";
+  document.getElementById("sale").classList.add("on");
+  setTimeout(function () { document.getElementById("s-vevo").focus(); }, 50);
+}
+function closeSale() { document.getElementById("sale").classList.remove("on"); current = null; focusScan(); }
+function later(id) {
+  var el = document.getElementById(id);
+  el.value = ""; el.placeholder = "\u23ed k\u00e9s\u0151bb kit\u00f6ltend\u0151 (asztali program, Eladottak f\u00fcl)";
+  nextField(el);
+}
+var ORDER = ["s-vevo", "s-ar", "s-darab", "s-tracking", "s-megj"];
+function nextField(el) {
+  var i = ORDER.indexOf(el.id);
+  if (i >= 0 && i < ORDER.length - 1) { var n = document.getElementById(ORDER[i + 1]); n.focus(); n.select && n.select(); }
+  else el.blur();
+}
+ORDER.forEach(function (id) {
+  document.getElementById(id).addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); if (id === "s-megj") submitSale(); else nextField(this); }
+  });
+});
+function submitSale() {
+  if (!current) return;
+  var darab = parseInt(document.getElementById("s-darab").value, 10);
+  if (!(darab >= 1)) { document.getElementById("s-darab").focus(); return; }
+  var btn = document.getElementById("s-go");
+  btn.disabled = true; btn.textContent = "\u23f3 Ment\u00e9s\u2026";
+  var it = current.item, platform = current.platform;
+  api("POST", "/pda/sale", {
+    platform: platform, A: it.A || it.B, darab: darab,
+    vevo: document.getElementById("s-vevo").value, ar: document.getElementById("s-ar").value,
+    tracking: fixScan(document.getElementById("s-tracking").value), megjegyzes: document.getElementById("s-megj").value,
+    keszlet_levonas: document.getElementById("s-stock").checked, eszkoz: deviceName()
+  }).then(function () {
+    closeSale();
+    document.getElementById("results").innerHTML = "";
+    status("\u2705 <b>" + esc(it.A) + "</b> eladva \u2014 " + esc(PLATFORMS[platform].cim) + " \u2014 " + darab + " db<br>" +
+           '<span style="color:#ccc">A k\u00e9szletet az asztali program vonja le, amikor \u00e1tveszi.</span>', "ok");
+    focusScan();
+  }).catch(function (e) {
+    btn.disabled = false; btn.textContent = "\u2705 Elad\u00e1s r\u00f6gz\u00edt\u00e9se";
+    alert("Nem siker\u00fclt menteni: " + e.message);
+  });
+}
+
+// ---- Elad\u00e1sok lista ----
+function loadSales() {
+  var box = document.getElementById("sales");
+  box.innerHTML = '<div class="msg info">Bet\u00f6lt\u00e9s\u2026</div>';
+  api("GET", "/pda/sales?limit=60").then(function (js) {
+    var s = js.sales || [];
+    if (!s.length) { box.innerHTML = '<div class="msg info">M\u00e9g nincs PDA-s elad\u00e1s.</div>'; return; }
+    box.innerHTML = s.map(function (x) {
+      var miss = ["vevo", "ar", "tracking"].filter(function (k) { return !x[k]; });
+      var st = x.atvette ? '<span class="done">\u2714 \u00c1tv\u00e9ve: ' + esc(x.atvette) + " (" + esc(x.atvetel_ido) + ")</span>"
+                         : '<span class="pend">\u23f3 Az asztali program m\u00e9g nem vette \u00e1t</span>';
+      return '<div class="sale"><div class="top"><span>' + esc(x.A) + " \u2014 " + esc(x.darab) + " db</span><span>" + esc(x.datum) + "</span></div>" +
+             "<div>" + esc([x.C, x.D, x.E].filter(Boolean).join(" ")) + "</div>" +
+             "<div>" + esc((PLATFORMS[x.platform] || {}).cim || x.platform) + " | Vev\u0151: " + esc(x.vevo || "-") + " | \u00c1r: " + esc(x.ar || "-") +
+             " | Tracking: " + esc(x.tracking || "-") + "</div>" +
+             (miss.length ? '<div class="miss">\u23ed K\u00e9s\u0151bb kit\u00f6ltend\u0151 (asztali program): ' + miss.map(function (k) { return { vevo: "vev\u0151", ar: "\u00e1r", tracking: "tracking" }[k]; }).join(", ") + "</div>" : "") +
+             '<div class="st">' + st + "</div></div>";
+    }).join("");
+  }).catch(function (e) { box.innerHTML = '<div class="msg err">\u274c ' + esc(e.message) + "</div>"; });
+}
+
+// ---- Eszk\u00f6z neve ----
+function deviceName() {
+  try { return localStorage.getItem("devname") || "PDA"; } catch (e) { return "PDA"; }
+}
+(function () {
+  var el = document.getElementById("devname");
+  el.value = deviceName() === "PDA" ? "" : deviceName();
+  el.addEventListener("change", function () { try { localStorage.setItem("devname", el.value.trim()); } catch (e) {} });
+})();
+
+// ---- Vonalk\u00f3d-olvas\u00f3 ----
+// A Zebra DataWedge az Android appon kereszt\u00fcl ide k\u00fcldi a beolvasott k\u00f3dot (window.onScan).
+// Ha az elad\u00e1s ablak nyitva van, a k\u00f3d a Tracking mez\u0151be (vagy az \u00e9ppen akt\u00edv mez\u0151be) ker\u00fcl.
+window.onScan = function (code) {
+  code = fixScan(code);
+  if (saleOpen()) {
+    var a = document.activeElement;
+    var target = (a && a.tagName === "INPUT" && a.type !== "checkbox" && a.id !== "s-darab") ? a : document.getElementById("s-tracking");
+    target.value = code;
+    nextField(target);
+    return;
+  }
+  doSearch(code);
+};
+// Billenty\u0171zet-m\u00f3d\u00fa olvas\u00f3: ha nem a keres\u0151mez\u0151ben \u00e1ll a kurzor, oda ir\u00e1ny\u00edtjuk a g\u00e9pel\u00e9st
+document.addEventListener("keydown", function (e) {
+  if (saleOpen() || e.ctrlKey || e.altKey) return;
+  var a = document.activeElement;
+  if (a === scanInput || (a && a.tagName === "INPUT")) return;
+  if (e.key && e.key.length === 1) { e.preventDefault(); scanInput.value = e.key; scanInput.focus(); }
+});
+
+function ping() { api("GET", "/sync/status").catch(function () {}); }
+ping(); setInterval(ping, 30000);
+focusScan();
+</script>
+</body>
+</html>
