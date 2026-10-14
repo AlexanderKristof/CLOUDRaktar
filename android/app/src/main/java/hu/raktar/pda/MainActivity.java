@@ -100,6 +100,17 @@ public class MainActivity extends Activity {
     }
 
     class Bridge {
+        /** A szerver jelszava (token) a PDA-n marad, nem a kodban. */
+        @JavascriptInterface
+        public String getToken() {
+            return prefs.getString("token", "");
+        }
+
+        @JavascriptInterface
+        public void setToken(String token) {
+            prefs.edit().putString("token", token == null ? "" : token.trim()).apply();
+        }
+
         @JavascriptInterface
         public void reload() {
             runOnUiThread(MainActivity.this::loadApp);

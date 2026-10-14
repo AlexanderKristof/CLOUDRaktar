@@ -85,9 +85,22 @@
     <div class="settings">
       <label class="f">Eszk&#xF6;z neve (az elad&#xE1;sokn&#xE1;l ez l&#xE1;tszik):</label>
       <input id="devname" placeholder="PDA">
+      <button type="button" onclick="showTokenScreen('')" style="margin-top:14px;width:100%;padding:10px;font-size:15px;border:none;border-radius:6px;background:#2b2b2b;color:#fff">&#x1F511; Szerver jelsz&#xF3; m&#xF3;dos&#xED;t&#xE1;sa</button>
     </div>
   </section>
 </main>
+
+<div id="token" class="overlay">
+  <div class="ohead">&#x1F511; Szerver jelsz&#xF3;</div>
+  <div class="msg info">Add meg a rakt&#xE1;r szerver jelszav&#xE1;t (tokent). El&#xE9;g egyszer: a PDA megjegyzi.<br>
+    A jelsz&#xF3; a VPS-en van: <b>/opt/raktarapp/api_token.txt</b></div>
+  <div id="tok-msg" class="miss"></div>
+  <label class="f">Jelsz&#xF3;</label>
+  <input id="tok-in" class="fin" autocomplete="off" autocapitalize="off" spellcheck="false">
+  <div class="actions">
+    <button class="go" type="button" onclick="submitToken()">&#x1F4BE; Ment&#xE9;s</button>
+  </div>
+</div>
 
 <div id="sale" class="overlay">
   <div class="ohead" id="s-title">Elad&#xE1;s</div>
@@ -131,12 +144,39 @@ function fixScan(t) {
   var f = t.replace(/[\u00fc\u00dc]/g, "-").replace(/[\u00f6\u00d6]/g, "0");
   return (/\s/.test(f) || /[^\x00-\x7f]/.test(f)) ? t : f;
 }
+// ---- Jelsz\u00f3 (token): a PDA app t\u00e1rolja (RaktarApp), b\u00f6ng\u00e9sz\u0151ben a localStorage ----
+function getToken() {
+  try { if (window.RaktarApp && RaktarApp.getToken) return RaktarApp.getToken() || ""; } catch (e) {}
+  try { return localStorage.getItem("token") || ""; } catch (e) { return ""; }
+}
+function saveToken(t) {
+  t = String(t || "").trim();
+  try { if (window.RaktarApp && RaktarApp.setToken) RaktarApp.setToken(t); } catch (e) {}
+  try { localStorage.setItem("token", t); } catch (e) {}
+}
+function showTokenScreen(msg) {
+  document.getElementById("tok-msg").textContent = msg || "";
+  document.getElementById("tok-in").value = "";
+  document.getElementById("token").classList.add("on");
+  setTimeout(function () { document.getElementById("tok-in").focus(); }, 50);
+}
+function submitToken() {
+  var t = document.getElementById("tok-in").value.trim();
+  if (!t) return;
+  saveToken(t);
+  document.getElementById("token").classList.remove("on");
+  ping(); focusScan();
+}
 function api(method, url, body) {
-  var opt = { method: method, headers: { "Content-Type": "application/json" } };
+  var opt = { method: method, headers: { "Content-Type": "application/json", "X-Raktar-Token": getToken() } };
   if (body) opt.body = JSON.stringify(body);
   return fetch(url, opt).then(function (r) {
     return r.json().catch(function () { return {}; }).then(function (js) {
       setServer(true);
+      if (r.status === 401) {
+        showTokenScreen(getToken() ? "A megadott jelsz\u00f3 hib\u00e1s." : "");
+        throw new Error("Jelsz\u00f3 sz\u00fcks\u00e9ges");
+      }
       if (!r.ok) throw new Error(js.message || ("HTTP " + r.status));
       return js;
     });
@@ -145,7 +185,9 @@ function api(method, url, body) {
 function setServer(ok) { document.getElementById("srv").className = "dot " + (ok ? "ok" : "bad"); }
 function status(html, cls) { document.getElementById("status").innerHTML = html ? '<div class="msg ' + cls + '">' + html + "</div>" : ""; }
 function focusScan() { if (!saleOpen()) { scanInput.focus(); scanInput.select(); } }
-function saleOpen() { return document.getElementById("sale").classList.contains("on"); }
+function saleOpen() {
+  return document.getElementById("sale").classList.contains("on") || document.getElementById("token").classList.contains("on");
+}
 
 function showTab(t) {
   document.getElementById("page-sell").classList.toggle("hidden", t !== "sell");
@@ -216,6 +258,9 @@ function nextField(el) {
   if (i >= 0 && i < ORDER.length - 1) { var n = document.getElementById(ORDER[i + 1]); n.focus(); n.select && n.select(); }
   else el.blur();
 }
+document.getElementById("tok-in").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { e.preventDefault(); submitToken(); }
+});
 ORDER.forEach(function (id) {
   document.getElementById(id).addEventListener("keydown", function (e) {
     if (e.key === "Enter") { e.preventDefault(); if (id === "s-megj") submitSale(); else nextField(this); }
@@ -300,6 +345,7 @@ document.addEventListener("keydown", function (e) {
 
 // Android "Vissza" gomb: el\u0151bb az elad\u00e1s ablakot / list\u00e1t z\u00e1rja be (true = kezelve)
 window.onBack = function () {
+  if (document.getElementById("token").classList.contains("on")) return false;
   if (saleOpen()) { closeSale(); return true; }
   if (!document.getElementById("page-list").classList.contains("hidden")) { showTab("sell"); return true; }
   return false;

@@ -434,12 +434,39 @@ def load_saved_zoom_factor():
             pass
     return 1.0
 
+# -------------------------------------------------------------------
+# VPS JELSZÓ (TOKEN): a szerver csak a jó tokennel érkező kéréseket fogadja el.
+# A token NEM lehet a programkódban (a kód a GitHubon van) - a program mellett lévő
+# api_token.txt fájlból olvassa (egyetlen sor). Ugyanez van a VPS-en: /opt/raktarapp/api_token.txt
+# -------------------------------------------------------------------
+API_TOKEN_FILE = os.path.join(BASE_DIR, "api_token.txt")
+
+
+def _load_api_token():
+    try:
+        with open(API_TOKEN_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+API_TOKEN = _load_api_token()
+
+
+def vps_request(method, url, **kwargs):
+    """Kérés a VPS felé, a tokennel együtt (X-Raktar-Token fejléc)."""
+    headers = dict(kwargs.pop("headers", None) or {})
+    if API_TOKEN:
+        headers["X-Raktar-Token"] = API_TOKEN
+    return requests.request(method, url, headers=headers, **kwargs)
+
+
 def send_to_vps_async(endpoint, data):
     """Adatok beküldése a VPS API-ra külön háttérszálon (Zéró fagyás)"""
     def _send():
         try:
             url = f"{VPS_URL}{endpoint}"
-            requests.post(url, json=data, timeout=3)
+            vps_request("POST", url, json=data, timeout=3)
         except Exception as e:
             print(f"VPS Szinkron hiba ({endpoint}): {e}")
 
@@ -1110,14 +1137,14 @@ def _send_outbox_to_vps(op, row_data):
         return "ok"  # csak a Sheets ToroltSor munkalapjára megy
     try:
         if op == "delete":
-            res = requests.post(f"{VPS_URL}/delete_item", json={"A": code_a}, timeout=3)
+            res = vps_request("POST", f"{VPS_URL}/delete_item", json={"A": code_a}, timeout=3)
         elif op == "color":
-            res = requests.post(f"{VPS_URL}/update_color", json={"A": code_a, "szin": row_data.get("szin", "")}, timeout=3)
+            res = vps_request("POST", f"{VPS_URL}/update_color", json={"A": code_a, "szin": row_data.get("szin", "")}, timeout=3)
         else:
             body = {k: v for k, v in row_data.items() if not k.startswith("_")}
             if row_data.get("_force"):
                 body["force"] = True
-            res = requests.post(f"{VPS_URL}/update_item", json=body, timeout=3)
+            res = vps_request("POST", f"{VPS_URL}/update_item", json=body, timeout=3)
     except Exception:
         return "retry"
 
@@ -1145,7 +1172,7 @@ def _send_outbox_to_vps(op, row_data):
             try:
                 body = {k: v for k, v in row_data.items() if not k.startswith("_")}
                 body["force"] = True
-                res2 = requests.post(f"{VPS_URL}/update_item", json=body, timeout=3)
+                res2 = vps_request("POST", f"{VPS_URL}/update_item", json=body, timeout=3)
             except Exception:
                 return "retry"
             if res2.status_code == 200:
@@ -2428,9 +2455,11 @@ class VPSCheckWorker(QThread):
 
     def run(self):
         try:
-            res = requests.get(f"{VPS_URL}/sync/status", timeout=3)
+            res = vps_request("GET", f"{VPS_URL}/sync/status", timeout=3)
             if res.status_code == 200:
                 self.status_signal.emit(True, "🟢 VPS Csatlakozva")
+            elif res.status_code == 401:
+                self.status_signal.emit(False, "🔑 VPS: hibás / hiányzó jelszó (api_token.txt)")
             else:
                 self.status_signal.emit(False, f"⚠️ VPS Hiba: {res.status_code}")
         except Exception:
@@ -2785,7 +2814,7 @@ class AutoVPSPollWorker(QThread):
                 # 1 másodpercenként lekérdezi a VPS-ről az azóta változott termékeket
                 time.sleep(1)
                 params = {} if last_verzio is None else {"since": last_verzio}
-                res = requests.get(f"{VPS_URL}/get_updates", params=params, timeout=2)
+                res = vps_request("GET", f"{VPS_URL}/get_updates", params=params, timeout=2)
                 if res.status_code != 200:
                     continue
                 data = res.json()
@@ -2808,7 +2837,7 @@ class VPSDownloadWorker(QThread):
             
             # 1. VPS Adatbázis lekérése / Sync indítása
             url = f"{VPS_URL}/sync/full"
-            res = requests.post(url, timeout=10)
+            res = vps_request("POST", url, timeout=10)
             
             if res.status_code == 200:
                 msg = "✅ VPS Adatbázis sikeresen frissítve a helyi gépen!"
@@ -5758,11 +5787,11 @@ class RaktarApp(QMainWindow):
         def job():
             claimed = []
             try:
-                res = requests.get(f"{VPS_URL}/pda/sales", params={"pending": 1, "limit": 50}, timeout=5)
+                res = vps_request("GET", f"{VPS_URL}/pda/sales", params={"pending": 1, "limit": 50}, timeout=5)
                 if res.status_code == 200:
                     gep = socket.gethostname() or "asztali gep"
                     for sale in res.json().get("sales", []):
-                        r = requests.post(f"{VPS_URL}/pda/sales/claim",
+                        r = vps_request("POST", f"{VPS_URL}/pda/sales/claim",
                                           json={"eladas_id": sale.get("eladas_id"), "gep": gep}, timeout=5)
                         if r.status_code == 200:
                             claimed.append(sale)
@@ -6139,7 +6168,7 @@ class RaktarApp(QMainWindow):
 
         def job():
             try:
-                res = requests.get(f"{VPS_URL}/items", timeout=30)
+                res = vps_request("GET", f"{VPS_URL}/items", timeout=30)
                 if res.status_code == 404:
                     self.server_items_signal.emit({"error": "A szerveren még a RÉGI server_api.py fut - töltsd fel az újat "
                                                             "(vps/server_api.py) és indítsd újra a szerver szolgáltatást."})

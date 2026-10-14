@@ -13,6 +13,45 @@ from flask import Flask, jsonify, request, send_file
 
 app = Flask(__name__)
 
+# ==========================================
+# JELSZO (TOKEN) VEDELEM
+# A token a szerveren egy fajlban van (NEM a kodban, mert a kod a GitHubon van):
+#   /opt/raktarapp/api_token.txt   (egyetlen sor)
+# Minden keres fejleceben ott kell lennie:  X-Raktar-Token: <token>
+# Ha a fajl nem letezik / ures, a vedelem KI van kapcsolva (mint eddig).
+# ==========================================
+import hmac
+
+API_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api_token.txt")
+# Jelszo nelkul elerheto utvonalak:
+#   /pda           - a PDA app felulete (csak a kepernyo, adat nincs benne; a token a PDA-n van)
+#   /pda/app.apk   - a PDA app telepitoje (titkot nem tartalmaz)
+#   /add_munkalap  - a regi Flutter munkalap app (az nem tud tokent kuldeni)
+OPEN_PATHS = {"/pda", "/pda/app.apk", "/add_munkalap"}
+
+
+def load_api_token():
+    try:
+        with open(API_TOKEN_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+API_TOKEN = load_api_token()
+if not API_TOKEN:
+    print("[VPS] FIGYELEM: nincs api_token.txt - a szerver JELSZO NELKUL fogad mindent!")
+
+
+@app.before_request
+def check_token():
+    if not API_TOKEN or request.path in OPEN_PATHS or request.method == "OPTIONS":
+        return None
+    sent = request.headers.get("X-Raktar-Token", "")
+    if sent and hmac.compare_digest(sent.encode("utf-8"), API_TOKEN.encode("utf-8")):
+        return None
+    return jsonify({"status": "error", "message": "Hibas vagy hianyzo jelszo (token)"}), 401
+
 DB_PATH = '/opt/raktarapp/raktar_adatbazis.db'
 def init_munkalap_db():
     try:
@@ -486,6 +525,16 @@ def pda_page():
     resp = send_file(PDA_HTML, mimetype="text/html")
     resp.headers["Cache-Control"] = "no-cache"
     return resp
+
+
+@app.route('/pda/app.apk', methods=['GET'])
+def pda_apk():
+    """A PDA app telepitoje (RaktarPDA.apk ugyanebben a mappaban) - a PDA bongeszojebol letoltheto."""
+    apk = os.path.join(os.path.dirname(os.path.abspath(__file__)), "RaktarPDA.apk")
+    if not os.path.exists(apk):
+        return jsonify({"status": "error", "message": "RaktarPDA.apk nincs feltoltve a szerverre"}), 404
+    return send_file(apk, mimetype="application/vnd.android.package-archive",
+                     as_attachment=True, download_name="RaktarPDA.apk")
 
 
 @app.route('/pda/search', methods=['GET'])

@@ -3,3 +3,5 @@ android/build/
 android/app/build/
 android/local.properties
 __pycache__/
+api_token.txt
+vps/api_token.txt
