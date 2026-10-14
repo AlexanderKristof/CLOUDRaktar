@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A VPS szerver sima http-n (IP-cimen) erheto el, ezert engedni kell a titkositatlan forgalmat -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

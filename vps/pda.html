@@ -298,6 +298,13 @@ document.addEventListener("keydown", function (e) {
   if (e.key && e.key.length === 1) { e.preventDefault(); scanInput.value = e.key; scanInput.focus(); }
 });
 
+// Android "Vissza" gomb: el\u0151bb az elad\u00e1s ablakot / list\u00e1t z\u00e1rja be (true = kezelve)
+window.onBack = function () {
+  if (saleOpen()) { closeSale(); return true; }
+  if (!document.getElementById("page-list").classList.contains("hidden")) { showTab("sell"); return true; }
+  return false;
+};
+
 function ping() { api("GET", "/sync/status").catch(function () {}); }
 ping(); setInterval(ping, 30000);
 focusScan();

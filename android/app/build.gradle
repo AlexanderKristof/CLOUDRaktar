@@ -1,0 +1,42 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'hu.raktar.pda'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'hu.raktar.pda'
+        minSdk 26
+        targetSdk 34
+        // A GitHub Actions minden építésnél növeli (így a PDA frissítésként telepíti)
+        versionCode Integer.parseInt(System.getenv('GITHUB_RUN_NUMBER') ?: '1')
+        versionName "1.0." + (System.getenv('GITHUB_RUN_NUMBER') ?: '0')
+    }
+
+    // Állandó aláíró kulcs: így egy új APK a régi FÖLÉ telepíthető (nem kell előtte törölni)
+    signingConfigs {
+        raktar {
+            storeFile file('raktar-pda.jks')
+            storePassword 'raktarpda'
+            keyAlias 'raktarpda'
+            keyPassword 'raktarpda'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.raktar
+        }
+        debug {
+            signingConfig signingConfigs.raktar
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
