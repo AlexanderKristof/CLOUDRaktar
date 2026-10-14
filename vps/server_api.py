@@ -47,6 +47,9 @@ if not API_TOKEN:
 def check_token():
     if not API_TOKEN or request.path in OPEN_PATHS or request.method == "OPTIONS":
         return None
+    # A VPS-en futo sajat scriptek (127.0.0.1-rol) jelszo nelkul is hivhatjak
+    if request.remote_addr in ("127.0.0.1", "::1"):
+        return None
     sent = request.headers.get("X-Raktar-Token", "")
     if sent and hmac.compare_digest(sent.encode("utf-8"), API_TOKEN.encode("utf-8")):
         return None
