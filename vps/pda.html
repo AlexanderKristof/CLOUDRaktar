@@ -246,6 +246,11 @@
     </div>
     <label class="chk" style="color:#cfd8dc;margin:6px 0"><input type="checkbox" id="proc-err" onchange="renderProc()"><span>Csak a hib&#xE1;k</span></label>
     <div id="proc-list"></div>
+    <details id="cli-details">
+      <summary>&#x1F5A5;&#xFE0F; G&#xE9;pek &#xE9;s verzi&#xF3;k</summary>
+      <div id="cli-list"><div class="small">Megnyit&#xE1;skor bet&#xF6;lti&#x2026;</div></div>
+      <button class="btn grey" type="button" onclick="loadClients()">&#x1F504; Friss&#xED;t&#xE9;s</button>
+    </details>
     <details>
       <summary>&#x2753; Hibak&#xF3;dok magyar&#xE1;zata</summary>
       <div class="kodlista" id="kodlista"></div>
@@ -380,7 +385,7 @@
 </div>
 
 <script>
-var VERSION = "2026.10.16-e";
+var VERSION = "2026.10.16-f";
 var PLATFORMS = {
   EBAY_KIVULI: { cim: "eBay-en k\u00edv\u00fcli elad\u00e1s", gomb: "eBay-en k\u00edv\u00fcli", cls: "b-kivul" },
   EBAY:        { cim: "eBay elad\u00e1s",           gomb: "eBay",           cls: "b-ebay" },
@@ -1662,7 +1667,36 @@ window.onBack = function () {
 
 // Szerver figyel\u00e9se: a kapcsolat elveszt\u00e9se / visszat\u00e9r\u00e9se a Folyamat napl\u00f3ba ker\u00fcl
 var pingState = null;
+// ---- Jelentkez\u00e9s a szerveren (n\u00e9v + verzi\u00f3) \u2013 a g\u00e9pek list\u00e1j\u00e1hoz ----
+function appVer() { try { return (window.RaktarApp && RaktarApp.appVersion) ? (RaktarApp.appVersion() || "") : ""; } catch (e) { return ""; } }
+var latestVer = {};
+function heartbeat() {
+  rawApi("POST", "/clients/heartbeat", { tipus: "pda", nev: deviceName(), verzio: VERSION, app_verzio: appVer() })
+    .then(function (js) { latestVer = js.legfrissebb || {}; }).catch(function () {});
+}
+function verKey(v) { return String(v || "").split(/(\d+)/).map(function (x) { return /^\d+$/.test(x) ? ("0000000000" + x).slice(-10) : x; }).join(""); }
+function loadClients() {
+  $("cli-list").innerHTML = '<div class="small">Bet\u00f6lt\u00e9s\u2026</div>';
+  rawApi("GET", "/clients").then(function (js) {
+    var leg = js.legfrissebb || {}, rows = js.kliensek || [];
+    var h = '<div class="small" style="margin:6px 0">Legfrissebb: \ud83d\udda5\ufe0f g\u00e9pi program <b>' + esc(leg.gep || "-") + "</b> \u00b7 \ud83d\udcf1 PDA app <b>" +
+            esc(leg.pda_app || "-") + "</b><br>Ez a PDA: <b>" + esc(deviceName()) + "</b> \u00b7 app " + esc(appVer() || "r\u00e9gi") + " \u00b7 fel\u00fclet " + esc(VERSION) + "</div>";
+    h += rows.map(function (r) {
+      var latest = r.tipus === "gep" ? leg.gep : leg.pda_app, ver = r.tipus === "gep" ? r.verzio : r.app_verzio;
+      var regi = latest && ver && verKey(ver) < verKey(latest), mp = r.mp || 0;
+      var st = r.online ? '<span class="done">\ud83d\udfe2 Online</span>' : "\u26aa " + (mp < 3600 ? Math.round(mp / 60) + " perce" : mp < 172800 ? Math.round(mp / 3600) + " \u00f3r\u00e1ja" : Math.round(mp / 86400) + " napja");
+      return '<div class="row ' + (regi ? "wb" : "") + '"><div class="top"><span>' + (r.tipus === "gep" ? "\ud83d\udda5\ufe0f " : "\ud83d\udcf1 ") + esc(r.nev) + "</span><span>" + st + "</span></div>" +
+             "<div>" + (r.tipus === "gep" ? "Program: <b>" + esc(r.verzio || "-") + "</b>" : "App: <b>" + esc(r.app_verzio || "r\u00e9gi") + "</b> \u00b7 fel\u00fclet " + esc(r.verzio || "-")) +
+             (regi ? ' <span class="diff">\u26a0\ufe0f R\u00c9GI</span>' : (latest && ver === latest ? ' <span class="done">\u2714</span>' : "")) + "</div>" +
+             '<div class="small">' + esc(r.utolso) + (r.felhasznalo ? " \u00b7 " + esc(r.felhasznalo) : "") + (r.ip ? " \u00b7 " + esc(r.ip) : "") + "</div></div>";
+    }).join("");
+    $("cli-list").innerHTML = h;
+  }).catch(function (e) { $("cli-list").innerHTML = '<div class="msg err">\u274c ' + esc(errText(e)) + "</div>"; });
+}
+$("cli-details").addEventListener("toggle", function () { if (this.open) loadClients(); });
+
 function ping() {
+  heartbeat();
   rawApi("GET", "/sync/status").then(function () {
     if (pingState === false) proc("ok", "", "Kapcsolat a szerverrel helyre\u00e1llt");
     pingState = true;

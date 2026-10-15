@@ -174,6 +174,16 @@ public class MainActivity extends Activity {
             return true;
         }
 
+        /** Az app verzioja (a "Gepek es verziok" listahoz). */
+        @JavascriptInterface
+        public String appVersion() {
+            try {
+                return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+            } catch (Exception e) {
+                return "";
+            }
+        }
+
         /** A szerver jelszava (token) a PDA-n marad, nem a kodban. */
         @JavascriptInterface
         public String getToken() {

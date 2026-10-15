@@ -571,6 +571,94 @@ def init_pda_db2():
 init_pda_db2()
 
 
+# ==========================================
+# GEPEK ES VERZIOK: minden asztali program es PDA 20-30 mp-enkent jelentkezik
+# ==========================================
+def init_kliens_db():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS kliensek (
+                azon TEXT PRIMARY KEY,
+                tipus TEXT, nev TEXT, verzio TEXT, app_verzio TEXT,
+                felhasznalo TEXT, ip TEXT, elso TEXT, utolso TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[VPS] Kliens tabla inicializalasi hiba: {e}")
+
+init_kliens_db()
+ONLINE_SEC = 120
+
+
+def _ver_key(v):
+    """'v2026.10.16-pda2' -> osszehasonlithato kulcs (a szamokat szamkent kezeli)."""
+    return [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", str(v or ""))]
+
+
+def _legfrissebb(cur):
+    """A legujabb verzio tipusonkent (az elmult 60 napban jelentkezett gepek kozul)."""
+    hatar = (pda_now() - datetime.timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S")
+    out = {}
+    for tipus, mezo in (("gep", "verzio"), ("pda", "verzio"), ("pda_app", "app_verzio")):
+        t = "pda" if tipus.startswith("pda") else tipus
+        cur.execute(f"SELECT {mezo} FROM kliensek WHERE tipus=? AND utolso>=? AND {mezo} IS NOT NULL AND {mezo}!=''", (t, hatar))
+        vals = [r[0] for r in cur.fetchall()]
+        out[tipus] = max(vals, key=_ver_key) if vals else ""
+    return out
+
+
+@app.route('/clients/heartbeat', methods=['POST'])
+def clients_heartbeat():
+    """{"tipus": "gep"|"pda", "nev", "verzio", "app_verzio", "felhasznalo"} - visszaadja a legfrissebb verziokat."""
+    try:
+        data = request.json or {}
+        tipus = "pda" if str(data.get('tipus', '')).lower() == "pda" else "gep"
+        nev = safe_str(data.get('nev', '')) or "ismeretlen"
+        now = pda_now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("""INSERT INTO kliensek (azon, tipus, nev, verzio, app_verzio, felhasznalo, ip, elso, utolso)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(azon) DO UPDATE SET verzio=excluded.verzio, app_verzio=excluded.app_verzio,
+                           felhasznalo=excluded.felhasznalo, ip=excluded.ip, utolso=excluded.utolso""",
+                    (f"{tipus}|{nev}", tipus, nev, safe_str(data.get('verzio', '')), safe_str(data.get('app_verzio', '')),
+                     safe_str(data.get('felhasznalo', '')), request.remote_addr or "", now, now))
+        conn.commit()
+        leg = _legfrissebb(cur)
+        conn.close()
+        return jsonify({"status": "ok", "legfrissebb": leg}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/clients', methods=['GET'])
+def clients_list():
+    """Az osszes gep / PDA: nev, verzio, online-e, utoljara mikor jelentkezett."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM kliensek ORDER BY tipus, utolso DESC")
+        now = pda_now()
+        rows = []
+        for r in cur.fetchall():
+            try:
+                mp = (now - datetime.datetime.strptime(r["utolso"], "%Y-%m-%d %H:%M:%S")).total_seconds()
+            except Exception:
+                mp = 10 ** 9
+            row = {k: r[k] or "" for k in ("tipus", "nev", "verzio", "app_verzio", "felhasznalo", "ip", "elso", "utolso")}
+            row.update({"online": mp <= ONLINE_SEC, "mp": int(mp)})
+            rows.append(row)
+        leg = _legfrissebb(cur)
+        conn.close()
+        return jsonify({"status": "ok", "most": now.strftime("%Y-%m-%d %H:%M:%S"), "legfrissebb": leg, "kliensek": rows}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 def pda_err(http, kod, message):
     """Hibavalasz hibakoddal (a PDA Folyamat naplojaban ez latszik)."""
     return jsonify({"status": "error", "kod": kod, "message": message}), http

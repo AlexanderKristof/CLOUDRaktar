@@ -465,6 +465,27 @@ def vps_request(method, url, **kwargs):
     return requests.request(method, url, headers=headers, **kwargs)
 
 
+def _ver_key(v):
+    """'v2026.10.16-pda2' -> összehasonlítható kulcs (a számokat számként kezeli)."""
+    return [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", str(v or ""))]
+
+
+def send_heartbeat():
+    """Jelentkezés a szerveren (gép neve + verzió). Visszaadja a legfrissebb verziókat, vagy None-t.
+    Háttérszálból hívandó."""
+    try:
+        import getpass
+        user = getpass.getuser()
+    except Exception:
+        user = ""
+    res = vps_request("POST", f"{VPS_URL}/clients/heartbeat", timeout=8,
+                      json={"tipus": "gep", "nev": socket.gethostname() or "asztali gep", "verzio": APP_VERSION,
+                            "felhasznalo": user})
+    if res.status_code == 200:
+        return res.json().get("legfrissebb") or {}
+    return None
+
+
 def push_naplo_to_server(max_rows=300):
     """A helyi Napló új bejegyzéseit feltölti a szerverre, hogy a PDA 'Előzmények' ablaka is lássa
     (minden gép a sajátját). Első alkalommal csak az utolsó 3000 bejegyzést. Háttérszálból hívandó."""
@@ -3587,6 +3608,8 @@ class RaktarApp(QMainWindow):
     pda_sales_signal = pyqtSignal(list)     # a Zebra PDA-n rögzített, ez a gép által átvett eladások -> fő szál
     pda_changes_signal = pyqtSignal(list)   # a PDA-n kért módosítások (pl. áthelyezés) -> fő szál
     pda_poll_status_signal = pyqtSignal(str, bool, bool)   # PDA-átvétel állapota: (szöveg, hiba?, kézi indítás?)
+    version_info_signal = pyqtSignal(object)   # a szerver szerinti legfrissebb verziók -> fő szál
+    clients_signal = pyqtSignal(object)        # gépek és verziók listája (Admin fül) -> fő szál
 
     def __init__(self):
         super().__init__()
@@ -3672,6 +3695,14 @@ class RaktarApp(QMainWindow):
         self.btn_vps_sync.clicked.connect(self.start_vps_sync)
         
         header_layout.addWidget(self.btn_vps_sync)
+
+        # Figyelmeztetés, ha egy másik gépen már frissebb programverzió fut
+        self.lbl_version_warn = QLabel("")
+        self.lbl_version_warn.setStyleSheet("background-color: #e65100; color: white; font-weight: bold; padding: 5px 10px; border-radius: 4px;")
+        self.lbl_version_warn.setToolTip("Egy másik gépen már újabb programverzió fut. Cseréld le ezen a gépen is az app_pyqt6CLOUD.py-t.\n"
+                                         "A gépek listája: Admin fül → 🖥️ Gépek és verziók")
+        self.lbl_version_warn.hide()
+        header_layout.addWidget(self.lbl_version_warn)
         
         # --- 1 MP-ES AUTOMATIKUS LÁTHATATLAN VPS SZINKRON INDÍTÁSA ---
         self.auto_vps_worker = AutoVPSPollWorker()
@@ -3682,6 +3713,8 @@ class RaktarApp(QMainWindow):
         self.pda_sales_signal.connect(self.apply_pda_sales)
         self.pda_changes_signal.connect(self.apply_pda_changes)
         self.pda_poll_status_signal.connect(self.on_pda_poll_status)
+        self.version_info_signal.connect(self.on_version_info)
+        self.clients_signal.connect(self.fill_clients_table)
         self._pda_last_status = None
         self._pda_poll_busy = False
         self.pda_poll_timer = QTimer(self)
@@ -5872,6 +5905,12 @@ class RaktarApp(QMainWindow):
                 push_naplo_to_server()
             except Exception:
                 pass
+            try:
+                leg = send_heartbeat()
+                if leg is not None:
+                    self.version_info_signal.emit(leg)
+            except Exception:
+                pass
             finally:
                 self._pda_poll_busy = False
             self.pda_poll_status_signal.emit(status, is_error, manual)
@@ -7428,10 +7467,94 @@ class RaktarApp(QMainWindow):
         l4.addWidget(self.adm_out)
         self.admin_tabs.addTab(w4, "⏳ Feltöltésre vár")
 
+        # --- 5. Gépek és verziók ---
+        w5 = QWidget(); l5 = QVBoxLayout(w5)
+        bar = QHBoxLayout()
+        b = QPushButton("🔄 Frissítés"); b.setStyleSheet("background-color: #00e676; color: black; font-weight: bold;")
+        b.clicked.connect(self.admin_load_clients); bar.addWidget(b)
+        bar.addStretch()
+        l5.addLayout(bar)
+        self.adm_cli_info = QLabel(""); self.adm_cli_info.setStyleSheet("color: #29b6f6; font-weight: bold;")
+        self.adm_cli_info.setWordWrap(True)
+        l5.addWidget(self.adm_cli_info)
+        self.adm_cli = self._admin_table(["Típus", "Név", "Program verzió", "PDA app", "Állapot", "Utoljára jelentkezett",
+                                          "Felhasználó", "IP"], [80, 200, 230, 90, 110, 150, 110])
+        l5.addWidget(self.adm_cli)
+        hint = QLabel("Minden gépi program és PDA kb. 20-30 másodpercenként jelentkezik a szerveren. "
+                      "Online = az elmúlt 2 percben jelentkezett. A ⚠️ RÉGI jelölésű gépen cseréld le az app_pyqt6CLOUD.py-t.")
+        hint.setWordWrap(True); hint.setStyleSheet("color: #888;")
+        l5.addWidget(hint)
+        self.admin_tabs.addTab(w5, "🖥️ Gépek és verziók")
+
         self.admin_tabs.currentChanged.connect(self._admin_tab_changed)
 
     def _admin_tab_changed(self, i):
-        [self.admin_load_all, self.admin_load_deleted, lambda: None, self.admin_load_outbox][i]()
+        [self.admin_load_all, self.admin_load_deleted, lambda: None, self.admin_load_outbox, self.admin_load_clients][i]()
+
+    # ---- 🖥️ GÉPEK ÉS VERZIÓK ----
+    def on_version_info(self, leg):
+        """A szerver szerinti legfrissebb gépi verzió; ha ez a gép régebbi, a fejlécben figyelmeztet."""
+        latest = str((leg or {}).get("gep") or "")
+        if latest and _ver_key(latest) > _ver_key(APP_VERSION):
+            self.lbl_version_warn.setText(f"⚠️ Van frissebb program: {latest} (ezen a gépen: {APP_VERSION})")
+            self.lbl_version_warn.show()
+        else:
+            self.lbl_version_warn.hide()
+
+    def admin_load_clients(self):
+        if hasattr(self, "adm_cli_info"):
+            self.adm_cli_info.setText("⏳ Betöltés...")
+
+        def job():
+            try:
+                res = vps_request("GET", f"{VPS_URL}/clients", timeout=10)
+                data = res.json() if res.status_code == 200 else {"hiba": f"HTTP {res.status_code}"}
+            except Exception as e:
+                data = {"hiba": str(e)}
+            self.clients_signal.emit(data)
+        threading.Thread(target=job, daemon=True).start()
+
+    def fill_clients_table(self, data):
+        if not hasattr(self, "adm_cli"):
+            return
+        if data.get("hiba"):
+            self.adm_cli_info.setText(f"❌ Nem sikerült lekérni a szerverről: {data['hiba']}")
+            return
+        leg = data.get("legfrissebb") or {}
+        rows = data.get("kliensek") or []
+        self.adm_cli_info.setText(
+            f"Legfrissebb verziók → 🖥️ gépi program: {leg.get('gep') or '-'}  ·  📱 PDA felület: {leg.get('pda') or '-'}  ·  "
+            f"📱 PDA app: {leg.get('pda_app') or '-'}     |  Ez a gép: {socket.gethostname()} – {APP_VERSION}")
+        t = self.adm_cli
+        t.setRowCount(0)
+        hostname = socket.gethostname()
+        for r in rows:
+            i = t.rowCount(); t.insertRow(i)
+            tipus = "🖥️ Gép" if r.get("tipus") == "gep" else "📱 PDA"
+            ver = r.get("verzio") or "-"
+            app_v = r.get("app_verzio") or ""
+            latest = leg.get("gep") if r.get("tipus") == "gep" else leg.get("pda")
+            regi = bool(latest and ver and _ver_key(ver) < _ver_key(latest))
+            mp = int(r.get("mp") or 0)
+            if r.get("online"):
+                allapot = "🟢 Online"
+            elif mp < 3600:
+                allapot = f"⚪ {mp // 60} perce"
+            elif mp < 86400 * 2:
+                allapot = f"⚪ {mp // 3600} órája"
+            else:
+                allapot = f"⚪ {mp // 86400} napja"
+            nev = r.get("nev", "") + ("  (ez a gép)" if r.get("tipus") == "gep" and r.get("nev") == hostname else "")
+            vals = [tipus, nev, ver + ("  ⚠️ RÉGI" if regi else "  ✔ legfrissebb" if latest and ver == latest else ""),
+                    app_v or ("-" if r.get("tipus") == "gep" else "régi app"), allapot, r.get("utolso", ""),
+                    r.get("felhasznalo", ""), r.get("ip", "")]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(str(v))
+                if c == 2 and regi:
+                    it.setForeground(QColor("#ff9800"))
+                if c == 4 and r.get("online"):
+                    it.setForeground(QColor("#00e676"))
+                t.setItem(i, c, it)
 
     def _admin_show(self, rows, r, lbl, tbl):
         if 0 <= r < len(rows):
