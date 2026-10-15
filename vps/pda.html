@@ -193,11 +193,11 @@
   <!-- ================= LELT&#xC1;R ================= -->
   <section id="page-inv" class="hidden">
     <div id="inv-start">
-      <div class="msg info"><span class="ocrbtn">&#x1F4F7; K&#xE9;zzel &#xED;rt raklapsz&#xE1;mn&#xE1;l f&#xE9;nyk&#xE9;pezd le a pap&#xED;rt. </span>Csippantsd vagy &#xED;rd be a <b>raklap</b> sz&#xE1;m&#xE1;t, azt&#xE1;n csippantsd v&#xE9;gig a rajta l&#xE9;v&#x151; term&#xE9;keket &#x2013;
+      <div class="msg info"><b>El&#xE9;g egy term&#xE9;ket csippantani</b> &#x2013; a program a raklapj&#xE1;t megkeresi, &#xE9;s annak a lelt&#xE1;r&#xE1;t ind&#xED;tja. <span class="ocrbtn">&#x1F4F7; K&#xE9;zzel &#xED;rt raklapsz&#xE1;mn&#xE1;l f&#xE9;nyk&#xE9;pezd le a pap&#xED;rt. </span>Vagy csippantsd / &#xED;rd be a <b>raklap</b> sz&#xE1;m&#xE1;t, azt&#xE1;n csippantsd v&#xE9;gig a rajta l&#xE9;v&#x151; term&#xE9;keket &#x2013;
         <b>minden darabot</b> (a program sz&#xE1;molja; elt&#xE9;r&#xE9;sn&#xE9;l r&#xE1;k&#xE9;rdez, hogy &#xE1;t&#xED;rja-e a DB-t).
         A v&#xE9;g&#xE9;n ki&#xED;rja, mi <b>hi&#xE1;nyzik</b> &#xE9;s mi van ott <b>m&#xE1;s raklapr&#xF3;l</b>.</div>
-      <form class="scan" onsubmit="event.preventDefault(); startInventory(invPalletInput.value);">
-        <input id="inv-pallet" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Raklap (pl. 573)">
+      <form class="scan" onsubmit="event.preventDefault(); (isR18(fixScan(invPalletInput.value)) ? invStartFromProduct(invPalletInput.value) : startInventory(invPalletInput.value));">
+        <input id="inv-pallet" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Term&#xE9;k (R18&#x2026;) vagy raklap (pl. 573)">
         <button type="button" class="ocrbtn" onclick="startOcr('inv')">&#x1F4F7;</button>
         <button type="submit">&#x25B6;&#xFE0F;</button>
       </form>
@@ -359,7 +359,7 @@
 </div>
 
 <script>
-var VERSION = "2026.10.16-c";
+var VERSION = "2026.10.16-d";
 var PLATFORMS = {
   EBAY_KIVULI: { cim: "eBay-en k\u00edv\u00fcli elad\u00e1s", gomb: "eBay-en k\u00edv\u00fcli", cls: "b-kivul" },
   EBAY:        { cim: "eBay elad\u00e1s",           gomb: "eBay",           cls: "b-ebay" },
@@ -1117,20 +1117,41 @@ var inv = null;
 try { inv = JSON.parse(localStorage.getItem("leltar") || "null"); } catch (e) { inv = null; }
 function saveInv() { try { if (inv) localStorage.setItem("leltar", JSON.stringify(inv)); else localStorage.removeItem("leltar"); } catch (e) {} }
 function normPallet(p) { return fixScan(p).toUpperCase().replace(/\s+/g, ""); }
-function startInventory(p, force) {
+// Term\u00e9kkel ind\u00edtott lelt\u00e1r: a csippantott term\u00e9k raklapja (L) alapj\u00e1n indul, \u00e9s ez a darab m\u00e1r be is sz\u00e1m\u00edt
+function invStartFromProduct(code) {
+  code = fixScan(code).toUpperCase();
+  invPalletInput.value = "";
+  msgTo("inv-status", "\ud83d\udd0d " + esc(code) + " raklapj\u00e1nak keres\u00e9se\u2026", "info");
+  api("GET", "/pda/search?q=" + encodeURIComponent(code)).then(function (js) {
+    var it = (js.items || []).filter(function (x) { return String(x.A).toUpperCase() === code; })[0];
+    if (!it) { msgTo("inv-status", "\u274c <b>" + esc(code) + "</b> nincs a rendszerben \u2013 csippantsd vagy \u00edrd be a raklapot.", "err"); beep(false); return; }
+    var t = palletTokens(it.L);
+    var go = function (pal) {
+      startInventory(pal, false, function () { invScan(code); });
+    };
+    if (!t.length) { msgTo("inv-status", "\u26a0\ufe0f <b>" + esc(code) + "</b>-nak nincs raklapja a t\u00e1bl\u00e1zatban \u2013 csippantsd vagy \u00edrd be a raklapot.", "warn"); beep(false); return; }
+    if (t.length === 1) { go(t[0]); return; }
+    ask("\ud83d\udccb Melyik raklap lelt\u00e1ra?", "<b>" + esc(code) + "</b> \u2013 " + esc([it.C, it.D].filter(Boolean).join(" ")) +
+        "<br>T\u00f6bb raklapon van: <b>" + esc(t.join(" + ")) + "</b>. Melyikn\u00e9l \u00e1llsz?",
+        t.map(function (x) { return { label: "\ud83d\udccb Raklap " + esc(x), value: x, cls: "green" }; }).concat([{ label: "\u2716 M\u00e9gse", value: false, cls: "grey" }]))
+      .then(function (v) { if (v) go(v); });
+  }).catch(function (e) { msgTo("inv-status", "\u274c " + esc(errText(e)), "err"); beep(false); });
+}
+function startInventory(p, force, after) {
   p = normPallet(p);
   invPalletInput.value = p;
   if (!p) return;
   if (inv && !force) {
     confirmBox("\ud83d\udccb \u00daj lelt\u00e1r?", "Van egy lez\u00e1ratlan lelt\u00e1r: <b>" + esc(inv.raklap) + "</b> (" + Object.keys(inv.found).length + "/" + inv.items.length +
                " csippantva).<br><br>Elveted, \u00e9s \u00faj lelt\u00e1rt kezdesz a(z) <b>" + esc(p) + "</b> raklapra?", "\ud83d\uddd1\ufe0f Igen, elvetem \u00e9s \u00fajat kezdek", "red")
-      .then(function (ok) { if (ok) startInventory(p, true); else focusScan(); });
+      .then(function (ok) { if (ok) startInventory(p, true, after); else focusScan(); });
     return;
   }
   api("GET", "/pda/pallet?l=" + encodeURIComponent(p), null, "Lelt\u00e1r ind\u00edt\u00e1sa: raklap " + p).then(function (js) {
     inv = { raklap: p, items: js.items || [], found: {}, foreign: [], unknown: [], start: nowStr() };
     saveInv(); renderInventory(); beep(true);
     msgTo("inv-status", "\ud83d\udccb Csippantsd v\u00e9gig a raklapot!", "info");
+    if (after) after();
   }).catch(function (e) { msgTo("inv-status", "\u274c " + esc(errText(e)), "err"); beep(false); });
 }
 function invScan(code) {
@@ -1534,7 +1555,7 @@ window.onScan = function (code) {
   if (activeTab === "move") { moveScan(code); return; }
   if (activeTab === "qs") { qsInput.value = code; qsRun(); return; }
   if (activeTab === "xls") { if (isR18(code)) xlsJump(code); return; }
-  if (activeTab === "inv") { if (inv) invScan(code); else startInventory(code); return; }
+  if (activeTab === "inv") { if (inv) invScan(code); else if (isR18(code)) invStartFromProduct(code); else startInventory(code); return; }
   doSearch(code);
 };
 // Billenty\u0171zet-m\u00f3d\u00fa olvas\u00f3: ha nem beviteli mez\u0151ben \u00e1ll a kurzor, az akt\u00edv f\u00fcl mez\u0151j\u00e9be ir\u00e1ny\u00edtjuk
