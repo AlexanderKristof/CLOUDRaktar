@@ -8,6 +8,7 @@ import datetime
 import time
 import requests
 import io
+import json
 import pandas as pd
 from flask import Flask, jsonify, request, send_file
 
@@ -477,11 +478,14 @@ PDA_HTML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pda.html")
 PDA_PLATFORMS = ("EBAY_KIVULI", "EBAY", "WEBSHOP")
 PDA_SALE_FIELDS = ("eladas_id", "datum", "platform", "A", "C", "D", "E", "F", "G", "L", "M", "N",
                    "vevo", "ar", "darab", "tracking", "megjegyzes", "keszlet_levonas", "eszkoz",
-                   "atvette", "atvetel_ido", "eredmeny", "eredmeny_uzenet", "eredmeny_ido")
+                   "atvette", "atvetel_ido", "eredmeny", "eredmeny_uzenet", "eredmeny_ido", "visszavonva")
 PDA_CHANGE_FIELDS = ("valtozas_id", "ido", "tipus", "A", "C", "D", "E", "mezo", "regi", "uj", "megjegyzes",
-                     "eszkoz", "atvette", "atvetel_ido", "eredmeny", "eredmeny_uzenet", "eredmeny_ido")
-# A PDA-rol modosithato mezok (egyelore: L = Raklap)
-PDA_EDITABLE = {"L": "Raklap"}
+                     "eszkoz", "atvette", "atvetel_ido", "eredmeny", "eredmeny_uzenet", "eredmeny_ido", "ref", "adat")
+# A PDA-rol modosithato termek-mezok
+PDA_EDITABLE = {"C": "Marka", "D": "Tipus", "E": "Cikkszam", "F": "DB", "G": "Allapot", "H": "Ar",
+                "K": "Polc", "L": "Raklap", "M": "Suly", "N": "eBay ID", "O": "Megjegyzes", "P": "Allapot reszlet"}
+# Az eladasbol a PDA-rol javithato mezok
+PDA_SALE_EDITABLE = ("vevo", "ar", "tracking", "megjegyzes", "darab", "platform")
 
 
 def pda_now():
@@ -523,7 +527,7 @@ def init_pda_db2():
     try:
         conn = sqlite3.connect(DB_PATH)
         cols = [c[1] for c in conn.execute("PRAGMA table_info(pda_eladasok)").fetchall()]
-        for col in ("eredmeny", "eredmeny_uzenet", "eredmeny_ido"):
+        for col in ("eredmeny", "eredmeny_uzenet", "eredmeny_ido", "visszavonva"):
             if col not in cols:
                 conn.execute(f"ALTER TABLE pda_eladasok ADD COLUMN {col} TEXT")
         conn.execute("""
@@ -538,6 +542,20 @@ def init_pda_db2():
                 eredmeny TEXT, eredmeny_uzenet TEXT, eredmeny_ido TEXT
             )
         """)
+        vcols = [c[1] for c in conn.execute("PRAGMA table_info(pda_valtozasok)").fetchall()]
+        for col in ("ref", "adat"):
+            if col not in vcols:
+                conn.execute(f"ALTER TABLE pda_valtozasok ADD COLUMN {col} TEXT")
+        # Az asztali gepek naplojanak masolata (a PDA "Elozmenyek" ablakahoz)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS termek_naplo (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                gep TEXT, helyi_id INTEGER,
+                idopont TEXT, r18_kod TEXT, esemeny TEXT, reszletek TEXT, forras TEXT,
+                UNIQUE(gep, helyi_id)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_termek_naplo_kod ON termek_naplo(r18_kod)")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS pda_naplo (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -707,36 +725,229 @@ def _norm_pallet(v):
 
 @app.route('/pda/change', methods=['POST'])
 def pda_change():
-    """Mezo-modositas a PDA-rol (pl. athelyezes: L = uj raklap). Az asztali program veszi at es hajtja vegre
-    (o irja a Google Sheets-be is), az eredmenyt visszakuldi (/pda/result)."""
+    """Termek-modositas a PDA-rol. Az asztali program veszi at es hajtja vegre (o irja a Google Sheets-be is),
+    az eredmenyt visszakuldi (/pda/result).
+      - athelyezes / egy mezo:  {"A", "mezo": "L", "uj": "574", "tipus": "ATHELYEZES"}
+      - tobb mezo egyszerre:    {"A", "valtozasok": {"C": "...", "F": "2"}, "tipus": "MODOSITAS"}"""
     try:
         data = request.json or {}
         code = clean_code(data.get('A', ''))
-        mezo = str(data.get('mezo', '')).strip().upper()
-        uj = safe_str(data.get('uj', ''))
-        if mezo not in PDA_EDITABLE:
-            return pda_err(400, "S-400", f"Ez a mezo nem modosithato a PDA-rol: {mezo}")
-        if not uj:
-            return pda_err(400, "S-400", "Az uj ertek ures")
+        valt = data.get('valtozasok')
+        if not isinstance(valt, dict):
+            valt = {str(data.get('mezo', '')).strip().upper(): safe_str(data.get('uj', ''))}
+        valt = {str(k).strip().upper(): safe_str(v) for k, v in valt.items()}
+        bad = [k for k in valt if k not in PDA_EDITABLE]
+        if bad or not valt:
+            return pda_err(400, "S-400", f"Ez a mezo nem modosithato a PDA-rol: {', '.join(bad) or '-'}")
+        if "L" in valt and len(valt) == 1 and not valt["L"]:
+            return pda_err(400, "S-400", "Az uj raklap ures")
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
-        cur.execute("SELECT A, C, D, E, L FROM termekek WHERE UPPER(TRIM(A))=? OR UPPER(TRIM(B))=?", (code, code))
+        cur.execute("SELECT A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P FROM termekek "
+                    "WHERE UPPER(TRIM(A))=? OR UPPER(TRIM(B))=?", (code, code))
         row = cur.fetchone()
         if not row:
             conn.close()
             return pda_err(404, "S-404", f"{code} nem talalhato a raktarban")
-        regi = safe_str(row[mezo])
+        regi = {k: safe_str(row[k]) for k in valt}
+        valt = {k: v for k, v in valt.items() if v != regi[k]}
+        regi = {k: regi[k] for k in valt}
+        if not valt:
+            conn.close()
+            return pda_err(400, "S-400", "Nincs valtozas (minden mezo ugyanaz)")
+        tipus = str(data.get('tipus', 'ATHELYEZES' if list(valt) == ["L"] else 'MODOSITAS')).upper()
+        egy = len(valt) == 1
+        mezo = list(valt)[0] if egy else "*"
         now = pda_now()
         vid = f"V{now.strftime('%Y%m%d%H%M%S')}-{code}-{os.urandom(2).hex()}"
-        cur.execute("""INSERT INTO pda_valtozasok (valtozas_id, ido, tipus, A, C, D, E, mezo, regi, uj, megjegyzes, eszkoz)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (vid, now.strftime("%Y-%m-%d %H:%M"), str(data.get('tipus', 'ATHELYEZES')).upper(), code,
-                     safe_str(row["C"]), safe_str(row["D"]), safe_str(row["E"]), mezo, regi, uj,
-                     safe_str(data.get('megjegyzes', '')), safe_str(data.get('eszkoz', 'PDA')) or "PDA"))
+        cur.execute("""INSERT INTO pda_valtozasok (valtozas_id, ido, tipus, A, C, D, E, mezo, regi, uj, megjegyzes, eszkoz, adat)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (vid, now.strftime("%Y-%m-%d %H:%M"), tipus, code,
+                     safe_str(row["C"]), safe_str(row["D"]), safe_str(row["E"]), mezo,
+                     regi[mezo] if egy else json.dumps(regi, ensure_ascii=False),
+                     valt[mezo] if egy else json.dumps(valt, ensure_ascii=False),
+                     safe_str(data.get('megjegyzes', '')), safe_str(data.get('eszkoz', 'PDA')) or "PDA",
+                     json.dumps({"valtozasok": valt, "regi": regi}, ensure_ascii=False)))
         conn.commit()
         conn.close()
-        return jsonify({"status": "ok", "valtozas_id": vid, "regi": regi}), 200
+        return jsonify({"status": "ok", "valtozas_id": vid, "regi": regi if not egy else regi[mezo]}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+# ---------- Eladas javitasa / visszavonasa ----------
+def _queue_sale_change(cur, sale, tipus, adat, eszkoz, megj=""):
+    now = pda_now()
+    vid = f"V{now.strftime('%Y%m%d%H%M%S')}-{sale['A']}-{os.urandom(2).hex()}"
+    cur.execute("""INSERT INTO pda_valtozasok (valtozas_id, ido, tipus, A, C, D, E, mezo, regi, uj, megjegyzes, eszkoz, ref, adat)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (vid, now.strftime("%Y-%m-%d %H:%M"), tipus, sale["A"], sale["C"], sale["D"], sale["E"],
+                 "*", json.dumps(adat.get("regi", {}), ensure_ascii=False),
+                 json.dumps(adat.get("valtozasok", {}), ensure_ascii=False), megj, eszkoz,
+                 sale["eladas_id"], json.dumps(adat, ensure_ascii=False)))
+    return vid
+
+
+@app.route('/pda/sale/update', methods=['POST'])
+def pda_sale_update():
+    """PDA-s eladas potlasa / javitasa (vevo, ar, tracking, megjegyzes, darab, platform).
+    Ha a gep meg nem vette at: helyben javitjuk (az uj ertekkel veszi at). Ha mar atvette: a gep javitja
+    (darabszam-valtozasnal a keszletet is korrigalja), az eredmeny a Naploban latszik."""
+    try:
+        data = request.json or {}
+        eid = str(data.get('eladas_id', '')).strip()
+        fields = {k: safe_str(v) for k, v in (data.get('mezok') or {}).items() if k in PDA_SALE_EDITABLE}
+        if "platform" in fields and fields["platform"].upper() not in PDA_PLATFORMS:
+            return pda_err(400, "S-400", "Ismeretlen platform")
+        if "darab" in fields:
+            try:
+                if int(fields["darab"]) < 1:
+                    raise ValueError
+            except ValueError:
+                return pda_err(400, "S-400", "Hibas darabszam")
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM pda_eladasok WHERE eladas_id=?", (eid,))
+        sale = cur.fetchone()
+        if not sale:
+            conn.close()
+            return pda_err(404, "S-404", "Nincs ilyen eladas")
+        if sale["visszavonva"]:
+            conn.close()
+            return pda_err(409, "S-409", "Ez az eladas vissza lett vonva")
+        regi = {k: safe_str(sale[k]) for k in fields}
+        fields = {k: v for k, v in fields.items() if v != regi[k]}
+        if not fields:
+            conn.close()
+            return pda_err(400, "S-400", "Nincs valtozas")
+        sets = ", ".join(f"{k}=?" for k in fields)
+        cur.execute(f"UPDATE pda_eladasok SET {sets} WHERE eladas_id=?", (*fields.values(), eid))
+        mode = "helyben"
+        if sale["atvette"]:
+            _queue_sale_change(cur, dict(sale), "ELADAS_MODOSITAS",
+                               {"valtozasok": fields, "regi": {k: regi[k] for k in fields},
+                                "keszlet_levonas": sale["keszlet_levonas"]},
+                               safe_str(data.get('eszkoz', 'PDA')) or "PDA")
+            mode = "gepre_var"
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "mod": mode}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/pda/sale/cancel', methods=['POST'])
+def pda_sale_cancel():
+    """PDA-s eladas visszavonasa. {"eladas_id", "keszlet_vissza": true}"""
+    try:
+        data = request.json or {}
+        eid = str(data.get('eladas_id', '')).strip()
+        vissza = bool(data.get('keszlet_vissza', True))
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM pda_eladasok WHERE eladas_id=?", (eid,))
+        sale = cur.fetchone()
+        if not sale:
+            conn.close()
+            return pda_err(404, "S-404", "Nincs ilyen eladas")
+        if sale["visszavonva"]:
+            conn.close()
+            return pda_err(409, "S-409", "Mar vissza lett vonva")
+        now = pda_now().strftime("%Y-%m-%d %H:%M:%S")
+        if not sale["atvette"]:
+            # A gep meg nem vette at: egyszeruen nem adjuk at neki
+            cur.execute("""UPDATE pda_eladasok SET visszavonva=?, atvette=?, atvetel_ido=?, eredmeny='ok',
+                           eredmeny_uzenet=?, eredmeny_ido=? WHERE eladas_id=? AND atvette IS NULL""",
+                        (now, "(visszavonva a PDA-n)", now, "Visszavonva, mielott a gep atvette - keszlet nem valtozott",
+                         now, eid))
+            mode = "helyben"
+        else:
+            cur.execute("UPDATE pda_eladasok SET visszavonva=? WHERE eladas_id=?", (now, eid))
+            _queue_sale_change(cur, dict(sale), "ELADAS_TORLES",
+                               {"keszlet_vissza": vissza, "keszlet_levonas": sale["keszlet_levonas"],
+                                "darab": safe_str(sale["darab"])},
+                               safe_str(data.get('eszkoz', 'PDA')) or "PDA")
+            mode = "gepre_var"
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "mod": mode}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/pda/sale/mirror', methods=['POST'])
+def pda_sale_mirror():
+    """Az asztali programban (Eladottak ful) javitott eladas-mezo tukrozese a PDA-s eladasra, hogy a PDA
+    Naplojaban is a friss adat latsszon. {"eladas_id", "mezo", "ertek"} - ha nincs ilyen PDA-s eladas, nem csinal semmit."""
+    try:
+        data = request.json or {}
+        mezo = str(data.get('mezo', ''))
+        if mezo not in PDA_SALE_EDITABLE:
+            return jsonify({"status": "ok", "mod": "kihagyva"}), 200
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(f"UPDATE pda_eladasok SET {mezo}=? WHERE eladas_id=?",
+                     (safe_str(data.get('ertek', '')), str(data.get('eladas_id', ''))))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+# ---------- Termek elozmenyei ----------
+@app.route('/pda/history/push', methods=['POST'])
+def pda_history_push():
+    """Az asztali program feltolti a sajat Naplojanak uj bejegyzeseit. {"gep", "sorok": [{id, idopont, r18_kod, esemeny, reszletek, forras}]}"""
+    try:
+        data = request.json or {}
+        gep = safe_str(data.get('gep', '')) or "ismeretlen gep"
+        rows = data.get('sorok') or []
+        conn = sqlite3.connect(DB_PATH)
+        conn.executemany("""INSERT OR IGNORE INTO termek_naplo (gep, helyi_id, idopont, r18_kod, esemeny, reszletek, forras)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                         [(gep, int(r.get('id') or 0), safe_str(r.get('idopont')), clean_code(r.get('r18_kod')),
+                           safe_str(r.get('esemeny')), safe_str(r.get('reszletek'))[:4000], safe_str(r.get('forras')))
+                          for r in rows])
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "db": len(rows)}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/pda/history', methods=['GET'])
+def pda_history():
+    """Egy termek osszes ismert esemenye (legujabb elol): a gepek naplojabol + PDA eladasok / modositasok."""
+    try:
+        code = clean_code(request.args.get('code', ''))
+        if not code:
+            return pda_err(400, "S-400", "Nincs megadva R18 kod")
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        out = []
+        cur.execute("SELECT * FROM termek_naplo WHERE r18_kod=? ORDER BY idopont DESC LIMIT 300", (code,))
+        for r in cur.fetchall():
+            out.append({"forras_tipus": "gep", "ido": r["idopont"], "esemeny": r["esemeny"],
+                        "reszletek": r["reszletek"], "honnan": r["forras"], "gep": r["gep"]})
+        cur.execute("SELECT * FROM pda_eladasok WHERE A=? ORDER BY id DESC LIMIT 100", (code,))
+        for r in cur.fetchall():
+            out.append({"forras_tipus": "pda", "ido": r["datum"], "esemeny": "PDA ELADAS",
+                        "reszletek": f"{r['platform']} | {r['darab']} db | vevo: {r['vevo'] or '-'} | ar: {r['ar'] or '-'}"
+                                     + (" | VISSZAVONVA" if r["visszavonva"] else ""),
+                        "honnan": f"Zebra PDA ({r['eszkoz']})", "gep": r["atvette"] or ""})
+        cur.execute("SELECT * FROM pda_valtozasok WHERE A=? ORDER BY id DESC LIMIT 100", (code,))
+        for r in cur.fetchall():
+            out.append({"forras_tipus": "pda", "ido": r["ido"], "esemeny": f"PDA {r['tipus']}",
+                        "reszletek": (f"eladas {r['ref']}: {r['adat']}" if r["ref"] else f"{r['mezo']}: {r['regi']} -> {r['uj']}")
+                                     + (f" | {r['eredmeny_uzenet']}" if r["eredmeny_uzenet"] else ""),
+                        "honnan": f"Zebra PDA ({r['eszkoz']})", "gep": r["atvette"] or ""})
+        conn.close()
+        out.sort(key=lambda x: str(x.get("ido") or ""), reverse=True)
+        return jsonify({"status": "ok", "kod": code, "esemenyek": out[:300]}), 200
     except Exception as e:
         return pda_err(500, "S-500", str(e))
 
