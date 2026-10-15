@@ -242,6 +242,7 @@ PDA_SALES_POLL_MS = 20000
 # Hibakódok, amiket az asztali program a PDA-nak visszaküld (a PDA Napló / Folyamat napló fülén látszanak):
 #   A-21  a termék nincs meg ezen a gépen        A-22  helyi adatbázis / mentési hiba
 #   A-23  ismeretlen platform / mező             A-24  váratlan hiba az átvétel közben
+#   A-25  a készletet nem lehetett javítani (a termék már törölve) - Admin fülön visszaállítható
 # Az eladási munkalapok oszlopai (sorrendben) - (belső kulcs, fejléc)
 SALES_COLUMNS = [
     ("eladas_id", "Eladás ID"), ("datum", "Eladás dátuma"), ("platform", "Platform"),
@@ -462,6 +463,31 @@ def vps_request(method, url, **kwargs):
     if API_TOKEN:
         headers["X-Raktar-Token"] = API_TOKEN
     return requests.request(method, url, headers=headers, **kwargs)
+
+
+def push_naplo_to_server(max_rows=300):
+    """A helyi Napló új bejegyzéseit feltölti a szerverre, hogy a PDA 'Előzmények' ablaka is lássa
+    (minden gép a sajátját). Első alkalommal csak az utolsó 3000 bejegyzést. Háttérszálból hívandó."""
+    conn = get_db_connection()
+    try:
+        last = load_config_value("naplo_push_id")
+        if last is None:
+            mx = conn.execute("SELECT COALESCE(MAX(id), 0) FROM naplo").fetchone()[0]
+            last = max(0, mx - 3000)
+        rows = conn.execute("SELECT id, idopont, r18_kod, esemeny, reszletek, forras FROM naplo WHERE id > ? "
+                            "ORDER BY id LIMIT ?", (last, max_rows)).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return 0
+    sorok = [{k: safe_str(r[k]) if k != "id" else r["id"] for k in ("id", "idopont", "r18_kod", "esemeny", "reszletek", "forras")}
+             for r in rows]
+    res = vps_request("POST", f"{VPS_URL}/pda/history/push", timeout=15,
+                      json={"gep": socket.gethostname() or "asztali gep", "sorok": sorok})
+    if res.status_code == 200:
+        save_config_value("naplo_push_id", rows[-1]["id"])
+        return len(rows)
+    return 0
 
 
 def report_pda_result(tipus, rid, ok, uzenet, kod=""):
@@ -5842,6 +5868,10 @@ class RaktarApp(QMainWindow):
                     status, is_error = f"❌ PDA eladások: szerver hiba ({res.status_code})", True
             except Exception as e:
                 status, is_error = f"❌ PDA eladások: nem érem el a szervert ({e.__class__.__name__})", True
+            try:
+                push_naplo_to_server()
+            except Exception:
+                pass
             finally:
                 self._pda_poll_busy = False
             self.pda_poll_status_signal.emit(status, is_error, manual)
@@ -5913,53 +5943,174 @@ class RaktarApp(QMainWindow):
         if hasattr(self, "refresh_sold_table"):
             self.refresh_sold_table()
 
+    # A PDA-ról módosítható termék-mezők (a szerver is ugyanezt engedi)
+    PDA_EDITABLE_COLS = ("C", "D", "E", "F", "G", "H", "K", "L", "M", "N", "O", "P")
+
     def apply_pda_changes(self, changes):
-        """A PDA-n kért módosítások (áthelyezés = új raklap) végrehajtása ezen a gépen: helyi adatbázis,
-        Napló, majd az outboxon át a VPS-re és a Google Sheets-be. Az eredményt visszaküldi a PDA-nak."""
+        """A PDA-n kért módosítások végrehajtása ezen a gépen, majd az eredmény visszaküldése a PDA-nak:
+          ATHELYEZES / MODOSITAS  - termék mezői (helyi adatbázis -> Napló -> outbox: VPS + Google Sheets)
+          ELADAS_MODOSITAS        - PDA-s eladás pótlása / javítása (darabszám-változásnál készlet-korrekció)
+          ELADAS_TORLES           - PDA-s eladás visszavonása (kérésre a készlet visszaírásával)"""
         done = 0
         for ch in changes:
             vid = ch.get("valtozas_id")
+            tipus = str(ch.get("tipus", "")).upper()
             try:
-                code = norm_code(ch.get("A"))
-                mezo = str(ch.get("mezo", "")).strip().upper()
-                uj = safe_str(ch.get("uj"))
-                eszkoz = safe_str(ch.get("eszkoz")) or "PDA"
-                if mezo not in ("L",):
-                    report_pda_result("valtozas", vid, False, f"Ez a mező nem módosítható a PDA-ról: {mezo}", "A-23")
-                    continue
-                elotte = get_row_snapshot(code)
-                if not elotte:
-                    report_pda_result("valtozas", vid, False, f"{code} nincs meg ezen a gépen - nem módosítottam", "A-21")
-                    self.append_process_log(f"❌ [A-21] PDA áthelyezés: {code} nincs meg ezen a gépen", "#ff5252")
-                    continue
-                regi_gepen = safe_str(elotte.get(mezo))
-                try:
-                    conn = get_db_connection()
-                    conn.execute(f"UPDATE termekek SET {mezo} = ? WHERE UPPER(TRIM(A)) = ? OR UPPER(TRIM(B)) = ?",
-                                 (uj, code, code))
-                    conn.commit()
-                    conn.close()
-                except Exception as e:
-                    report_pda_result("valtozas", vid, False, f"Helyi adatbázis hiba: {e}", "A-22")
-                    self.append_process_log(f"❌ [A-22] PDA áthelyezés ({code}): {e}", "#ff5252")
-                    continue
-                utana = get_row_snapshot(code)
-                megj = ""
-                if regi_gepen != safe_str(ch.get("regi")):
-                    megj = f" (figyelem: a gépen addig '{regi_gepen}' volt, a PDA '{safe_str(ch.get('regi'))}'-t látott)"
-                log_event(code, "ÁTHELYEZÉS (PDA)", f"Raklap: '{regi_gepen}' → '{uj}'{megj}", elotte, utana,
-                          f"📱 Zebra PDA ({eszkoz}) - Áthelyezés fül")
-                enqueue_row_from_db(code, force=True)
-                report_pda_result("valtozas", vid, True, f"Raklap: {regi_gepen or '-'} → {uj}{megj}")
-                self.append_process_log(f"📱 PDA áthelyezés: {code} raklap {regi_gepen or '-'} → {uj}", "#00e676")
-                done += 1
+                if tipus in ("ELADAS_MODOSITAS", "ELADAS_TORLES"):
+                    ok, msg, kod = self._apply_pda_sale_change(ch)
+                else:
+                    ok, msg, kod = self._apply_pda_product_change(ch)
+                report_pda_result("valtozas", vid, ok, msg, kod)
+                if ok:
+                    done += 1
+                    self.append_process_log(f"📱 PDA {tipus.lower()}: {ch.get('A')} - {msg}", "#00e676")
+                else:
+                    self.append_process_log(f"❌ [{kod}] PDA {tipus.lower()}: {ch.get('A')} - {msg}", "#ff5252")
             except Exception as e:
                 report_pda_result("valtozas", vid, False, f"Váratlan hiba: {e}", "A-24")
-                self.append_process_log(f"❌ [A-24] PDA áthelyezés átvételi hiba ({vid}): {e}", "#ff5252")
+                self.append_process_log(f"❌ [A-24] PDA módosítás átvételi hiba ({vid}): {e}", "#ff5252")
         if done:
             flush_outbox_async()
-            self.trigger_toast(f"📱 PDA: {done} áthelyezés végrehajtva")
+            sync_sales_async()
+            self.trigger_toast(f"📱 PDA: {done} módosítás végrehajtva")
             self.silent_update_excel_table()
+            if hasattr(self, "refresh_sold_table"):
+                self.refresh_sold_table()
+
+    @staticmethod
+    def _pda_json(val):
+        try:
+            d = json.loads(val) if isinstance(val, str) else (val or {})
+            return d if isinstance(d, dict) else {}
+        except Exception:
+            return {}
+
+    def _apply_pda_product_change(self, ch):
+        """Termék mező(k) módosítása. Visszaad: (sikerült?, üzenet, hibakód)."""
+        code = norm_code(ch.get("A"))
+        eszkoz = safe_str(ch.get("eszkoz")) or "PDA"
+        adat = self._pda_json(ch.get("adat"))
+        valt = adat.get("valtozasok") or {str(ch.get("mezo", "")).strip().upper(): safe_str(ch.get("uj"))}
+        regi_pda = adat.get("regi") or {str(ch.get("mezo", "")).strip().upper(): safe_str(ch.get("regi"))}
+        valt = {str(k).upper(): safe_str(v) for k, v in valt.items()}
+        bad = [k for k in valt if k not in self.PDA_EDITABLE_COLS]
+        if bad or not valt:
+            return False, f"Ez a mező nem módosítható a PDA-ról: {', '.join(bad) or '-'}", "A-23"
+        elotte = get_row_snapshot(code)
+        if not elotte:
+            return False, f"{code} nincs meg ezen a gépen - nem módosítottam", "A-21"
+        try:
+            conn = get_db_connection()
+            sets = ", ".join(f"{k} = ?" for k in valt)
+            conn.execute(f"UPDATE termekek SET {sets} WHERE UPPER(TRIM(A)) = ? OR UPPER(TRIM(B)) = ?",
+                         (*valt.values(), code, code))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            return False, f"Helyi adatbázis hiba: {e}", "A-22"
+        utana = get_row_snapshot(code)
+        elteres = [k for k in valt if safe_str(elotte.get(k)) != safe_str(regi_pda.get(k, elotte.get(k)))]
+        megj = (f" (figyelem: a gépen közben más volt itt: "
+                f"{', '.join(f'{k}={safe_str(elotte.get(k))!r}' for k in elteres)})") if elteres else ""
+        athelyezes = list(valt) == ["L"]
+        log_event(code, "ÁTHELYEZÉS (PDA)" if athelyezes else "MÓDOSÍTÁS (PDA)",
+                  describe_changes(elotte, utana) + megj, elotte, utana,
+                  f"📱 Zebra PDA ({eszkoz}) - {'Áthelyezés' if athelyezes else 'Szerkesztés'}")
+        enqueue_row_from_db(code, force=True)
+        return True, " | ".join(f"{COLUMN_LABELS.get(k, k)}: {safe_str(elotte.get(k)) or '-'} → {v or '-'}"
+                                for k, v in valt.items()) + megj, ""
+
+    def _change_stock(self, code, delta, src, reason):
+        """Készlet (F) módosítása delta-val. 0 alá / 0-ra csökkenésnél a terméket törli (mint az eladás).
+        Visszaad: üzenet, vagy None, ha a termék nincs meg ezen a gépen."""
+        elotte = get_row_snapshot(code)
+        if not elotte:
+            return None
+        m = re.search(r"\d+", elotte.get("F", ""))
+        stock = int(m.group(0)) if m else 1
+        remaining = stock + delta
+        if remaining <= 0:
+            log_event(code, "KÉSZLET (PDA)", f"{reason} | {stock} → 0 db - elfogyott, törölve a raktárból", elotte, None, src)
+            self.delete_item_action(code, reason=f"{reason} - 0 db maradt", forras=src)
+            return f"Készlet: {stock} → 0 db (elfogyott, törölve)"
+        conn = get_db_connection()
+        conn.execute("UPDATE termekek SET F = ? WHERE UPPER(TRIM(A)) = ? OR UPPER(TRIM(B)) = ?", (str(remaining), code, code))
+        conn.commit()
+        conn.close()
+        log_event(code, "KÉSZLET (PDA)", f"{reason} | {stock} → {remaining} db", elotte, get_row_snapshot(code), src)
+        enqueue_row_from_db(code, force=True)
+        return f"Készlet: {stock} → {remaining} db"
+
+    def _apply_pda_sale_change(self, ch):
+        """PDA-s eladás javítása / visszavonása ezen a gépen. Visszaad: (sikerült?, üzenet, hibakód)."""
+        eid = safe_str(ch.get("ref"))
+        code = norm_code(ch.get("A"))
+        eszkoz = safe_str(ch.get("eszkoz")) or "PDA"
+        adat = self._pda_json(ch.get("adat"))
+        src = f"📱 Zebra PDA ({eszkoz}) - Napló fül"
+        conn = get_db_connection()
+        r = conn.execute("SELECT * FROM eladasok WHERE eladas_id = ?", (eid,)).fetchone()
+        conn.close()
+        if not r:
+            return False, f"Az eladás ({eid}) nincs meg ezen a gépen", "A-21"
+        sale = dict(r)
+        levont = bool(int(adat.get("keszlet_levonas", 1) or 0))
+
+        if str(ch.get("tipus")).upper() == "ELADAS_TORLES":
+            try:
+                conn = get_db_connection()
+                conn.execute("UPDATE eladasok SET torolve = 1, sheets_synced = 0, valtozat = valtozat + 1 WHERE eladas_id = ?", (eid,))
+                conn.execute("DELETE FROM eladasok WHERE eladas_id = ? AND (synced_platform IS NULL OR synced_platform = '')", (eid,))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                return False, f"Helyi adatbázis hiba: {e}", "A-22"
+            log_event(eid, "ELADÁS VISSZAVONÁSA (PDA)", f"{code} | {sale.get('darab')} db | {sale.get('platform')}", forras=src)
+            msg = "Eladás visszavonva (az eladási lapról is törlődik)"
+            if adat.get("keszlet_vissza") and levont:
+                try:
+                    darab = int(str(sale.get("darab") or adat.get("darab") or 1))
+                except ValueError:
+                    darab = 1
+                st = self._change_stock(code, +darab, src, f"Eladás visszavonása ({eid})")
+                if st is None:
+                    return False, (msg + f" - DE a készletet nem tudtam visszaírni: {code} már nincs a raktárban "
+                                   "(elfogyott és törlődött). Állítsd vissza az Admin fülön: Törölt termékek → Visszaállítás."), "A-25"
+                msg += f" | {st}"
+            return True, msg, ""
+
+        # ELADAS_MODOSITAS
+        valt = {k: safe_str(v) for k, v in (adat.get("valtozasok") or {}).items()
+                if k in ("vevo", "ar", "tracking", "megjegyzes", "darab", "platform")}
+        if not valt:
+            return True, "Nincs változás", ""
+        if "platform" in valt and valt["platform"].upper() not in SALES_SHEETS:
+            return False, f"Ismeretlen platform: {valt['platform']}", "A-23"
+        try:
+            conn = get_db_connection()
+            sets = ", ".join(f"{k} = ?" for k in valt)
+            conn.execute(f"UPDATE eladasok SET {sets}, sheets_synced = 0, valtozat = valtozat + 1 WHERE eladas_id = ?",
+                         (*valt.values(), eid))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            return False, f"Helyi adatbázis hiba: {e}", "A-22"
+        labels = dict(SALES_COLUMNS)
+        reszl = " | ".join(f"{labels.get(k, k)}: {safe_str(sale.get(k)) or '∅'} → {v or '∅'}" for k, v in valt.items())
+        log_event(eid, "ELADÁS MÓDOSÍTÁSA (PDA)", f"{code} | {reszl}", forras=src)
+        msg = reszl
+        if "darab" in valt and levont:
+            try:
+                diff = int(valt["darab"]) - int(safe_str(sale.get("darab")) or 1)
+            except ValueError:
+                diff = 0
+            if diff:
+                st = self._change_stock(code, -diff, src, f"Eladott darabszám javítása ({eid})")
+                if st is None:
+                    return False, (msg + f" - DE a készletet nem tudtam javítani: {code} már nincs a raktárban. "
+                                   "Ha kell, állítsd vissza az Admin fülön (Törölt termékek)."), "A-25"
+                msg += f" | {st}"
+        return True, msg, ""
 
     def record_sale(self, platform, product, stock, v):
         code = product.get("A", "").strip().upper()
@@ -6183,6 +6334,14 @@ class RaktarApp(QMainWindow):
             return
         label = dict(SALES_COLUMNS).get(key, key)
         log_event(eladas_id, "ELADÁS MÓDOSÍTÁSA", f"{label}: {old_val or '∅'} → {value or '∅'}", forras="💰 Eladottak fül - cella szerkesztés")
+        # Ha PDA-s eladás, a PDA Naplójában is a friss adat látsszon (pl. utólag kitöltött vevő / ár / tracking)
+        def _mirror():
+            try:
+                vps_request("POST", f"{VPS_URL}/pda/sale/mirror", timeout=8,
+                            json={"eladas_id": eladas_id, "mezo": key, "ertek": value})
+            except Exception:
+                pass
+        threading.Thread(target=_mirror, daemon=True).start()
         # Gyors egymás utáni javításoknál csak egyszer töltünk fel (2 mp késleltetés)
         if not hasattr(self, "_sales_sync_debounce"):
             self._sales_sync_debounce = QTimer()
