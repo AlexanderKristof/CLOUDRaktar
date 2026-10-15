@@ -13,9 +13,9 @@
   .title { font-weight:bold; font-size:18px; flex:1; }
   .dot { width:12px; height:12px; border-radius:50%; background:#666; display:inline-block; }
   .dot.ok { background:var(--ok); } .dot.bad { background:var(--err); }
-  .tabs { display:grid; grid-template-columns: repeat(5, 1fr); gap:4px; margin-top:8px; }
-  .tabs button { padding:7px 2px; font-size:12px; font-weight:bold; border:none; border-radius:6px; background:#2b2b2b; color:var(--txt); line-height:1.25; }
-  .tabs button b { display:block; font-size:19px; }
+  .tabs { display:grid; grid-template-columns: repeat(7, 1fr); gap:3px; margin-top:8px; }
+  .tabs button { padding:6px 0; font-size:10.5px; font-weight:bold; border:none; border-radius:6px; background:#2b2b2b; color:var(--txt); line-height:1.2; overflow:hidden; }
+  .tabs button b { display:block; font-size:18px; }
   .tabs button.on { background:var(--blue); color:#000; }
   main { padding:10px; }
   .scan { display:flex; gap:6px; }
@@ -82,6 +82,20 @@
   .undobar button { border:none; border-radius:8px; background:var(--warn); color:#000; font-weight:bold; padding:12px 10px; font-size:15px; white-space:nowrap; }
   .undobar small { color:var(--dim); font-size:12px; min-width:22px; text-align:right; }
   body { padding-bottom:84px; }
+  .xbar { display:flex; gap:5px; align-items:center; }
+  .xbar input { flex:1; min-width:0; font-size:17px; padding:9px; border-radius:8px; border:2px solid #444; background:#2b2b2b; color:#fff; }
+  .xbar button { border:none; border-radius:8px; background:#37474f; color:#fff; font-weight:bold; font-size:16px; padding:10px 11px; }
+  .xwrap { overflow:auto; max-height:calc(100vh - 250px); border:1px solid var(--line); border-radius:6px; margin-top:6px; -webkit-overflow-scrolling:touch; }
+  table.x { border-collapse:collapse; font-size:13px; }
+  table.x th { position:sticky; top:0; background:#0b0b0b; color:var(--blue); z-index:2; padding:6px 6px; border:1px solid var(--line); white-space:nowrap; font-size:12px; }
+  table.x td { border:1px solid #2a2a2a; padding:7px 6px; white-space:nowrap; max-width:170px; overflow:hidden; text-overflow:ellipsis; background:#1a1a1a; }
+  table.x tr:nth-child(even) td { background:#202020; }
+  table.x td.c0, table.x th.c0 { position:sticky; left:0; z-index:1; background:#0d2a36; color:var(--blue); font-weight:bold; }
+  table.x th.c0 { z-index:3; }
+  table.x td.ro { color:#8a8a8a; }
+  table.x td.pend { background:#5d3a00 !important; color:#fff; }
+  table.x tr.hl td { background:#0d3b1f !important; }
+  table.x tr.empty td:not(.c0) { color:#555; }
   .settings input { font-size:15px; padding:8px; border-radius:6px; border:1px solid #444; background:#2b2b2b; color:#fff; width:100%; }
 </style>
 </head>
@@ -93,6 +107,8 @@
   </div>
   <div class="tabs">
     <button id="tab-sell" class="on" onclick="showTab('sell')"><b>&#x1F4B0;</b>Elad&#xE1;s</button>
+    <button id="tab-qs" onclick="showTab('qs')"><b>&#x1F50D;</b>Keres&#x151;</button>
+    <button id="tab-xls" onclick="showTab('xls')"><b>&#x1F4CA;</b>Excel</button>
     <button id="tab-move" onclick="showTab('move')"><b>&#x1F4E6;</b>&#xC1;thely.</button>
     <button id="tab-inv" onclick="showTab('inv')"><b>&#x1F4CB;</b>Lelt&#xE1;r</button>
     <button id="tab-log" onclick="showTab('log')"><b>&#x1F4DC;</b>Napl&#xF3;</button>
@@ -109,6 +125,33 @@
     </form>
     <div id="status"></div>
     <div id="results"></div>
+  </section>
+
+  <!-- ================= GYORSKERES&#x150; ================= -->
+  <section id="page-qs" class="hidden">
+    <div class="scan">
+      <input id="qs-in" autocomplete="off" spellcheck="false" placeholder="Gyorskeres&#x151;: m&#xE1;rka, t&#xED;pus, cikksz&#xE1;m, R18&#x2026;">
+      <button type="button" onclick="qsInput.value=''; qsRun();">&#x2716;</button>
+    </div>
+    <div class="small" style="margin-top:4px">G&#xE9;pel&#xE9;s k&#xF6;zben keres. T&#xF6;bb sz&#xF3;: mindegyiknek szerepelnie kell (pl. <i>makita 18v</i>).</div>
+    <div id="qs-status"></div>
+    <div id="qs-results"></div>
+  </section>
+
+  <!-- ================= EXCEL LIVE ================= -->
+  <section id="page-xls" class="hidden">
+    <div class="xbar">
+      <button type="button" onclick="xlsPrev()">&#x25C0;</button>
+      <input id="xls-from" inputmode="numeric" placeholder="Kezd&#x151; R18 sz&#xE1;m">
+      <button type="button" onclick="xlsGo()">&#x25B6;&#xFE0E; Ugr&#xE1;s</button>
+      <button type="button" onclick="xlsNext()">&#x25B6;</button>
+      <button type="button" onclick="xlsLast()">&#x23ED;</button>
+    </div>
+    <label class="chk" style="color:#cfd8dc;margin:6px 0"><input type="checkbox" id="xls-filled" onchange="xlsReload()"><span>Csak kit&#xF6;lt&#xF6;tt sorok</span></label>
+    <div class="small" id="xls-info"></div>
+    <div id="xls-status"></div>
+    <div class="xwrap" id="xls-wrap"><table class="x" id="xls-table"></table></div>
+    <div class="small" style="margin-top:4px">Koppints egy cell&#xE1;ra a szerkeszt&#xE9;shez. A narancs cella az asztali programn&#xE1;l v&#xE1;r v&#xE9;grehajt&#xE1;sra.</div>
   </section>
 
   <!-- ================= &#xC1;THELYEZ&#xC9;S ================= -->
@@ -228,6 +271,17 @@
   </div>
 </div>
 
+<!-- ================= EXCEL CELLA SZERKESZT&#xC9;SE ================= -->
+<div id="cedit" class="overlay">
+  <div class="ohead" id="ce-title">Cella</div>
+  <div class="pinfo" id="ce-info"></div>
+  <div id="ce-field"></div>
+  <div class="actions">
+    <button class="go" id="ce-go" type="button" onclick="submitCell()">&#x1F4BE; Ment&#xE9;s</button>
+    <button class="cancel" type="button" onclick="closeOverlay('cedit')">M&#xE9;gse</button>
+  </div>
+</div>
+
 <!-- ================= TERM&#xC9;K EL&#x150;ZM&#xC9;NYEI ================= -->
 <div id="hist" class="overlay">
   <div class="ohead" id="h-title">&#x1F558; El&#x151;zm&#xE9;nyek</div>
@@ -276,7 +330,7 @@
 </div>
 
 <script>
-var VERSION = "2026.10.15-d";
+var VERSION = "2026.10.15-e";
 var PLATFORMS = {
   EBAY_KIVULI: { cim: "eBay-en k\u00edv\u00fcli elad\u00e1s", gomb: "eBay-en k\u00edv\u00fcli", cls: "b-kivul" },
   EBAY:        { cim: "eBay elad\u00e1s",           gomb: "eBay",           cls: "b-ebay" },
@@ -302,6 +356,9 @@ var ERR = {
 function $(id) { return document.getElementById(id); }
 var scanInput = $("scan"), moveInput = $("move-scan"), invPalletInput = $("inv-pallet"), invInput = $("inv-scan");
 var lastItems = [];
+var ITEMS = [];          // minden k\u00e1rty\u00e1n megjelent term\u00e9k (a gombok ezt az indexet haszn\u00e1lj\u00e1k)
+var ITEM_SEQ = 0, ITEM_MAP = {};
+function reg(it) { ITEM_SEQ++; ITEM_MAP[ITEM_SEQ] = it; return ITEM_SEQ; }
 var current = null;   // { platform, item }
 var activeTab = "sell";
 $("ver").textContent = VERSION;
@@ -406,23 +463,25 @@ function api(method, url, body, mit) {
 function errText(e) { return "[" + (e.kod || "?") + "] " + e.message; }
 var lastServerOk = null;
 function setServer(ok) { $("srv").className = "dot " + (ok ? "ok" : "bad"); lastServerOk = ok; }
-var OVERLAYS = ["sale", "token", "edit", "hist", "sedit"];
+var OVERLAYS = ["sale", "token", "edit", "hist", "sedit", "cedit"];
 function overlayOpen() { return OVERLAYS.some(function (o) { return $(o).classList.contains("on"); }); }
 function closeOverlay(id) { $(id).classList.remove("on"); focusScan(); }
 function msgTo(id, html, cls) { $(id).innerHTML = html ? '<div class="msg ' + cls + '">' + html + "</div>" : ""; }
 
 // ---- F\u00fclek ----
-var TABS = ["sell", "move", "inv", "log", "proc"];
+var TABS = ["sell", "qs", "xls", "move", "inv", "log", "proc"];
 function showTab(t) {
   activeTab = t;
   TABS.forEach(function (x) { $("page-" + x).classList.toggle("hidden", x !== t); $("tab-" + x).classList.toggle("on", x === t); });
   if (t === "log") loadLog();
   if (t === "proc") renderProc();
   if (t === "inv") renderInventory();
+  if (t === "xls" && !xlsLoaded) xlsInit();
   focusScan();
 }
 function activeInput() {
   if (activeTab === "sell") return scanInput;
+  if (activeTab === "qs") return qsInput;
   if (activeTab === "move") return $("move-target").classList.contains("hidden") ? moveInput : $("move-pallet");
   if (activeTab === "inv") return inv ? invInput : invPalletInput;
   return null;
@@ -479,7 +538,7 @@ function doSearch(q) {
     lastItems = js.items || [];
     if (!lastItems.length) { msgTo("status", "\u274c Nincs tal\u00e1lat: <b>" + esc(q) + "</b>", "err"); proc("info", "", "Keres\u00e9s: nincs tal\u00e1lat \u2013 " + q); beep(false); }
     else { msgTo("status", "", ""); beep(true); }
-    $("results").innerHTML = lastItems.map(card).join("");
+    $("results").innerHTML = lastItems.map(function (it) { return card(it); }).join("");
     focusScan();
   }).catch(function (e) { msgTo("status", "\u274c " + esc(errText(e)), "err"); beep(false); focusScan(); });
 }
@@ -487,7 +546,8 @@ function infoRows(it) {
   return [["Cikksz\u00e1m", it.E], ["\u00c1llapot", it.G], ["Rakt\u00e1ron", (it.F || "1") + " db"], ["Raklap", it.L],
           ["S\u00faly", it.M], ["eBay sz\u00e1m", it.N]].filter(function (r) { return r[1]; });
 }
-function card(it, i) {
+function card(it) {
+  var i = reg(it);
   var name = [it.C, it.D].filter(Boolean).join(" ");
   var btns = Object.keys(PLATFORMS).map(function (p) {
     return '<button class="' + PLATFORMS[p].cls + '" onclick="openSale(\'' + p + '\',' + i + ')">\ud83d\udcb0 ' + esc(PLATFORMS[p].gomb) + "</button>";
@@ -496,12 +556,14 @@ function card(it, i) {
          '<div class="grid">' + infoRows(it).map(function (r) { return "<span>" + esc(r[0]) + "</span><span>" + esc(r[1]) + "</span>"; }).join("") +
          '</div><div class="sell">' + btns + "</div>" +
          '<div class="two"><button onclick="openEdit(' + i + ')">\u270f\ufe0f Szerkeszt\u00e9s</button>' +
-         '<button onclick="openHistory(\'' + esc(it.A || it.B) + '\')">\ud83d\udd58 El\u0151zm\u00e9nyek</button></div></div>';
+         '<button onclick="openHistory(\'' + esc(it.A || it.B) + '\')">\ud83d\udd58 El\u0151zm\u00e9nyek</button></div>' +
+         '<div class="two"><button onclick="xlsJump(\'' + esc(it.A || it.B) + '\')">\ud83d\udcca Excel Live-on</button>' +
+         '<button onclick="startMoveFor(' + i + ')">\ud83d\udce6 \u00c1thelyez\u00e9s</button></div></div>';
 }
 function stockOf(it) { var m = String(it.F || "").match(/\d+/); return m ? parseInt(m[0], 10) : 1; }
 
 function openSale(platform, i) {
-  var it = lastItems[i];
+  var it = ITEM_MAP[i];
   current = { platform: platform, item: it };
   $("s-title").textContent = "\ud83d\udcb0 " + PLATFORMS[platform].cim;
   $("s-info").innerHTML = "\ud83c\udff7\ufe0f <b>" + esc(it.A) + "</b> | " + esc(it.C || "-") + " | " + esc(it.D || "-") +
@@ -568,7 +630,7 @@ var EDIT_FIELDS = [["C", "M\u00e1rka"], ["D", "T\u00edpus"], ["E", "Cikksz\u00e1
 var ALLAPOT = ["\u00daJ", "HASZN\u00c1LT", "FEL\u00daJ\u00cdTOTT"];
 var editItem = null;
 function openEdit(i) {
-  var it = lastItems[i];
+  var it = ITEM_MAP[i];
   editItem = it;
   $("e-info").innerHTML = "\ud83c\udff7\ufe0f <b>" + esc(it.A) + "</b> | " + esc([it.C, it.D].filter(Boolean).join(" ") || "-");
   $("e-fields").innerHTML = EDIT_FIELDS.map(function (f) {
@@ -680,6 +742,132 @@ function cancelSale(eid) {
                                : "\u2705 Elk\u00fcldve. Az asztali program vonja vissza" + (vissza ? " \u00e9s \u00edrja vissza a k\u00e9szletet." : "."));
     loadLog();
   }).catch(function (e) { alert("Nem siker\u00fclt:\n" + errText(e)); });
+}
+
+// ================= GYORSKERES\u0150 =================
+var qsInput = $("qs-in"), qsTimer = null, qsSeq = 0;
+qsInput.addEventListener("input", function () { clearTimeout(qsTimer); qsTimer = setTimeout(qsRun, 350); });
+qsInput.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); clearTimeout(qsTimer); qsRun(); } });
+function qsRun() {
+  var q = fixScan(qsInput.value);
+  if (q.length < 2) { $("qs-results").innerHTML = ""; msgTo("qs-status", "", ""); return; }
+  var my = ++qsSeq;
+  msgTo("qs-status", "\ud83d\udd0d Keres\u00e9s\u2026", "info");
+  rawApi("GET", "/pda/search?limit=40&q=" + encodeURIComponent(q)).then(function (js) {
+    if (my !== qsSeq) return;                       // k\u00f6zben tov\u00e1bb g\u00e9peltek
+    var items = js.items || [];
+    msgTo("qs-status", items.length ? items.length + (items.length >= 40 ? "+ " : " ") + "tal\u00e1lat" : "\u274c Nincs tal\u00e1lat", items.length ? "info" : "err");
+    $("qs-results").innerHTML = items.map(function (it) { return card(it); }).join("");
+  }).catch(function (e) {
+    if (my !== qsSeq) return;
+    proc("hiba", e.kod, "Gyorskeres\u0151: " + e.message, "GET /pda/search");
+    msgTo("qs-status", "\u274c " + esc(errText(e)), "err");
+  });
+}
+
+// ================= EXCEL LIVE MUNKALAP =================
+var XCOLS = ["A", "B", "C", "D", "E", "F", "G", "L", "M", "I", "K", "H", "N", "O", "P"];   // mint a g\u00e9pen (J rejtve)
+var XLBL = { A: "F-K\u00f3d", B: "Vonalk\u00f3d", C: "M\u00e1rka", D: "T\u00edpus", E: "Cikksz\u00e1m", F: "DB", G: "\u00c1llapot", H: "\u00c1r", I: "P\u00e1ter",
+             J: "Szabad", K: "Polc", L: "Raklap", M: "S\u00faly", N: "eBay ID", O: "Megjegyz\u00e9s", P: "\u00c1llapot r\u00e9szlet" };
+var XEDIT = { C: 1, D: 1, E: 1, F: 1, G: 1, H: 1, K: 1, L: 1, M: 1, N: 1, O: 1, P: 1 };
+var xlsRows = [], xlsLoaded = false, xlsHl = "", xlsPending = {};
+var XLIMIT = 100;
+function r18num(c) { var m = String(c || "").match(/^R18-0*(\d+)/i); return m ? parseInt(m[1], 10) : -1; }
+function xlsInit() {
+  xlsLoaded = true;
+  var saved = null; try { saved = localStorage.getItem("xls_from"); } catch (e) {}
+  if (saved) { $("xls-from").value = saved; xlsLoad("from=" + encodeURIComponent(saved)); } else xlsLast();
+}
+function xlsParams(p) { return "/pda/sheet?limit=" + XLIMIT + ($("xls-filled").checked ? "&kitoltott=1" : "") + "&" + p; }
+function xlsLoad(p, then) {
+  msgTo("xls-status", "\u23f3 Bet\u00f6lt\u00e9s\u2026", "info");
+  api("GET", xlsParams(p)).then(function (js) {
+    xlsRows = js.items || [];
+    msgTo("xls-status", "", "");
+    if (xlsRows.length) {
+      var a = r18num(xlsRows[0].A), b = r18num(xlsRows[xlsRows.length - 1].A);
+      $("xls-from").value = a;
+      try { localStorage.setItem("xls_from", String(a)); } catch (e) {}
+      $("xls-info").textContent = "R18-" + a + " \u2026 R18-" + b + "  (" + xlsRows.length + " sor \u00b7 \u00f6sszesen " + js.osszes + ", R18-" + js.min + " \u2013 R18-" + js.max + ")";
+    } else $("xls-info").textContent = "Nincs sor ebben a tartom\u00e1nyban.";
+    xlsRender();
+    if (then) then();
+  }).catch(function (e) { msgTo("xls-status", "\u274c " + esc(errText(e)), "err"); });
+}
+function xlsRender() {
+  var h = "<tr>" + XCOLS.map(function (c, i) { return '<th class="' + (i === 0 ? "c0" : "") + '">' + c + " " + esc(XLBL[c]) + "</th>"; }).join("") + "</tr>";
+  h += xlsRows.map(function (r, ri) {
+    var empty = !(r.C || r.D || r.E);
+    return '<tr class="' + (r.A === xlsHl ? "hl " : "") + (empty ? "empty" : "") + '" id="xr-' + esc(r.A) + '">' + XCOLS.map(function (c, i) {
+      var key = r.A + "|" + c, pend = xlsPending[key] !== undefined;
+      var v = pend ? xlsPending[key] : (r[c] || "");
+      var cls = (i === 0 ? "c0 " : "") + (XEDIT[c] ? "" : "ro ") + (pend ? "pend" : "");
+      return '<td class="' + cls + '" onclick="xlsCell(' + ri + ",'" + c + "')\">" + esc(v) + "</td>";
+    }).join("") + "</tr>";
+  }).join("");
+  $("xls-table").innerHTML = h;
+}
+function xlsGo() { var n = parseInt($("xls-from").value, 10); if (n >= 0) xlsLoad("from=" + n); }
+function xlsNext() { if (xlsRows.length) xlsLoad("from=" + (r18num(xlsRows[xlsRows.length - 1].A) + 1)); }
+function xlsPrev() { if (xlsRows.length) xlsLoad("before=1&from=" + r18num(xlsRows[0].A)); else xlsGo(); }
+function xlsLast() { xlsLoad("last=1", function () { var w = $("xls-wrap"); w.scrollTop = w.scrollHeight; }); }
+function xlsReload() { if (xlsRows.length) xlsLoad("from=" + r18num(xlsRows[0].A)); else xlsLast(); }
+function xlsJump(code) {
+  code = String(code).toUpperCase(); var n = r18num(code);
+  if (n < 0) return;
+  xlsHl = code; xlsLoaded = true;
+  if (activeTab !== "xls") showTab("xls");
+  xlsLoad("from=" + Math.max(0, n - 5), function () {
+    var tr = $("xr-" + code);
+    if (tr) tr.scrollIntoView({ block: "center" }); else msgTo("xls-status", "\u2139\ufe0f " + esc(code) + " nincs a munkalapon (vagy \u00fcres, \u00e9s be van kapcsolva a 'Csak kit\u00f6lt\u00f6tt').", "info");
+  });
+}
+var ceRow = null, ceCol = "";
+function xlsCell(ri, c) {
+  var r = xlsRows[ri]; if (!r) return;
+  if (!XEDIT[c]) {
+    if (c === "A" || c === "B") openHistory(r.A); else msgTo("xls-status", "\u2139\ufe0f A(z) " + c + " (" + XLBL[c] + ") oszlop a PDA-r\u00f3l nem szerkeszthet\u0151.", "info");
+    return;
+  }
+  ceRow = r; ceCol = c;
+  var key = r.A + "|" + c, v = xlsPending[key] !== undefined ? xlsPending[key] : (r[c] || "");
+  $("ce-title").textContent = "\u270f\ufe0f " + c + " \u2013 " + XLBL[c];
+  $("ce-info").innerHTML = "\ud83c\udff7\ufe0f <b>" + esc(r.A) + "</b> | " + esc([r.C, r.D, r.E].filter(Boolean).join(" ") || "(\u00fcres sor)");
+  if (c === "G") {
+    var opts = ALLAPOT.slice(); if (v && opts.indexOf(String(v).toUpperCase()) < 0) opts.unshift(v);
+    $("ce-field").innerHTML = '<select id="ce-in" class="fin">' + (v ? "" : '<option value=""></option>') + opts.map(function (o) {
+      return "<option" + (String(v).toUpperCase() === o.toUpperCase() ? " selected" : "") + ">" + esc(o) + "</option>"; }).join("") + "</select>";
+  } else {
+    $("ce-field").innerHTML = '<input id="ce-in" class="fin" value="' + esc(v) + '"' + (c === "F" || c === "L" ? ' inputmode="numeric"' : "") + ">";
+  }
+  $("ce-go").disabled = false;
+  $("cedit").classList.add("on");
+  setTimeout(function () { var el = $("ce-in"); el.focus(); if (el.select) el.select(); }, 50);
+  $("ce-in").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); submitCell(); } });
+}
+function submitCell() {
+  var r = ceRow, c = ceCol, v = $("ce-in").value.trim();
+  var key = r.A + "|" + c, cur = xlsPending[key] !== undefined ? xlsPending[key] : (r[c] || "");
+  if (v === String(cur).trim()) { closeOverlay("cedit"); return; }
+  if ((c === "C" || c === "D" || c === "E") && (r.C || r.D || r.E) &&
+      !confirm("M\u00e1rk\u00e1t / t\u00edpust / cikksz\u00e1mot m\u00f3dos\u00edtasz egy kit\u00f6lt\u00f6tt sorban \u2013 biztos?")) return;
+  $("ce-go").disabled = true;
+  var valt = {}; valt[c] = v;
+  api("POST", "/pda/change", { A: r.A, valtozasok: valt, tipus: c === "L" ? "ATHELYEZES" : "MODOSITAS", eszkoz: deviceName() },
+      "Excel Live cella (" + r.A + " " + c + ": " + (cur || "\u2014") + " \u2192 " + (v || "\u2014") + ")").then(function (js) {
+    closeOverlay("cedit");
+    xlsPending[key] = v; xlsRender();
+    var lbl = r.A + " " + XLBL[c] + ": " + (cur || "\u2014") + " \u2192 " + (v || "\u2014");
+    showUndo("\ud83d\udcca " + esc(lbl), function () {
+      undoChange(js.valtozas_id, lbl).then(function () { delete xlsPending[key]; xlsRender(); });
+    });
+    beep(true);
+  }).catch(function (e) { $("ce-go").disabled = false; alert("Nem siker\u00fclt:\n" + errText(e) + "\n\n" + ((ERR[e.kod] || [])[1] || "")); });
+}
+$("xls-from").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); xlsGo(); } });
+function startMoveFor(i) {
+  var it = ITEM_MAP[i]; if (!it) return;
+  showTab("move"); moveProduct(it.A);
 }
 
 // ================= \u00c1THELYEZ\u00c9S =================
@@ -1022,6 +1210,7 @@ window.onScan = function (code) {
   code = fixScan(code);
   if ($("token").classList.contains("on")) { $("tok-in").value = code; return; }
   if ($("hist").classList.contains("on")) return;
+  if ($("cedit").classList.contains("on")) { var ci = $("ce-in"); if (ci && ci.tagName === "INPUT") ci.value = code; return; }
   if ($("edit").classList.contains("on") || $("sedit").classList.contains("on")) {
     var ae = document.activeElement;
     var tgt = (ae && ae.tagName === "INPUT") ? ae : ($("sedit").classList.contains("on") ? $("se-tracking") : $("e-L"));
@@ -1036,6 +1225,8 @@ window.onScan = function (code) {
     return;
   }
   if (activeTab === "move") { moveScan(code); return; }
+  if (activeTab === "qs") { qsInput.value = code; qsRun(); return; }
+  if (activeTab === "xls") { if (isR18(code)) xlsJump(code); return; }
   if (activeTab === "inv") { if (inv) invScan(code); else startInventory(code); return; }
   doSearch(code);
 };
@@ -1052,7 +1243,7 @@ document.addEventListener("keydown", function (e) {
 window.onBack = function () {
   if ($("token").classList.contains("on")) return false;
   if ($("sale").classList.contains("on")) { closeSale(); return true; }
-  var open = ["edit", "hist", "sedit"].filter(function (o) { return $(o).classList.contains("on"); })[0];
+  var open = ["edit", "hist", "sedit", "cedit"].filter(function (o) { return $(o).classList.contains("on"); })[0];
   if (open) { closeOverlay(open); return true; }
   if (activeTab !== "sell") { showTab("sell"); return true; }
   return false;

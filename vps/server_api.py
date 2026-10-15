@@ -580,6 +580,11 @@ def _clean_part(text):
     return re.sub(r"[\s\-_/.,]+", "", str(text or "")).upper()
 
 
+def _r18_num(code):
+    m = re.match(r"^\s*R18-0*(\d+)", str(code or ""), re.IGNORECASE)
+    return int(m.group(1)) if m else -1
+
+
 def _pda_row(row):
     return {k: safe_str(row[k]) for k in "ABCDEFGHIJKLMNOP"}
 
@@ -617,19 +622,23 @@ def pda_search():
         rows = [_pda_row(r) for r in cursor.fetchall()]
         conn.close()
 
+        limit = max(1, min(request.args.get('limit', default=15, type=int), 200))
+        rows.sort(key=lambda r: _r18_num(r["A"]), reverse=True)      # legujabb elol
         exact = [r for r in rows if clean_code(r["A"]) == q or clean_code(r["B"]) == q]
         items = list(exact)
         if not (re.match(r"^R18-\d+$", q) and exact):
-            q_low, q_part = q.lower(), _clean_part(q)
+            # Tobb szo: mindegyiknek szerepelnie kell (pl. "makita 18v")
+            words = [w for w in q.lower().split() if w]
             for r in rows:
-                if len(items) >= 15:
+                if len(items) >= limit:
                     break
                 if r in exact:
                     continue
                 text = " ".join(r.values())
-                if q_low in text.lower() or (q_part and q_part in _clean_part(text)):
+                low, part = text.lower(), _clean_part(text)
+                if all(w in low or (_clean_part(w) and _clean_part(w) in part) for w in words):
                     items.append(r)
-        return jsonify({"status": "ok", "items": items[:15]}), 200
+        return jsonify({"status": "ok", "items": items[:limit]}), 200
     except Exception as e:
         return pda_err(500, "S-500", str(e))
 
@@ -1113,6 +1122,40 @@ def pda_result():
         if not found:
             return pda_err(404, "S-404", "Nincs ilyen tetel")
         return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+# ---------- Excel Live munkalap (PDA) ----------
+@app.route('/pda/sheet', methods=['GET'])
+def pda_sheet():
+    """Az Excel Live munkalap egy szelete R18-szam szerint sorban.
+    ?from=13000&limit=100  - a 13000-es R18-tol kezdve | ?last=1 - a legutolso 'limit' sor
+    ?kitoltott=1           - csak a kitoltott (Marka/Tipus/Cikkszam) sorok"""
+    try:
+        limit = max(10, min(request.args.get('limit', default=100, type=int), 300))
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P FROM termekek WHERE A LIKE 'R18-%'")
+        rows = [r for r in (_pda_row(x) for x in cur.fetchall()) if _r18_num(r["A"]) >= 0]
+        conn.close()
+        if request.args.get('kitoltott'):
+            rows = [r for r in rows if r["C"] or r["D"] or r["E"]]
+        rows.sort(key=lambda r: _r18_num(r["A"]))
+        maxnum = _r18_num(rows[-1]["A"]) if rows else 0
+        minnum = _r18_num(rows[0]["A"]) if rows else 0
+        if request.args.get('last'):
+            part = rows[-limit:]
+        else:
+            start = request.args.get('from', default=minnum, type=int)
+            if request.args.get('before'):
+                # visszafele lapozas: a 'from' ELOTTI 'limit' sor
+                prev = [r for r in rows if _r18_num(r["A"]) < start]
+                part = prev[-limit:]
+            else:
+                part = [r for r in rows if _r18_num(r["A"]) >= start][:limit]
+        return jsonify({"status": "ok", "items": part, "min": minnum, "max": maxnum, "osszes": len(rows)}), 200
     except Exception as e:
         return pda_err(500, "S-500", str(e))
 
