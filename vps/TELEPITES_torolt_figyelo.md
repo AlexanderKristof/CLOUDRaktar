@@ -47,3 +47,14 @@ Az első kör csak megjegyzi a táblázat állapotát („Első ellenőrzés: �
 | Élő napló | `journalctl -u torolt-figyelo -f` |
 
 A program újraindításkor és áramszünet után is magától elindul. Ha nincs internet, a ToroltSor-bejegyzések helyben várnak (`torolt_figyelo.db`), és később kimennek.
+
+## „Ki törölte” (S oszlop) beállítása
+A figyelő a Google Drive **verzióelőzményeiből** olvassa ki, ki szerkesztette a táblázatot a törlés idején, és az email-címet a ToroltSor **S** oszlopába írja. Ehhez is **csak olvasási** jogot kér (`drive.metadata.readonly`), a figyelt táblázatot továbbra sem tudja módosítani.
+
+1. **Google Drive API bekapcsolása** (egyszer): https://console.cloud.google.com → felül válaszd ki azt a projektet, amelyikhez a `credentials.json` tartozik → *APIs & Services* → *Library* → **Google Drive API** → **Enable**.
+2. **A szolgáltatásfiók lássa a verzióelőzményeket:** a Google csak a táblázat *szerkesztőinek* mutatja a verzióelőzményeket. Ha a ToroltSor S oszlopában „(verzióelőzmény nem olvasható)” áll, a figyelt táblázatot oszd meg a szolgáltatásfiókkal (`client_email` a credentials.json-ban) **Szerkesztő** joggal. A program ettől sem tud írni bele: csak olvasási engedéllyel (scope) kapcsolódik.
+3. `systemctl restart torolt-figyelo`
+
+Tudnivalók:
+- A Google a verziókat néhány percre összevonja, ezért a bejegyzés legfeljebb ~10 percet vár, mire a ToroltSor-ba kerül. Ha ugyanakkor többen szerkesztettek, mindenki email-címe bekerül (vesszővel).
+- Ha nem derül ki: „(nem állapítható meg)”. A régebbi, már várakozó bejegyzéseknél az S oszlop üres marad.

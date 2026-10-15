@@ -6,7 +6,12 @@ TOROLT SOROK FIGYELO (VPS szolgaltatas) - /opt/raktarapp/torolt_figyelo.py
 
 Folyamatosan (ejjel-nappal) figyeli a FIGYELT (elo) Google tablazatot. Ha onnan eltunik egy
 R18-as termek sora, vagy kiuritik a Marka / Tipus / Cikkszam mezoit, a termek KORABBI teljes
-adatai (A-P) a ToroltSor munkalap vegere kerulnek (Q: torles ideje, R: honnan).
+adatai (A-P) a ToroltSor munkalap vegere kerulnek (Q: torles ideje, R: honnan, S: ki torolte).
+
+KI TOROLTE (S oszlop): a Google Drive verzioelozmenyeibol (revisions) olvassa ki, ki szerkesztette a
+tablazatot a torles idejeben - szinten CSAK OLVASASI joggal (drive.metadata.readonly). A Google a
+verziokat percekre osszevonja, ezert ha ugyanakkor tobben szerkesztettek, mindegyikuk email-cime bekerul.
+Ehhez a Google Cloud projektben a "Google Drive API"-t engedelyezni kell (lasd TELEPITES_torolt_figyelo.md).
 
 BIZTONSAG:
 - A figyelt tablazathoz KIZAROLAG olvasasi joggal kapcsolodik (spreadsheets.readonly),
@@ -45,6 +50,13 @@ DELETED_WORKSHEET = "ToroltSor"
 # Ha egy ellenorzeskor ennel tobb kitoltott termek tunik el egyszerre, nem archival (valoszinuleg hiba)
 MISSING_SAFETY_LIMIT = 20
 
+# "Ki torolte" keresese a verzioelozmenyekben. A Google a verziot nehany perc keslessel rogziti,
+# ezert legfeljebb ennyi ideig varunk vele a ToroltSor-ba irassal (masodperc). Utana "nem allapithato meg".
+WHO_WAIT_MAX_SEC = 600
+# A torles eszlelese elotti / utani tures a verziok idejehez (masodperc)
+WHO_SLACK_BEFORE_SEC = 120
+WHO_SLACK_AFTER_SEC = 180
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json")
 # Sajat kis adatbazis (pillanatkep + varakozo bejegyzesek) - NEM a raktar_adatbazis.db
@@ -56,7 +68,7 @@ ROW_COLS = "ABCDEFGHIJKLMNOP"
 HEADER = ["A: F-K\u00f3d", "B: Vonalk\u00f3d", "C: M\u00e1rka", "D: T\u00edpus", "E: Cikksz\u00e1m", "F: DB",
           "G: \u00c1llapot", "H: \u00c1r", "I: P\u00e1ter", "J: Szabad", "K: Polc", "L: Raklap",
           "M: S\u00faly", "N: eBay ID", "O: Megjegyz\u00e9s", "P: \u00c1llapot r\u00e9szlet",
-          "Q: T\u00f6rl\u00e9s ideje", "R: Honnan t\u00f6r\u00f6lt\u00e9k"]
+          "Q: T\u00f6rl\u00e9s ideje", "R: Honnan t\u00f6r\u00f6lt\u00e9k", "S: Ki t\u00f6r\u00f6lte (email)"]
 
 log = logging.getLogger("torolt_figyelo")
 
@@ -118,13 +130,65 @@ def get_deleted_ws():
         ws = book.worksheet(DELETED_WORKSHEET)
     except gspread.exceptions.WorksheetNotFound:
         ws = book.add_worksheet(title=DELETED_WORKSHEET, rows=1000, cols=len(HEADER))
-    if not ws.row_values(1):
-        ws.update(range_name="A1:R1", values=[HEADER])
+    if len(ws.row_values(1)) < len(HEADER):
+        ws.update(range_name="A1:S1", values=[HEADER])
     return ws
+
+
+# -------------------------------------------------------------------
+# KI TOROLTE: Google Drive verzioelozmenyek (CSAK OLVASAS)
+# -------------------------------------------------------------------
+_who_warned = set()
+
+
+def _utc(dt_str):
+    return datetime.datetime.strptime(dt_str[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+
+
+def list_revisions():
+    """A figyelt tablazat verzioi: [(ido UTC, email vagy nev), ...]. Csak olvasas (drive.metadata.readonly)."""
+    from google.oauth2.service_account import Credentials
+    from google.auth.transport.requests import AuthorizedSession
+    creds = Credentials.from_service_account_file(
+        CREDENTIALS_FILE, scopes=["https://www.googleapis.com/auth/drive.metadata.readonly"])
+    sess = AuthorizedSession(creds)
+    url = f"https://www.googleapis.com/drive/v3/files/{WATCH_SPREADSHEET_ID.strip()}/revisions"
+    out, token = [], None
+    while True:
+        params = {"pageSize": 1000, "fields": "nextPageToken,revisions(modifiedTime,lastModifyingUser(displayName,emailAddress))"}
+        if token:
+            params["pageToken"] = token
+        res = sess.get(url, params=params, timeout=30)
+        if res.status_code != 200:
+            raise RuntimeError(f"HTTP {res.status_code}: {res.text[:300]}")
+        js = res.json()
+        for r in js.get("revisions", []):
+            u = r.get("lastModifyingUser") or {}
+            who = u.get("emailAddress") or u.get("displayName") or ""
+            out.append((_utc(r["modifiedTime"]), who))
+        token = js.get("nextPageToken")
+        if not token:
+            return out
+
+
+def find_who(win_from, win_to, revisions):
+    """A [win_from, win_to] idoablakban (UTC) szerkeszto felhasznalok, vesszovel. Ures, ha nincs ilyen verzio."""
+    a = win_from - datetime.timedelta(seconds=WHO_SLACK_BEFORE_SEC)
+    b = win_to + datetime.timedelta(seconds=WHO_SLACK_AFTER_SEC)
+    who = []
+    for t, w in revisions:
+        if a <= t <= b and w and w not in who:
+            who.append(w)
+    return ", ".join(who)
+
+
+_last_check_utc = None
 
 
 def check_once(conn):
     """Egy ellenorzesi kor: osszeveti a figyelt tablazatot az elozo pillanatkeppel."""
+    global _last_check_utc
+    check_utc = datetime.datetime.now(datetime.timezone.utc)
     values = read_watched_values()
     current = {}
     for r in values:
@@ -158,12 +222,15 @@ def check_once(conn):
                     f"(ellenorizd a tablazatot!). Kodok: {', '.join(r['A'] for r, _ in gone[:50])}")
     else:
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        win_from = _last_check_utc or (check_utc - datetime.timedelta(seconds=WATCH_INTERVAL_SEC * 2))
         for old_row, forras in gone:
             vals = [old_row.get(c, "") for c in ROW_COLS] + [now, forras]
+            payload = {"vals": vals, "from": win_from.isoformat(), "to": check_utc.isoformat()}
             conn.execute("INSERT INTO varakozo (payload, created_at) VALUES (?, ?)",
-                         (json.dumps(vals, ensure_ascii=False), now))
+                         (json.dumps(payload, ensure_ascii=False), now))
             log.info(f"{forras}: {old_row.get('A')} | {old_row.get('C')} | {old_row.get('D')} | {old_row.get('E')}")
 
+    _last_check_utc = check_utc
     conn.execute("DELETE FROM snapshot WHERE forras = ?", (key,))
     conn.executemany("INSERT INTO snapshot (forras, code, payload) VALUES (?, ?, ?)",
                      [(key, c, json.dumps(r, ensure_ascii=False)) for c, r in current.items()])
@@ -171,20 +238,49 @@ def check_once(conn):
 
 
 def flush_pending(conn):
-    """A varakozo bejegyzeseket kiirja a ToroltSor munkalapra (ami mar ott van, azt nem irja be ujra)."""
-    pending = conn.execute("SELECT id, payload FROM varakozo ORDER BY id").fetchall()
+    """A varakozo bejegyzeseket kiirja a ToroltSor munkalapra (ami mar ott van, azt nem irja be ujra).
+    Elotte megkeresi, ki torolte (verzioelozmenyek); ha meg nincs verzio a torles idejerol, kicsit var vele."""
+    pending = conn.execute("SELECT id, payload, created_at FROM varakozo ORDER BY id").fetchall()
     if not pending:
         return
-    ws = get_deleted_ws()
-    existing = {tuple((list(r) + [""] * 16)[:16]) for r in ws.get_all_values()[1:]}
+    revisions, rev_error = None, ""
+    try:
+        revisions = list_revisions()
+    except Exception as e:
+        rev_error = str(e)
+        if rev_error[:60] not in _who_warned:
+            _who_warned.add(rev_error[:60])
+            log.warning("A 'ki torolte' nem olvashato a verzioelozmenyekbol (a ToroltSor ettol meg kiirodik). "
+                        "Kell: Google Drive API engedelyezve + a szolgaltatasfiok lassa a tablazatot. "
+                        f"Hiba: {rev_error[:300]}")
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    ws, existing, written = None, None, 0
     for row in pending:
-        vals = json.loads(row["payload"])
+        data = json.loads(row["payload"])
+        if isinstance(data, list):                      # regi formatum (ki torolte nelkul)
+            vals, who = data, ""
+        else:
+            vals = data["vals"]
+            w_from, w_to = datetime.datetime.fromisoformat(data["from"]), datetime.datetime.fromisoformat(data["to"])
+            who = find_who(w_from, w_to, revisions) if revisions is not None else ""
+            age = (now_utc - w_to).total_seconds()
+            if not who and revisions is not None and age < WHO_WAIT_MAX_SEC:
+                continue                                # a Google meg nem rogzitette a verziot - kesobb ujra
+            if not who:
+                who = "(nem allapithato meg)" if not rev_error else "(verzioelozmeny nem olvashato)"
+        if ws is None:
+            ws = get_deleted_ws()
+            existing = {tuple((list(r) + [""] * 16)[:16]) for r in ws.get_all_values()[1:]}
+        vals = (list(vals) + [""] * 18)[:18] + [who]
         if tuple(vals[:16]) not in existing:
             ws.append_row(vals, value_input_option="RAW")
             existing.add(tuple(vals[:16]))
+            written += 1
+            log.info(f"ToroltSor: {vals[0]} | torolte: {who or '-'}")
         conn.execute("DELETE FROM varakozo WHERE id = ?", (row["id"],))
         conn.commit()
-    log.info(f"{len(pending)} bejegyzes kiirva a '{DELETED_WORKSHEET}' munkalapra.")
+    if written:
+        log.info(f"{written} bejegyzes kiirva a '{DELETED_WORKSHEET}' munkalapra.")
 
 
 def main():
