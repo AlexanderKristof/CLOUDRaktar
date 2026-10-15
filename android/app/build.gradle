@@ -45,4 +45,6 @@ dependencies {
     // Szovegfelismeres (kezzel irt raklapszam) - a modell az appban van, internet nelkul is mukodik
     implementation 'com.google.mlkit:text-recognition:16.0.1'
     implementation 'androidx.core:core:1.12.0'
+    // A kulonbozo Kotlin-konyvtar verziok osszehangolasa (kulonben "Duplicate class kotlin..." hiba)
+    implementation platform('org.jetbrains.kotlin:kotlin-bom:1.8.22')
 }
