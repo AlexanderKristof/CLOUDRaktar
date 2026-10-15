@@ -733,6 +733,11 @@ def _norm_pallet(v):
     return re.sub(r"\s+", "", v)
 
 
+def _pallet_tokens(v):
+    """Egy raklap-cellaban tobb raklap is lehet: "493 494" = a 493-as ES a 494-es raklapon is van belole."""
+    return [t for t in re.split(r"[\s,;/+]+", safe_str(v).upper()) if t]
+
+
 @app.route('/pda/change', methods=['POST'])
 def pda_change():
     """Termek-modositas a PDA-rol. Az asztali program veszi at es hajtja vegre (o irja a Google Sheets-be is),
@@ -1175,7 +1180,7 @@ def pda_pallet():
                     "WHERE C IS NOT NULL AND TRIM(C) != ''")
         items = [_pda_row(r) for r in cur.fetchall()]
         conn.close()
-        items = [it for it in items if _norm_pallet(it["L"]) == pallet]
+        items = [it for it in items if pallet in _pallet_tokens(it["L"]) or _norm_pallet(it["L"]) == pallet]
         items.sort(key=lambda it: it["A"])
         return jsonify({"status": "ok", "raklap": pallet, "items": items}), 200
     except Exception as e:
