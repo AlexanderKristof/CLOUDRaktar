@@ -650,7 +650,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.12-vonalkod"
+APP_VERSION = "v2026.10.15-pda"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -3543,6 +3543,7 @@ class RaktarApp(QMainWindow):
     process_log_signal = pyqtSignal(str)
     print_result_signal = pyqtSignal(str)   # nyomtatás eredménye (háttérszálból) -> toast
     pda_sales_signal = pyqtSignal(list)     # a Zebra PDA-n rögzített, ez a gép által átvett eladások -> fő szál
+    pda_poll_status_signal = pyqtSignal(str, bool, bool)   # PDA-átvétel állapota: (szöveg, hiba?, kézi indítás?)
 
     def __init__(self):
         super().__init__()
@@ -3636,6 +3637,8 @@ class RaktarApp(QMainWindow):
 
         # --- ZEBRA PDA ELADÁSOK ÁTVÉTELE (20 mp-enként) ---
         self.pda_sales_signal.connect(self.apply_pda_sales)
+        self.pda_poll_status_signal.connect(self.on_pda_poll_status)
+        self._pda_last_status = None
         self._pda_poll_busy = False
         self.pda_poll_timer = QTimer(self)
         self.pda_poll_timer.timeout.connect(self.poll_pda_sales)
@@ -5777,7 +5780,7 @@ class RaktarApp(QMainWindow):
                       elotte, elotte, sale_src)
         return stock_msg
 
-    def poll_pda_sales(self):
+    def poll_pda_sales(self, manual=False):
         """A PDA-n (Zebra TC27) rögzített eladásokat a VPS-ről átveszi (háttérszálon). Egy eladást csak
         egy gép vehet át, így a készlet akkor sem vonódik le kétszer, ha több gépen fut a program."""
         if self._pda_poll_busy:
@@ -5785,24 +5788,51 @@ class RaktarApp(QMainWindow):
         self._pda_poll_busy = True
 
         def job():
-            claimed = []
+            claimed, waiting = [], 0
+            status, is_error = "", False
             try:
-                res = vps_request("GET", f"{VPS_URL}/pda/sales", params={"pending": 1, "limit": 50}, timeout=5)
+                res = vps_request("GET", f"{VPS_URL}/pda/sales", params={"pending": 1, "limit": 50}, timeout=8)
                 if res.status_code == 200:
+                    sales = res.json().get("sales", [])
+                    waiting = len(sales)
                     gep = socket.gethostname() or "asztali gep"
-                    for sale in res.json().get("sales", []):
+                    for sale in sales:
                         r = vps_request("POST", f"{VPS_URL}/pda/sales/claim",
-                                          json={"eladas_id": sale.get("eladas_id"), "gep": gep}, timeout=5)
+                                        json={"eladas_id": sale.get("eladas_id"), "gep": gep}, timeout=8)
                         if r.status_code == 200:
                             claimed.append(sale)
-            except Exception:
-                pass
+                    status = (f"📱 PDA eladások: {len(claimed)} átvéve" if waiting
+                              else "📱 PDA eladások: nincs új átvennivaló")
+                elif res.status_code == 401:
+                    status, is_error = (f"🔑 PDA eladások: a szerver nem fogadja el a jelszót - nézd meg az "
+                                        f"api_token.txt-t ({API_TOKEN_FILE})" if API_TOKEN else
+                                        f"🔑 PDA eladások: a szerver jelszót kér, de nincs api_token.txt ({API_TOKEN_FILE})"), True
+                elif res.status_code == 404:
+                    status, is_error = ("❌ PDA eladások: a VPS-en még a régi server_api.py fut "
+                                        "(nincs /pda/sales) - töltsd fel az újat és indítsd újra a szervert"), True
+                else:
+                    status, is_error = f"❌ PDA eladások: szerver hiba ({res.status_code})", True
+            except Exception as e:
+                status, is_error = f"❌ PDA eladások: nem érem el a szervert ({e.__class__.__name__})", True
             finally:
                 self._pda_poll_busy = False
+            self.pda_poll_status_signal.emit(status, is_error, manual)
             if claimed:
                 self.pda_sales_signal.emit(claimed)
 
         threading.Thread(target=job, daemon=True).start()
+
+    def on_pda_poll_status(self, text, is_error, manual):
+        """A PDA-átvétel állapota a Folyamat naplóba (csak ha változott) és kézi indításnál felugró üzenetként."""
+        if manual:
+            self.trigger_toast(text)
+        if text != self._pda_last_status:
+            self._pda_last_status = text
+            if is_error or manual:
+                self.append_process_log(text, "#ff5252" if is_error else "#00e676")
+        if hasattr(self, "lbl_pda_status"):
+            self.lbl_pda_status.setText(f"{text}  ({datetime.datetime.now().strftime('%H:%M:%S')})")
+            self.lbl_pda_status.setStyleSheet(f"color: {'#ff5252' if is_error else '#aaa'}; padding: 2px 4px;")
 
     def apply_pda_sales(self, sales):
         """Az átvett PDA-eladások rögzítése ezen a gépen: Eladottak + Sheets eladási lap, készlet levonása."""
@@ -5900,6 +5930,13 @@ class RaktarApp(QMainWindow):
         btn_sync.clicked.connect(lambda: (sync_sales_async(), self.trigger_toast("☁️ Eladások feltöltése elindítva...")))
         bar.addWidget(btn_sync)
 
+        btn_pda = QPushButton("📱 PDA eladások átvétele most")
+        btn_pda.setStyleSheet("background-color: #29b6f6; color: black; font-weight: bold;")
+        btn_pda.setToolTip("A Zebra PDA-n rögzített eladásokat azonnal lekéri a szerverről\n"
+                           "(magától is megteszi 20 másodpercenként).")
+        btn_pda.clicked.connect(lambda: self.poll_pda_sales(manual=True))
+        bar.addWidget(btn_pda)
+
         btn_del = QPushButton("🗑️ Kijelölt eladás törlése")
         btn_del.setStyleSheet("background-color: #ff5252; color: white; font-weight: bold;")
         btn_del.clicked.connect(self.delete_selected_sale)
@@ -5909,6 +5946,11 @@ class RaktarApp(QMainWindow):
         self.sold_status_lbl = QLabel("")
         self.sold_status_lbl.setStyleSheet("color: #ffb74d; font-weight: bold;")
         layout.addWidget(self.sold_status_lbl)
+
+        # Zebra PDA: az utolsó átvételi próbálkozás eredménye (hiba esetén pirosan)
+        self.lbl_pda_status = QLabel(self._pda_last_status or "📱 PDA eladások: még nem volt ellenőrzés")
+        self.lbl_pda_status.setStyleSheet("color: #aaa; padding: 2px 4px;")
+        layout.addWidget(self.lbl_pda_status)
 
         self.sold_table = QTableWidget()
         self.sold_table.setColumnCount(len(SALES_COLUMNS) + 1)
