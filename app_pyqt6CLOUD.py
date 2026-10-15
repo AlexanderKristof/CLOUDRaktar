@@ -239,6 +239,9 @@ SALES_SHEETS = {
 }
 # A Zebra PDA-n rögzített eladásokat a program ilyen gyakran nézi meg a VPS-en (és veszi át)
 PDA_SALES_POLL_MS = 20000
+# Hibakódok, amiket az asztali program a PDA-nak visszaküld (a PDA Napló / Folyamat napló fülén látszanak):
+#   A-21  a termék nincs meg ezen a gépen        A-22  helyi adatbázis / mentési hiba
+#   A-23  ismeretlen platform / mező             A-24  váratlan hiba az átvétel közben
 # Az eladási munkalapok oszlopai (sorrendben) - (belső kulcs, fejléc)
 SALES_COLUMNS = [
     ("eladas_id", "Eladás ID"), ("datum", "Eladás dátuma"), ("platform", "Platform"),
@@ -459,6 +462,19 @@ def vps_request(method, url, **kwargs):
     if API_TOKEN:
         headers["X-Raktar-Token"] = API_TOKEN
     return requests.request(method, url, headers=headers, **kwargs)
+
+
+def report_pda_result(tipus, rid, ok, uzenet, kod=""):
+    """A PDA-ról jött eladás / módosítás eredményének visszaküldése a szerverre (háttérszálon).
+    A PDA a Napló / Folyamat napló fülön mutatja (hiba esetén a kóddal, pl. A-21)."""
+    def _send():
+        try:
+            vps_request("POST", f"{VPS_URL}/pda/result", timeout=8,
+                        json={"tipus": tipus, "id": rid, "ok": bool(ok), "uzenet": uzenet, "kod": kod,
+                              "gep": socket.gethostname() or "asztali gep"})
+        except Exception as e:
+            print(f"[PDA] Eredmény visszaküldési hiba ({rid}): {e}")
+    threading.Thread(target=_send, daemon=True).start()
 
 
 def send_to_vps_async(endpoint, data):
@@ -3543,6 +3559,7 @@ class RaktarApp(QMainWindow):
     process_log_signal = pyqtSignal(str)
     print_result_signal = pyqtSignal(str)   # nyomtatás eredménye (háttérszálból) -> toast
     pda_sales_signal = pyqtSignal(list)     # a Zebra PDA-n rögzített, ez a gép által átvett eladások -> fő szál
+    pda_changes_signal = pyqtSignal(list)   # a PDA-n kért módosítások (pl. áthelyezés) -> fő szál
     pda_poll_status_signal = pyqtSignal(str, bool, bool)   # PDA-átvétel állapota: (szöveg, hiba?, kézi indítás?)
 
     def __init__(self):
@@ -3637,6 +3654,7 @@ class RaktarApp(QMainWindow):
 
         # --- ZEBRA PDA ELADÁSOK ÁTVÉTELE (20 mp-enként) ---
         self.pda_sales_signal.connect(self.apply_pda_sales)
+        self.pda_changes_signal.connect(self.apply_pda_changes)
         self.pda_poll_status_signal.connect(self.on_pda_poll_status)
         self._pda_last_status = None
         self._pda_poll_busy = False
@@ -5788,7 +5806,7 @@ class RaktarApp(QMainWindow):
         self._pda_poll_busy = True
 
         def job():
-            claimed, waiting = [], 0
+            claimed, claimed_changes, waiting = [], [], 0
             status, is_error = "", False
             try:
                 res = vps_request("GET", f"{VPS_URL}/pda/sales", params={"pending": 1, "limit": 50}, timeout=8)
@@ -5801,8 +5819,18 @@ class RaktarApp(QMainWindow):
                                         json={"eladas_id": sale.get("eladas_id"), "gep": gep}, timeout=8)
                         if r.status_code == 200:
                             claimed.append(sale)
-                    status = (f"📱 PDA eladások: {len(claimed)} átvéve" if waiting
-                              else "📱 PDA eladások: nincs új átvennivaló")
+                    # Áthelyezések / módosítások
+                    res2 = vps_request("GET", f"{VPS_URL}/pda/changes", params={"pending": 1, "limit": 50}, timeout=8)
+                    if res2.status_code == 200:
+                        changes = res2.json().get("changes", [])
+                        waiting += len(changes)
+                        for ch in changes:
+                            r = vps_request("POST", f"{VPS_URL}/pda/changes/claim",
+                                            json={"valtozas_id": ch.get("valtozas_id"), "gep": gep}, timeout=8)
+                            if r.status_code == 200:
+                                claimed_changes.append(ch)
+                    status = (f"📱 PDA: {len(claimed)} eladás, {len(claimed_changes)} áthelyezés átvéve" if waiting
+                              else "📱 PDA: nincs új átvennivaló (eladás / áthelyezés)")
                 elif res.status_code == 401:
                     status, is_error = (f"🔑 PDA eladások: a szerver nem fogadja el a jelszót - nézd meg az "
                                         f"api_token.txt-t ({API_TOKEN_FILE})" if API_TOKEN else
@@ -5819,6 +5847,8 @@ class RaktarApp(QMainWindow):
             self.pda_poll_status_signal.emit(status, is_error, manual)
             if claimed:
                 self.pda_sales_signal.emit(claimed)
+            if claimed_changes:
+                self.pda_changes_signal.emit(claimed_changes)
 
         threading.Thread(target=job, daemon=True).start()
 
@@ -5840,6 +5870,7 @@ class RaktarApp(QMainWindow):
             try:
                 platform = str(sale.get("platform", "")).strip().upper()
                 if platform not in SALES_SHEETS:
+                    report_pda_result("eladas", sale.get("eladas_id"), False, f"Ismeretlen platform: {platform}", "A-23")
                     continue
                 code = norm_code(sale.get("A"))
                 local = get_row_snapshot(code)
@@ -5864,14 +5895,71 @@ class RaktarApp(QMainWindow):
                 stock_msg = self.store_sale(platform, product, stock, v, eladas_id=sale.get("eladas_id"),
                                             sale_src=f"📱 Zebra PDA ({eszkoz}) - 💰 {cim} gomb")
                 if stock_msg is None:
+                    report_pda_result("eladas", sale.get("eladas_id"), False,
+                                      "Az eladást nem sikerült elmenteni a gépen (helyi adatbázis hiba)", "A-22")
                     continue
+                if stock is None and v["reduce_stock"]:
+                    report_pda_result("eladas", sale.get("eladas_id"), False,
+                                      "Az eladás rögzítve, de a készlet NEM változott: a termék nincs meg ezen a gépen", "A-21")
+                else:
+                    report_pda_result("eladas", sale.get("eladas_id"), True,
+                                      f"Rögzítve ({cim}, {darab} db){stock_msg}")
                 self.trigger_toast(f"📱 PDA eladás: {code} ({cim}, {darab} db){stock_msg}")
                 self.append_process_log(f"📱 PDA eladás átvéve: {code} - {cim} - {darab} db{stock_msg}", "#00e676")
             except Exception as e:
-                self.append_process_log(f"❌ PDA eladás átvételi hiba ({sale.get('eladas_id')}): {e}", "#ff5252")
+                report_pda_result("eladas", sale.get("eladas_id"), False, f"Váratlan hiba: {e}", "A-24")
+                self.append_process_log(f"❌ [A-24] PDA eladás átvételi hiba ({sale.get('eladas_id')}): {e}", "#ff5252")
         sync_sales_async()
         if hasattr(self, "refresh_sold_table"):
             self.refresh_sold_table()
+
+    def apply_pda_changes(self, changes):
+        """A PDA-n kért módosítások (áthelyezés = új raklap) végrehajtása ezen a gépen: helyi adatbázis,
+        Napló, majd az outboxon át a VPS-re és a Google Sheets-be. Az eredményt visszaküldi a PDA-nak."""
+        done = 0
+        for ch in changes:
+            vid = ch.get("valtozas_id")
+            try:
+                code = norm_code(ch.get("A"))
+                mezo = str(ch.get("mezo", "")).strip().upper()
+                uj = safe_str(ch.get("uj"))
+                eszkoz = safe_str(ch.get("eszkoz")) or "PDA"
+                if mezo not in ("L",):
+                    report_pda_result("valtozas", vid, False, f"Ez a mező nem módosítható a PDA-ról: {mezo}", "A-23")
+                    continue
+                elotte = get_row_snapshot(code)
+                if not elotte:
+                    report_pda_result("valtozas", vid, False, f"{code} nincs meg ezen a gépen - nem módosítottam", "A-21")
+                    self.append_process_log(f"❌ [A-21] PDA áthelyezés: {code} nincs meg ezen a gépen", "#ff5252")
+                    continue
+                regi_gepen = safe_str(elotte.get(mezo))
+                try:
+                    conn = get_db_connection()
+                    conn.execute(f"UPDATE termekek SET {mezo} = ? WHERE UPPER(TRIM(A)) = ? OR UPPER(TRIM(B)) = ?",
+                                 (uj, code, code))
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    report_pda_result("valtozas", vid, False, f"Helyi adatbázis hiba: {e}", "A-22")
+                    self.append_process_log(f"❌ [A-22] PDA áthelyezés ({code}): {e}", "#ff5252")
+                    continue
+                utana = get_row_snapshot(code)
+                megj = ""
+                if regi_gepen != safe_str(ch.get("regi")):
+                    megj = f" (figyelem: a gépen addig '{regi_gepen}' volt, a PDA '{safe_str(ch.get('regi'))}'-t látott)"
+                log_event(code, "ÁTHELYEZÉS (PDA)", f"Raklap: '{regi_gepen}' → '{uj}'{megj}", elotte, utana,
+                          f"📱 Zebra PDA ({eszkoz}) - Áthelyezés fül")
+                enqueue_row_from_db(code, force=True)
+                report_pda_result("valtozas", vid, True, f"Raklap: {regi_gepen or '-'} → {uj}{megj}")
+                self.append_process_log(f"📱 PDA áthelyezés: {code} raklap {regi_gepen or '-'} → {uj}", "#00e676")
+                done += 1
+            except Exception as e:
+                report_pda_result("valtozas", vid, False, f"Váratlan hiba: {e}", "A-24")
+                self.append_process_log(f"❌ [A-24] PDA áthelyezés átvételi hiba ({vid}): {e}", "#ff5252")
+        if done:
+            flush_outbox_async()
+            self.trigger_toast(f"📱 PDA: {done} áthelyezés végrehajtva")
+            self.silent_update_excel_table()
 
     def record_sale(self, platform, product, stock, v):
         code = product.get("A", "").strip().upper()
