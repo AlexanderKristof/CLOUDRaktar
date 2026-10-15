@@ -104,6 +104,9 @@
   .askbox .btn { margin-top:10px; }
   .btn.red { background:var(--err); color:#fff; }
   .pallets { font-size:13px; color:#ffcc80; }
+  .ocrbtn { display:none; }
+  .has-ocr .ocrbtn { display:inline-block; }
+  .ocrtxt { font-family:monospace; font-size:13px; background:#0b0b0b; border:1px solid var(--line); border-radius:6px; padding:6px; white-space:pre-wrap; max-height:120px; overflow:auto; }
   .cnt { display:flex; align-items:center; gap:6px; margin-top:6px; flex-wrap:wrap; }
   .cnt b.n { font-size:22px; min-width:34px; text-align:center; }
   .cnt button { border:none; border-radius:8px; background:#37474f; color:#fff; font-weight:bold; font-size:18px; padding:6px 14px; }
@@ -180,6 +183,7 @@
     <div id="move-target" class="hidden">
       <label class="f">2. &#xDA;j raklap (csippant&#xE1;s vagy be&#xED;r&#xE1;s)</label>
       <div class="frow"><input id="move-pallet" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="pl. 574">
+        <button class="later ocrbtn" style="background:var(--blue)" type="button" onclick="startOcr('move')">&#x1F4F7;</button>
         <button class="later" style="background:var(--ok)" type="button" onclick="submitMove()">&#x27A1;&#xFE0F; &#xC1;thelyez</button></div>
     </div>
     <label class="chk"><input type="checkbox" id="move-keep">
@@ -189,11 +193,12 @@
   <!-- ================= LELT&#xC1;R ================= -->
   <section id="page-inv" class="hidden">
     <div id="inv-start">
-      <div class="msg info">Csippantsd vagy &#xED;rd be a <b>raklap</b> sz&#xE1;m&#xE1;t, azt&#xE1;n csippantsd v&#xE9;gig a rajta l&#xE9;v&#x151; term&#xE9;keket &#x2013;
+      <div class="msg info"><span class="ocrbtn">&#x1F4F7; K&#xE9;zzel &#xED;rt raklapsz&#xE1;mn&#xE1;l f&#xE9;nyk&#xE9;pezd le a pap&#xED;rt. </span>Csippantsd vagy &#xED;rd be a <b>raklap</b> sz&#xE1;m&#xE1;t, azt&#xE1;n csippantsd v&#xE9;gig a rajta l&#xE9;v&#x151; term&#xE9;keket &#x2013;
         <b>minden darabot</b> (a program sz&#xE1;molja; elt&#xE9;r&#xE9;sn&#xE9;l r&#xE1;k&#xE9;rdez, hogy &#xE1;t&#xED;rja-e a DB-t).
         A v&#xE9;g&#xE9;n ki&#xED;rja, mi <b>hi&#xE1;nyzik</b> &#xE9;s mi van ott <b>m&#xE1;s raklapr&#xF3;l</b>.</div>
       <form class="scan" onsubmit="event.preventDefault(); startInventory(invPalletInput.value);">
         <input id="inv-pallet" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Raklap (pl. 573)">
+        <button type="button" class="ocrbtn" onclick="startOcr('inv')">&#x1F4F7;</button>
         <button type="submit">&#x25B6;&#xFE0F;</button>
       </form>
     </div>
@@ -354,7 +359,7 @@
 </div>
 
 <script>
-var VERSION = "2026.10.16-b";
+var VERSION = "2026.10.16-c";
 var PLATFORMS = {
   EBAY_KIVULI: { cim: "eBay-en k\u00edv\u00fcli elad\u00e1s", gomb: "eBay-en k\u00edv\u00fcli", cls: "b-kivul" },
   EBAY:        { cim: "eBay elad\u00e1s",           gomb: "eBay",           cls: "b-ebay" },
@@ -364,6 +369,7 @@ var PLATFORMS = {
 var ERR = {
   "P-01": ["Nincs kapcsolat a szerverrel", "Van Wi-Fi / mobilnet? Fut a szerver? (VPS: sudo systemctl status raktarapp)"],
   "P-02": ["Id\u0151t\u00fall\u00e9p\u00e9s \u2013 a szerver nem v\u00e1laszolt id\u0151ben", "Gyenge Wi-Fi, vagy a szerver t\u00falterhelt. Pr\u00f3b\u00e1ld \u00fajra."],
+  "P-04": ["Kamera / sz\u00f6vegfelismer\u00e9s hiba", "Pr\u00f3b\u00e1ld \u00fajra jobb f\u00e9nyben, k\u00f6zelebbr\u0151l \u2013 vagy \u00edrd be k\u00e9zzel a sz\u00e1mot."],
   "P-03": ["\u00c9rthetetlen v\u00e1lasz a szervert\u0151l", "Val\u00f3sz\u00edn\u0171leg r\u00e9gi server_api.py fut a VPS-en \u2013 t\u00f6ltsd fel az \u00fajat \u00e9s ind\u00edtsd \u00fajra."],
   "S-400": ["Hib\u00e1s vagy hi\u00e1nyz\u00f3 adat", "N\u00e9zd meg a be\u00edrt \u00e9rt\u00e9ket (pl. darabsz\u00e1m, raklap)."],
   "S-401": ["Hib\u00e1s vagy hi\u00e1nyz\u00f3 jelsz\u00f3", "Folyamat f\u00fcl \u2192 Be\u00e1ll\u00edt\u00e1sok \u2192 Szerver jelsz\u00f3 (a VPS-en: /opt/raktarapp/api_token.txt)."],
@@ -550,6 +556,59 @@ function palletHtml(L) {
   var t = palletTokens(L);
   return t.length > 1 ? esc(t.join(" + ")) + ' <span class="pallets">(' + t.length + " raklapon)</span>" : esc(L || "\u2014");
 }
+
+// ================= KAMERA: k\u00e9zzel \u00edrt raklapsz\u00e1m felismer\u00e9se =================
+// Az Android app lef\u00e9nyk\u00e9pezi a pap\u00edrt, \u00e9s a felismert sz\u00f6veget ide k\u00fcldi (window.onOcr).
+// A sz\u00e1mot SOHA nem haszn\u00e1lja k\u00e9rd\u00e9s n\u00e9lk\u00fcl: mindig megmutatja, \u00e9s r\u00e1k\u00e9rdez.
+var ocrTarget = "";
+function hasOcr() { try { return !!(window.RaktarApp && RaktarApp.hasOcr && RaktarApp.hasOcr()); } catch (e) { return false; } }
+if (hasOcr()) document.body.classList.add("has-ocr");
+function startOcr(target) {
+  if (!hasOcr()) { infoBox("\ud83d\udcf7 Nem el\u00e9rhet\u0151", "Ehhez az \u00faj PDA app kell (friss\u00edtsd az APK-t)."); return; }
+  ocrTarget = target;
+  proc("info", "", "Kamera: raklapsz\u00e1m f\u00e9nyk\u00e9pez\u00e9se (" + (target === "inv" ? "lelt\u00e1r" : "\u00e1thelyez\u00e9s") + ")");
+  RaktarApp.ocr();
+}
+function ocrCandidates(text) {
+  // Gyakori f\u00e9lreolvas\u00e1sok a sz\u00e1mokban: O->0, I/l/|->1, S->5, B->8, Z->2
+  var fix = function (t) { return t.replace(/[Oo]/g, "0").replace(/[Il|!]/g, "1").replace(/[Ss]/g, "5").replace(/B/g, "8").replace(/[Zz]/g, "2"); };
+  var out = [], lines = String(text || "").split(/\n+/);
+  lines.forEach(function (line) {
+    var nums = [];
+    line.split(/[\s,;\/+]+/).forEach(function (tok) {
+      var t = tok.replace(/[^0-9A-Za-z|!]/g, "");
+      if (!t) return;
+      var f = fix(t);
+      if (/^\d{1,6}$/.test(f) && (/\d/.test(t))) nums.push(f);
+    });
+    nums.forEach(function (n) { if (out.indexOf(n) < 0) out.push(n); });
+    if (nums.length > 1 && ocrTarget === "move") { var j = nums.join(" "); if (out.indexOf(j) < 0) out.push(j); }
+  });
+  return out.slice(0, 6);
+}
+window.onOcr = function (r) {
+  if (!r || !r.ok) {
+    proc("hiba", "P-04", "Kamera / sz\u00f6vegfelismer\u00e9s: " + ((r && r.error) || "ismeretlen hiba"));
+    if (r && r.error === "Nem keszult fenykep") return;
+    infoBox("\ud83d\udcf7 Nem siker\u00fclt", esc((r && r.error) || "ismeretlen hiba")); return;
+  }
+  var c = ocrCandidates(r.text);
+  proc("info", "", "Kamera: felismert sz\u00f6veg: " + String(r.text || "").replace(/\n/g, " | ") + " \u2192 " + (c.join(", ") || "nincs sz\u00e1m"));
+  var btns = c.map(function (n) { return { label: "\u2705 " + esc(n), value: n, cls: "green" }; });
+  btns.push({ label: "\ud83d\udcf7 \u00dajra f\u00e9nyk\u00e9pezem", value: "__again", cls: "orange" });
+  btns.push({ label: "\u270f\ufe0f K\u00e9zzel \u00edrom be", value: "__manual", cls: "grey" });
+  btns.push({ label: "\u2716 M\u00e9gse", value: false, cls: "grey" });
+  ask("\ud83d\udcf7 Melyik a raklapsz\u00e1m?", (c.length ? "Ezt olvastam le a f\u00e9nyk\u00e9pr\u0151l. V\u00e1laszd ki a j\u00f3t \u2013 ha egyik sem az, fot\u00f3zd \u00fajra vagy \u00edrd be k\u00e9zzel." :
+        "\u26a0\ufe0f Nem tal\u00e1ltam sz\u00e1mot a f\u00e9nyk\u00e9pen. Fot\u00f3zd k\u00f6zelebbr\u0151l, j\u00f3 f\u00e9nyben \u2013 vagy \u00edrd be k\u00e9zzel.") +
+      '<div class="small" style="margin-top:8px">Felismert sz\u00f6veg:</div><div class="ocrtxt">' + esc(r.text || "(semmi)") + "</div>", btns).then(function (v) {
+    if (!v) { focusScan(); return; }
+    if (v === "__again") { startOcr(ocrTarget); return; }
+    var field = ocrTarget === "inv" ? invPalletInput : $("move-pallet");
+    if (v === "__manual") { field.value = ""; field.focus(); return; }
+    field.value = v;
+    if (ocrTarget === "inv") startInventory(v); else submitMove();
+  });
+};
 
 // ================= VISSZAVON\u00c1S (v\u00e9letlen nyom\u00e1s) =================
 // Minden m\u0171velet ut\u00e1n 25 mp-ig alul l\u00e1tszik egy "\u21a9\ufe0f Visszavon\u00e1s" gomb; a Napl\u00f3ban k\u00e9s\u0151bb is visszavonhat\u00f3.
@@ -1000,7 +1059,7 @@ function moveProduct(q) {
 }
 function submitMove() {
   var it = moveItem;
-  var uj = fixScan($("move-pallet").value).toUpperCase().replace(/\s+/g, "");
+  var uj = palletTokens(fixScan($("move-pallet").value)).join(" ");   // "493 494" = k\u00e9t raklap
   if (!it) { focusScan(); return; }
   if (!uj) { $("move-pallet").focus(); return; }
   var t = palletTokens(it.L);

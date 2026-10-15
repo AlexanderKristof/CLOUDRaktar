@@ -7,19 +7,29 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.net.Uri;
+import android.provider.MediaStore;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.KeyEvent;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import androidx.core.content.FileProvider;
+
+import com.google.mlkit.vision.common.InputImage;
+import com.google.mlkit.vision.text.TextRecognition;
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
+
 import org.json.JSONObject;
 
+import java.io.File;
 import java.util.ArrayList;
 
 /**
@@ -33,8 +43,11 @@ public class MainActivity extends Activity {
     static final String SCAN_ACTION = "hu.raktar.pda.SCAN";
     static final String DW_PROFILE = "RaktarPDA";
 
+    static final int REQ_OCR_PHOTO = 41;
+
     private WebView web;
     private SharedPreferences prefs;
+    private File ocrFile;
 
     private final BroadcastReceiver scanReceiver = new BroadcastReceiver() {
         @Override
@@ -58,6 +71,8 @@ public class MainActivity extends Activity {
         s.setDomStorageEnabled(true);
         s.setCacheMode(WebSettings.LOAD_NO_CACHE);
         web.addJavascriptInterface(new Bridge(), "RaktarApp");
+        // A weboldal alert()/confirm() ablakai is megjelenjenek (alapbol a WebView elnyeli oket)
+        web.setWebChromeClient(new WebChromeClient());
         web.setWebViewClient(new WebViewClient() {
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
@@ -99,7 +114,66 @@ public class MainActivity extends Activity {
         return s == null ? "" : s.replace("&", "&amp;").replace("<", "&lt;").replace("'", "&#39;");
     }
 
+    // ---------------- Kamera + szovegfelismeres (kezzel irt raklapszam) ----------------
+    /** Elinditja a kamerat; a fenykep utan a felismert szoveget a weboldal window.onOcr(...) fuggvenye kapja meg. */
+    private void startOcrPhoto() {
+        try {
+            File dir = new File(getCacheDir(), "ocr");
+            dir.mkdirs();
+            ocrFile = new File(dir, "foto.jpg");
+            Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", ocrFile);
+            Intent i = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+            i.putExtra(MediaStore.EXTRA_OUTPUT, uri);
+            i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivityForResult(i, REQ_OCR_PHOTO);
+        } catch (Exception e) {
+            sendOcr(false, "", "A kamera nem indithato: " + e.getMessage());
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_OCR_PHOTO) return;
+        if (resultCode != RESULT_OK || ocrFile == null || !ocrFile.exists()) {
+            sendOcr(false, "", "Nem keszult fenykep");
+            return;
+        }
+        try {
+            InputImage img = InputImage.fromFilePath(this, Uri.fromFile(ocrFile));
+            TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS).process(img)
+                    .addOnSuccessListener(t -> sendOcr(true, t.getText(), ""))
+                    .addOnFailureListener(e -> sendOcr(false, "", "Szovegfelismeresi hiba: " + e.getMessage()));
+        } catch (Exception e) {
+            sendOcr(false, "", "A fenykep nem olvashato: " + e.getMessage());
+        }
+    }
+
+    private void sendOcr(boolean ok, String text, String error) {
+        if (web == null) return;
+        try {
+            JSONObject o = new JSONObject();
+            o.put("ok", ok);
+            o.put("text", text == null ? "" : text);
+            o.put("error", error == null ? "" : error);
+            final String js = "window.onOcr && window.onOcr(" + o + ")";
+            runOnUiThread(() -> web.evaluateJavascript(js, null));
+        } catch (Exception ignored) {
+        }
+    }
+
     class Bridge {
+        /** Fenykep + szovegfelismeres (kezzel irt raklapszam a papiron). */
+        @JavascriptInterface
+        public void ocr() {
+            runOnUiThread(MainActivity.this::startOcrPhoto);
+        }
+
+        @JavascriptInterface
+        public boolean hasOcr() {
+            return true;
+        }
+
         /** A szerver jelszava (token) a PDA-n marad, nem a kodban. */
         @JavascriptInterface
         public String getToken() {

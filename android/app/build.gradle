@@ -40,3 +40,9 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 }
+
+dependencies {
+    // Szovegfelismeres (kezzel irt raklapszam) - a modell az appban van, internet nelkul is mukodik
+    implementation 'com.google.mlkit:text-recognition:16.0.1'
+    implementation 'androidx.core:core:1.12.0'
+}
