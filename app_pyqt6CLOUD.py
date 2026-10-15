@@ -6013,9 +6013,11 @@ class RaktarApp(QMainWindow):
         megj = (f" (figyelem: a gépen közben más volt itt: "
                 f"{', '.join(f'{k}={safe_str(elotte.get(k))!r}' for k in elteres)})") if elteres else ""
         athelyezes = list(valt) == ["L"]
-        log_event(code, "ÁTHELYEZÉS (PDA)" if athelyezes else "MÓDOSÍTÁS (PDA)",
+        visszavonas = str(ch.get("tipus", "")).upper() == "VISSZAVONAS"
+        log_event(code, "VISSZAVONÁS (PDA)" if visszavonas else ("ÁTHELYEZÉS (PDA)" if athelyezes else "MÓDOSÍTÁS (PDA)"),
                   describe_changes(elotte, utana) + megj, elotte, utana,
-                  f"📱 Zebra PDA ({eszkoz}) - {'Áthelyezés' if athelyezes else 'Szerkesztés'}")
+                  f"📱 Zebra PDA ({eszkoz}) - " + ("↩️ Visszavonás (véletlen nyomás javítása)" if visszavonas
+                                                   else ('Áthelyezés' if athelyezes else 'Szerkesztés')))
         enqueue_row_from_db(code, force=True)
         return True, " | ".join(f"{COLUMN_LABELS.get(k, k)}: {safe_str(elotte.get(k)) or '-'} → {v or '-'}"
                                 for k, v in valt.items()) + megj, ""

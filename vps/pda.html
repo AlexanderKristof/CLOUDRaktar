@@ -75,6 +75,13 @@
   .fin.changed { border-color:var(--warn); }
   .hrow { border-left:3px solid var(--blue); padding:6px 8px; margin:6px 0; background:var(--card); border-radius:4px; font-size:13px; }
   .hrow.pda { border-left-color:var(--warn); }
+  .undobar { position:fixed; left:8px; right:8px; bottom:8px; z-index:30; background:#263238; border:2px solid var(--warn);
+             border-radius:10px; padding:10px; display:flex; align-items:center; gap:8px; box-shadow:0 4px 16px #000a; }
+  .undobar.hidden { display:none; }
+  .undobar span { flex:1; font-size:14px; }
+  .undobar button { border:none; border-radius:8px; background:var(--warn); color:#000; font-weight:bold; padding:12px 10px; font-size:15px; white-space:nowrap; }
+  .undobar small { color:var(--dim); font-size:12px; min-width:22px; text-align:right; }
+  body { padding-bottom:84px; }
   .settings input { font-size:15px; padding:8px; border-radius:6px; border:1px solid #444; background:#2b2b2b; color:#fff; width:100%; }
 </style>
 </head>
@@ -146,6 +153,7 @@
       </div>
       <div id="inv-status"></div>
       <div id="inv-list"></div>
+      <button class="btn orange" type="button" onclick="undoInvScan()">&#x21A9;&#xFE0F; Utols&#xF3; csippant&#xE1;s visszavon&#xE1;sa</button>
       <button class="btn green" type="button" onclick="finishInventory()">&#x2705; Lelt&#xE1;r lez&#xE1;r&#xE1;sa</button>
       <button class="btn grey" type="button" onclick="cancelInventory()">&#x2716; Lelt&#xE1;r elvet&#xE9;se</button>
     </div>
@@ -187,6 +195,13 @@
     </details>
   </section>
 </main>
+
+<!-- ================= VISSZAVON&#xC1;S S&#xC1;V (v&#xE9;letlen nyom&#xE1;s) ================= -->
+<div id="undo" class="undobar hidden">
+  <span id="undo-txt"></span>
+  <button type="button" onclick="doUndo()">&#x21A9;&#xFE0F; Visszavon&#xE1;s</button>
+  <small id="undo-sec"></small>
+</div>
 
 <!-- ================= JELSZ&#xD3; ================= -->
 <div id="token" class="overlay">
@@ -261,7 +276,7 @@
 </div>
 
 <script>
-var VERSION = "2026.10.15-c";
+var VERSION = "2026.10.15-d";
 var PLATFORMS = {
   EBAY_KIVULI: { cim: "eBay-en k\u00edv\u00fcli elad\u00e1s", gomb: "eBay-en k\u00edv\u00fcli", cls: "b-kivul" },
   EBAY:        { cim: "eBay elad\u00e1s",           gomb: "eBay",           cls: "b-ebay" },
@@ -414,6 +429,44 @@ function activeInput() {
 }
 function focusScan() { var el = activeInput(); if (el && !overlayOpen()) { el.focus(); el.select(); } }
 
+// ================= VISSZAVON\u00c1S (v\u00e9letlen nyom\u00e1s) =================
+// Minden m\u0171velet ut\u00e1n 25 mp-ig alul l\u00e1tszik egy "\u21a9\ufe0f Visszavon\u00e1s" gomb; a Napl\u00f3ban k\u00e9s\u0151bb is visszavonhat\u00f3.
+var undoFn = null, undoTimer = null, undoLeft = 0;
+function showUndo(text, fn) {
+  undoFn = fn; undoLeft = 25;
+  $("undo-txt").innerHTML = text;
+  $("undo-sec").textContent = undoLeft + "s";
+  $("undo").classList.remove("hidden");
+  clearInterval(undoTimer);
+  undoTimer = setInterval(function () {
+    undoLeft--; $("undo-sec").textContent = undoLeft + "s";
+    if (undoLeft <= 0) hideUndo();
+  }, 1000);
+}
+function hideUndo() { clearInterval(undoTimer); undoFn = null; $("undo").classList.add("hidden"); }
+function doUndo() { var f = undoFn; hideUndo(); if (f) f(); }
+function undoDone(msg, cls) {
+  var box = activeTab === "move" ? "move-status" : activeTab === "inv" ? "inv-status" : "status";
+  if ($(box)) msgTo(box, msg, cls || "info");
+  if (activeTab === "log") loadLog();
+  if (activeTab !== "sell" && activeTab !== "move" && activeTab !== "inv") alert(msg.replace(/<[^>]+>/g, ""));
+  focusScan();
+}
+function undoChange(vid, label) {
+  return api("POST", "/pda/change/cancel", { valtozas_id: vid, eszkoz: deviceName() }, "Visszavon\u00e1s (" + label + ")").then(function (js) {
+    undoDone(js.mod === "helyben" ? "\u21a9\ufe0f Visszavonva: <b>" + esc(label) + "</b> (a g\u00e9p m\u00e9g nem hajtotta v\u00e9gre \u2013 semmi nem v\u00e1ltozott)."
+                                  : "\u21a9\ufe0f Visszavon\u00e1s elk\u00fcldve: <b>" + esc(label) + "</b> \u2013 az asztali program vissza\u00e1ll\u00edtja a r\u00e9gi \u00e9rt\u00e9ket.", "ok");
+    beep(true);
+  }).catch(function (e) { undoDone("\u274c Visszavon\u00e1s nem siker\u00fclt: " + esc(errText(e)), "err"); beep(false); });
+}
+function undoSale(eid, label) {
+  return api("POST", "/pda/sale/cancel", { eladas_id: eid, keszlet_vissza: true, eszkoz: deviceName() }, "Elad\u00e1s visszavon\u00e1sa (" + label + ")").then(function (js) {
+    undoDone(js.mod === "helyben" ? "\u21a9\ufe0f Elad\u00e1s visszavonva: <b>" + esc(label) + "</b> (a g\u00e9p m\u00e9g nem vette \u00e1t \u2013 semmi nem v\u00e1ltozott)."
+                                  : "\u21a9\ufe0f Elad\u00e1s visszavon\u00e1sa elk\u00fcldve: <b>" + esc(label) + "</b> \u2013 a g\u00e9p t\u00f6rli \u00e9s vissza\u00edrja a k\u00e9szletet.", "ok");
+    beep(true);
+  }).catch(function (e) { undoDone("\u274c Visszavon\u00e1s nem siker\u00fclt: " + esc(errText(e)), "err"); beep(false); });
+}
+
 // ================= ELAD\u00c1S =================
 function doSearch(q) {
   q = fixScan(q);
@@ -493,8 +546,10 @@ function submitSale() {
     vevo: $("s-vevo").value, ar: $("s-ar").value,
     tracking: fixScan($("s-tracking").value), megjegyzes: $("s-megj").value,
     keszlet_levonas: $("s-stock").checked, eszkoz: deviceName()
-  }, "Elad\u00e1s r\u00f6gz\u00edt\u00e9se (" + (it.A || it.B) + ", " + PLATFORMS[platform].cim + ", " + darab + " db)").then(function () {
+  }, "Elad\u00e1s r\u00f6gz\u00edt\u00e9se (" + (it.A || it.B) + ", " + PLATFORMS[platform].cim + ", " + darab + " db)").then(function (js) {
     closeSale();
+    var lbl = (it.A || it.B) + " \u2013 " + PLATFORMS[platform].cim + " \u2013 " + darab + " db";
+    showUndo("\ud83d\udcb0 Eladva: <b>" + esc(lbl) + "</b>", function () { undoSale(js.eladas_id, lbl); });
     $("results").innerHTML = "";
     msgTo("status", "\u2705 <b>" + esc(it.A) + "</b> eladva \u2014 " + esc(PLATFORMS[platform].cim) + " \u2014 " + darab + " db<br>" +
           '<span style="color:#ccc">A k\u00e9szletet az asztali program vonja le \u2013 az eredm\u00e9ny a \ud83d\udcdc Napl\u00f3 f\u00fcl\u00f6n l\u00e1tszik.</span>', "ok");
@@ -548,8 +603,10 @@ function submitEdit() {
   }
   $("e-go").disabled = true;
   api("POST", "/pda/change", { A: it.A, valtozasok: valt, tipus: Object.keys(valt).join() === "L" ? "ATHELYEZES" : "MODOSITAS", eszkoz: deviceName() },
-      "Term\u00e9k szerkeszt\u00e9se (" + it.A + ": " + Object.keys(valt).join(", ") + ")").then(function () {
+      "Term\u00e9k szerkeszt\u00e9se (" + it.A + ": " + Object.keys(valt).join(", ") + ")").then(function (js) {
     closeOverlay("edit");
+    var lbl = it.A + " szerkeszt\u00e9se (" + Object.keys(valt).join(", ") + ")";
+    showUndo("\u270f\ufe0f " + esc(lbl), function () { undoChange(js.valtozas_id, lbl); });
     msgTo("status", "\u2705 <b>" + esc(it.A) + "</b> m\u00f3dos\u00edt\u00e1s elk\u00fcldve (" + n + " mez\u0151).<br><span style='color:#ccc'>Az asztali program hajtja v\u00e9gre \u2013 \ud83d\udcdc Napl\u00f3.</span>", "ok");
     $("results").innerHTML = ""; beep(true);
   }).catch(function (e) { $("e-go").disabled = false; alert("Nem siker\u00fclt:\n" + errText(e) + "\n\n" + ((ERR[e.kod] || [])[1] || "")); });
@@ -598,6 +655,15 @@ function submitSaleEdit() {
   api("POST", "/pda/sale/update", { eladas_id: x.eladas_id, mezok: mezok, eszkoz: deviceName() },
       "Elad\u00e1s jav\u00edt\u00e1sa (" + x.A + ": " + Object.keys(mezok).join(", ") + ")").then(function (js) {
     closeOverlay("sedit");
+    var regi = {}; Object.keys(mezok).forEach(function (k) { regi[k] = String(x[k] || ""); });
+    var lbl = x.A + " elad\u00e1s jav\u00edt\u00e1sa (" + Object.keys(mezok).join(", ") + ")";
+    setTimeout(function () {
+      showUndo("\u270f\ufe0f " + esc(lbl), function () {
+        api("POST", "/pda/sale/update", { eladas_id: x.eladas_id, mezok: regi, eszkoz: deviceName() }, "Visszavon\u00e1s (" + lbl + ")")
+          .then(function () { undoDone("\u21a9\ufe0f Vissza\u00e1ll\u00edtva: " + esc(lbl), "ok"); })
+          .catch(function (e) { undoDone("\u274c Visszavon\u00e1s nem siker\u00fclt: " + esc(errText(e)), "err"); });
+      });
+    }, 50);
     alert(js.mod === "helyben" ? "\u2705 Jav\u00edtva. A g\u00e9p m\u00e9g nem vette \u00e1t az elad\u00e1st \u2013 m\u00e1r a jav\u00edtott adattal fogja."
                                : "\u2705 Elk\u00fcldve. Az asztali program jav\u00edtja (Eladottak + Google t\u00e1bl\u00e1zat" + ("darab" in mezok ? ", k\u00e9szlet" : "") + ").");
     loadLog();
@@ -654,7 +720,9 @@ function submitMove() {
     resetMove(); return;
   }
   api("POST", "/pda/change", { A: it.A, mezo: "L", uj: uj, tipus: "ATHELYEZES", eszkoz: deviceName() },
-      "\u00c1thelyez\u00e9s (" + it.A + ": " + (it.L || "-") + " \u2192 " + uj + ")").then(function () {
+      "\u00c1thelyez\u00e9s (" + it.A + ": " + (it.L || "-") + " \u2192 " + uj + ")").then(function (js) {
+    var lbl = it.A + ": raklap " + (it.L || "\u2014") + " \u2192 " + uj;
+    showUndo("\ud83d\udce6 " + esc(lbl), function () { undoChange(js.valtozas_id, lbl); });
     msgTo("move-status", "\u2705 <b>" + esc(it.A) + "</b>: " + esc(it.L || "\u2014") + " \u2192 <b>" + esc(uj) + "</b><br>" +
           '<span style="color:#ccc">Elk\u00fcldve \u2013 az asztali program hajtja v\u00e9gre (\ud83d\udcdc Napl\u00f3).</span>', "ok");
     beep(true);
@@ -702,7 +770,7 @@ function invScan(code) {
   var it = inv.items.filter(function (x) { return String(x.A).toUpperCase() === code; })[0];
   if (it) {
     if (inv.found[code]) msgTo("inv-status", "\u2139\ufe0f " + esc(code) + " m\u00e1r meg volt jel\u00f6lve.", "info");
-    else { inv.found[code] = true; msgTo("inv-status", "\u2705 " + esc(code) + " \u2013 megvan", "ok"); }
+    else { inv.found[code] = true; invHist("found", code); msgTo("inv-status", "\u2705 " + esc(code) + " \u2013 megvan", "ok"); }
     beep(true); saveInv(); renderInventory(); return;
   }
   if (inv.foreign.some(function (x) { return x.A === code; }) || inv.unknown.indexOf(code) >= 0) {
@@ -711,20 +779,42 @@ function invScan(code) {
   api("GET", "/pda/search?q=" + encodeURIComponent(code)).then(function (js) {
     var f = (js.items || []).filter(function (x) { return String(x.A).toUpperCase() === code; })[0];
     if (f) {
-      inv.foreign.push({ A: f.A, C: f.C, D: f.D, L: f.L || "", moved: false });
+      inv.foreign.push({ A: f.A, C: f.C, D: f.D, L: f.L || "", moved: false }); invHist("foreign", f.A);
       msgTo("inv-status", "\u26a0\ufe0f <b>" + esc(code) + "</b> itt van, de a rendszer szerint a(z) <b>" + esc(f.L || "\u2014") + "</b> raklapon kellene lennie.", "warn");
     } else {
-      inv.unknown.push(code);
+      inv.unknown.push(code); invHist("unknown", code);
       msgTo("inv-status", "\u2753 <b>" + esc(code) + "</b> nincs a rendszerben.", "err");
     }
     beep(false); saveInv(); renderInventory();
   }).catch(function (e) { msgTo("inv-status", "\u274c " + esc(errText(e)), "err"); beep(false); });
 }
+function invHist(type, code) {
+  inv.hist = inv.hist || []; inv.hist.push({ type: type, code: code });
+  showUndo("\ud83d\udccb Lelt\u00e1r: <b>" + esc(code) + "</b> csippantva", undoInvScan);
+}
+function undoInvScan() {
+  if (!inv || !inv.hist || !inv.hist.length) { msgTo("inv-status", "Nincs visszavonhat\u00f3 csippant\u00e1s.", "info"); return; }
+  var h = inv.hist.pop();
+  if (h.type === "found") delete inv.found[h.code];
+  if (h.type === "foreign") {
+    var f = inv.foreign.filter(function (x) { return x.A === h.code; })[0];
+    if (f && f.moved) { inv.hist.push(h); msgTo("inv-status", "\u26a0\ufe0f " + esc(h.code) + " m\u00e1r \u00e1t lett helyezve \u2013 el\u0151bb azt vond vissza a Napl\u00f3 f\u00fcl\u00f6n.", "warn"); return; }
+    inv.foreign = inv.foreign.filter(function (x) { return x.A !== h.code; });
+  }
+  if (h.type === "unknown") inv.unknown = inv.unknown.filter(function (c) { return c !== h.code; });
+  saveInv(); renderInventory();
+  msgTo("inv-status", "\u21a9\ufe0f Visszavonva: " + esc(h.code) + " csippant\u00e1sa", "info");
+  focusScan();
+}
 function moveHere(i) {
   var f = inv.foreign[i];
   api("POST", "/pda/change", { A: f.A, mezo: "L", uj: inv.raklap, tipus: "ATHELYEZES", eszkoz: deviceName(), megjegyzes: "Lelt\u00e1r" },
-      "\u00c1thelyez\u00e9s lelt\u00e1rb\u00f3l (" + f.A + ": " + (f.L || "-") + " \u2192 " + inv.raklap + ")").then(function () {
-    f.moved = true; saveInv(); renderInventory();
+      "\u00c1thelyez\u00e9s lelt\u00e1rb\u00f3l (" + f.A + ": " + (f.L || "-") + " \u2192 " + inv.raklap + ")").then(function (js) {
+    f.moved = true; f.vid = js.valtozas_id; saveInv(); renderInventory();
+    var lbl = f.A + ": raklap " + (f.L || "\u2014") + " \u2192 " + inv.raklap;
+    showUndo("\ud83d\udce6 " + esc(lbl), function () {
+      undoChange(js.valtozas_id, lbl).then(function () { if (inv) { f.moved = false; saveInv(); renderInventory(); } });
+    });
     msgTo("inv-status", "\u2705 " + esc(f.A) + " \u00e1thelyez\u00e9se elk\u00fcldve \u2192 " + esc(inv.raklap), "ok");
   }).catch(function (e) { msgTo("inv-status", "\u274c " + esc(errText(e)), "err"); });
 }
@@ -816,6 +906,14 @@ function statusHtml(x) {
                        '<div class="small">' + esc(ERR["A-10"][1]) + "</div>";
   return '<span class="pend">\u23f3 Az asztali program m\u00e9g nem vette \u00e1t</span>';
 }
+function undoFromLog(vid) {
+  var x = logData.filter(function (r) { return r.fajta === "valtozas" && r.valtozas_id === vid; })[0];
+  if (!x) return;
+  var lbl = x.A + " \u2013 " + (x.tipus === "ATHELYEZES" ? "\u00e1thelyez\u00e9s " + (x.regi || "\u2014") + " \u2192 " + x.uj :
+                           x.tipus === "ELADAS_MODOSITAS" ? "elad\u00e1s jav\u00edt\u00e1sa" : "szerkeszt\u00e9s");
+  if (!confirm("Visszavonod?\n\n" + lbl + "\n\nA r\u00e9gi \u00e9rt\u00e9k ker\u00fcl vissza.")) return;
+  undoChange(vid, lbl);
+}
 function renderLog() {
   var mine = $("log-mine").checked, me = deviceName();
   var rows = logData.filter(function (x) {
@@ -847,18 +945,22 @@ function renderLog() {
         var v = ad.valtozasok || {}, r = ad.regi || {};
         return Object.keys(v).map(function (k) { return esc(LBL[k] || k) + ": " + esc(r[k] || "\u2014") + " \u2192 <b>" + esc(v[k] || "\u2014") + "</b>"; }).join("<br>");
       };
-      var title = { MODOSITAS: "\u270f\ufe0f Szerkeszt\u00e9s", ELADAS_MODOSITAS: "\u270f\ufe0f Elad\u00e1s jav\u00edt\u00e1sa", ELADAS_TORLES: "\u21a9\ufe0f Elad\u00e1s visszavon\u00e1sa" }[x.tipus];
+      var title = { MODOSITAS: "\u270f\ufe0f Szerkeszt\u00e9s", ELADAS_MODOSITAS: "\u270f\ufe0f Elad\u00e1s jav\u00edt\u00e1sa", ELADAS_TORLES: "\u21a9\ufe0f Elad\u00e1s visszavon\u00e1sa",
+                    VISSZAVONAS: "\u21a9\ufe0f Visszavon\u00e1s" }[x.tipus];
+      var undoHtml = x.visszavonva ? '<div class="fail">\u21a9\ufe0f Visszavonva (' + esc(String(x.visszavonva).slice(0, 16)) + ")</div>"
+                   : (x.tipus === "ELADAS_TORLES" || x.tipus === "VISSZAVONAS" || x.eredmeny === "hiba") ? ""
+                   : '<div class="two"><span></span><button onclick="undoFromLog(\'' + esc(x.valtozas_id) + '\')">\u21a9\ufe0f Visszavon\u00e1s</button></div>';
       if (title) {
         var body = x.tipus === "ELADAS_TORLES" ? "K\u00e9szlet vissza\u00edr\u00e1sa: <b>" + (ad.keszlet_vissza ? "igen (+" + esc(ad.darab) + " db)" : "nem") + "</b>" : vlist();
         return '<div class="row ' + cls + '"><div class="top"><span>' + title + " \u00b7 " + esc(x.A) + "</span><span>" + esc(x.ido) + "</span></div>" +
                "<div>" + body + "</div>" +
                '<div class="small">' + esc([x.C, x.D].filter(Boolean).join(" ")) + " \u00b7 " + esc(x.eszkoz) + "</div>" +
-               '<div class="st">' + statusHtml(x) + "</div></div>";
+               '<div class="st">' + statusHtml(x) + "</div>" + undoHtml + "</div>";
       }
       return '<div class="row ' + cls + '"><div class="top"><span>\ud83d\udce6 ' + esc(x.A) + "</span><span>" + esc(x.ido) + "</span></div>" +
              "<div>\u00c1thelyez\u00e9s: raklap <b>" + esc(x.regi || "\u2014") + "</b> \u2192 <b>" + esc(x.uj) + "</b>" + (x.megjegyzes ? " (" + esc(x.megjegyzes) + ")" : "") + "</div>" +
              '<div class="small">' + esc([x.C, x.D].filter(Boolean).join(" ")) + " \u00b7 " + esc(x.eszkoz) + "</div>" +
-             '<div class="st">' + statusHtml(x) + "</div></div>";
+             '<div class="st">' + statusHtml(x) + "</div>" + undoHtml + "</div>";
     }
     var icon = x.szint === "HIBA" ? "\u274c" : (String(x.esemeny).indexOf("LELT\u00c1R") === 0 ? "\ud83d\udccb" : "\u2139\ufe0f");
     return '<div class="row ' + cls + '"><div class="top"><span>' + icon + " " + (x.kod ? "[" + esc(x.kod) + "] " : "") + esc(x.esemeny) + "</span><span>" + esc(String(x.ido).slice(0, 16)) + "</span></div>" +

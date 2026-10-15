@@ -480,7 +480,8 @@ PDA_SALE_FIELDS = ("eladas_id", "datum", "platform", "A", "C", "D", "E", "F", "G
                    "vevo", "ar", "darab", "tracking", "megjegyzes", "keszlet_levonas", "eszkoz",
                    "atvette", "atvetel_ido", "eredmeny", "eredmeny_uzenet", "eredmeny_ido", "visszavonva")
 PDA_CHANGE_FIELDS = ("valtozas_id", "ido", "tipus", "A", "C", "D", "E", "mezo", "regi", "uj", "megjegyzes",
-                     "eszkoz", "atvette", "atvetel_ido", "eredmeny", "eredmeny_uzenet", "eredmeny_ido", "ref", "adat")
+                     "eszkoz", "atvette", "atvetel_ido", "eredmeny", "eredmeny_uzenet", "eredmeny_ido", "ref", "adat",
+                     "visszavonva")
 # A PDA-rol modosithato termek-mezok
 PDA_EDITABLE = {"C": "Marka", "D": "Tipus", "E": "Cikkszam", "F": "DB", "G": "Allapot", "H": "Ar",
                 "K": "Polc", "L": "Raklap", "M": "Suly", "N": "eBay ID", "O": "Megjegyzes", "P": "Allapot reszlet"}
@@ -543,7 +544,7 @@ def init_pda_db2():
             )
         """)
         vcols = [c[1] for c in conn.execute("PRAGMA table_info(pda_valtozasok)").fetchall()]
-        for col in ("ref", "adat"):
+        for col in ("ref", "adat", "visszavonva"):
             if col not in vcols:
                 conn.execute(f"ALTER TABLE pda_valtozasok ADD COLUMN {col} TEXT")
         # Az asztali gepek naplojanak masolata (a PDA "Elozmenyek" ablakahoz)
@@ -870,6 +871,73 @@ def pda_sale_cancel():
                                {"keszlet_vissza": vissza, "keszlet_levonas": sale["keszlet_levonas"],
                                 "darab": safe_str(sale["darab"])},
                                safe_str(data.get('eszkoz', 'PDA')) or "PDA")
+            mode = "gepre_var"
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "mod": mode}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/pda/change/cancel', methods=['POST'])
+def pda_change_cancel():
+    """PDA-s modositas (athelyezes / szerkesztes / eladas-javitas) VISSZAVONASA - pl. veletlen nyomas utan.
+    Ha a gep meg nem hajtotta vegre: egyszeruen nem adjuk at neki. Ha mar vegrehajtotta: egy ellentetes
+    modositast kuldunk (a regi ertekek vissza), amit szinten a gep hajt vegre."""
+    try:
+        data = request.json or {}
+        vid = str(data.get('valtozas_id', '')).strip()
+        eszkoz = safe_str(data.get('eszkoz', 'PDA')) or "PDA"
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM pda_valtozasok WHERE valtozas_id=?", (vid,))
+        ch = cur.fetchone()
+        if not ch:
+            conn.close()
+            return pda_err(404, "S-404", "Nincs ilyen modositas")
+        if ch["visszavonva"]:
+            conn.close()
+            return pda_err(409, "S-409", "Mar vissza lett vonva")
+        if ch["tipus"] == "ELADAS_TORLES":
+            conn.close()
+            return pda_err(400, "S-400", "Eladas visszavonasa nem vonhato vissza - rogzitsd ujra az eladast")
+        try:
+            ad = json.loads(ch["adat"] or "{}")
+        except Exception:
+            ad = {}
+        valt = ad.get("valtozasok") or ({ch["mezo"]: ch["uj"]} if ch["mezo"] and ch["mezo"] != "*" else {})
+        regi = ad.get("regi") or ({ch["mezo"]: ch["regi"]} if ch["mezo"] and ch["mezo"] != "*" else {})
+        now = pda_now()
+        now_s = now.strftime("%Y-%m-%d %H:%M:%S")
+        cur.execute("UPDATE pda_valtozasok SET visszavonva=? WHERE valtozas_id=?", (now_s, vid))
+        if ch["tipus"] == "ELADAS_MODOSITAS" and ch["ref"] and regi:
+            sets = ", ".join(f"{k}=?" for k in regi if k in PDA_SALE_EDITABLE)
+            if sets:
+                cur.execute(f"UPDATE pda_eladasok SET {sets} WHERE eladas_id=?",
+                            (*[v for k, v in regi.items() if k in PDA_SALE_EDITABLE], ch["ref"]))
+        if not ch["atvette"] or ch["eredmeny"] == "hiba":
+            # Meg nem hajtotta vegre a gep (vagy nem sikerult neki): nincs mit visszacsinalni
+            if not ch["atvette"]:
+                cur.execute("""UPDATE pda_valtozasok SET atvette=?, atvetel_ido=?, eredmeny='ok', eredmeny_uzenet=?, eredmeny_ido=?
+                               WHERE valtozas_id=? AND atvette IS NULL""",
+                            ("(visszavonva a PDA-n)", now_s, "Visszavonva, mielott a gep vegrehajtotta - semmi nem valtozott",
+                             now_s, vid))
+            mode = "helyben"
+        else:
+            nvid = f"V{now.strftime('%Y%m%d%H%M%S')}-{ch['A']}-{os.urandom(2).hex()}"
+            ntipus = "ELADAS_MODOSITAS" if ch["tipus"] == "ELADAS_MODOSITAS" else "VISSZAVONAS"
+            nadat = {"valtozasok": regi, "regi": valt, "visszavont": vid}
+            if ch["tipus"] == "ELADAS_MODOSITAS":
+                nadat["keszlet_levonas"] = ad.get("keszlet_levonas", 1)
+            egy = len(regi) == 1
+            mezo = list(regi)[0] if egy else "*"
+            cur.execute("""INSERT INTO pda_valtozasok (valtozas_id, ido, tipus, A, C, D, E, mezo, regi, uj, megjegyzes, eszkoz, ref, adat)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (nvid, now.strftime("%Y-%m-%d %H:%M"), ntipus, ch["A"], ch["C"], ch["D"], ch["E"], mezo,
+                         valt.get(mezo, "") if egy else json.dumps(valt, ensure_ascii=False),
+                         regi.get(mezo, "") if egy else json.dumps(regi, ensure_ascii=False),
+                         f"Visszavonas: {vid}", eszkoz, ch["ref"], json.dumps(nadat, ensure_ascii=False)))
             mode = "gepre_var"
         conn.commit()
         conn.close()
