@@ -104,6 +104,11 @@
   .askbox .btn { margin-top:10px; }
   .btn.red { background:var(--err); color:#fff; }
   .pallets { font-size:13px; color:#ffcc80; }
+  .cnt { display:flex; align-items:center; gap:6px; margin-top:6px; flex-wrap:wrap; }
+  .cnt b.n { font-size:22px; min-width:34px; text-align:center; }
+  .cnt button { border:none; border-radius:8px; background:#37474f; color:#fff; font-weight:bold; font-size:18px; padding:6px 14px; }
+  .cnt button.db { background:var(--warn); color:#000; font-size:14px; padding:9px 10px; }
+  .diff { color:var(--warn); font-weight:bold; }
   .settings input { font-size:15px; padding:8px; border-radius:6px; border:1px solid #444; background:#2b2b2b; color:#fff; width:100%; }
 </style>
 </head>
@@ -184,7 +189,8 @@
   <!-- ================= LELT&#xC1;R ================= -->
   <section id="page-inv" class="hidden">
     <div id="inv-start">
-      <div class="msg info">Csippantsd vagy &#xED;rd be a <b>raklap</b> sz&#xE1;m&#xE1;t, azt&#xE1;n csippantsd v&#xE9;gig a rajta l&#xE9;v&#x151; term&#xE9;keket.
+      <div class="msg info">Csippantsd vagy &#xED;rd be a <b>raklap</b> sz&#xE1;m&#xE1;t, azt&#xE1;n csippantsd v&#xE9;gig a rajta l&#xE9;v&#x151; term&#xE9;keket &#x2013;
+        <b>minden darabot</b> (a program sz&#xE1;molja; elt&#xE9;r&#xE9;sn&#xE9;l r&#xE1;k&#xE9;rdez, hogy &#xE1;t&#xED;rja-e a DB-t).
         A v&#xE9;g&#xE9;n ki&#xED;rja, mi <b>hi&#xE1;nyzik</b> &#xE9;s mi van ott <b>m&#xE1;s raklapr&#xF3;l</b>.</div>
       <form class="scan" onsubmit="event.preventDefault(); startInventory(invPalletInput.value);">
         <input id="inv-pallet" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Raklap (pl. 573)">
@@ -348,7 +354,7 @@
 </div>
 
 <script>
-var VERSION = "2026.10.16-a";
+var VERSION = "2026.10.16-b";
 var PLATFORMS = {
   EBAY_KIVULI: { cim: "eBay-en k\u00edv\u00fcli elad\u00e1s", gomb: "eBay-en k\u00edv\u00fcli", cls: "b-kivul" },
   EBAY:        { cim: "eBay elad\u00e1s",           gomb: "eBay",           cls: "b-ebay" },
@@ -1075,17 +1081,22 @@ function invScan(code) {
   if (!isR18(code)) { startInventory(code); return; }     // raklap-c\u00edmke: r\u00e1k\u00e9rdez, hogy \u00faj lelt\u00e1r legyen-e
   var it = inv.items.filter(function (x) { return String(x.A).toUpperCase() === code; })[0];
   if (it) {
-    if (inv.found[code]) msgTo("inv-status", "\u2139\ufe0f " + esc(code) + " m\u00e1r meg volt jel\u00f6lve.", "info");
-    else { inv.found[code] = true; invHist("found", code); msgTo("inv-status", "\u2705 " + esc(code) + " \u2013 megvan", "ok"); }
+    var n = cntOf(code) + 1, db = stockOf(it);
+    inv.found[code] = n; invHist("found", code);
+    msgTo("inv-status", "\u2705 <b>" + esc(code) + "</b> \u2013 <b>" + n + ". db</b> (t\u00e1bl\u00e1zat: " + db + " db)" +
+          (n > db ? "<br>\u26a0\ufe0f T\u00f6bb van itt, mint a t\u00e1bl\u00e1zatban!" : ""), n > db ? "warn" : "ok");
     beep(true); saveInv(); renderInventory(); return;
   }
-  if (inv.foreign.some(function (x) { return x.A === code; }) || inv.unknown.indexOf(code) >= 0) {
-    msgTo("inv-status", "\u2139\ufe0f " + esc(code) + " m\u00e1r a list\u00e1n van.", "info"); return;
+  var ff = inv.foreign.filter(function (x) { return x.A === code; })[0];
+  if (ff) {
+    ff.cnt = (ff.cnt || 1) + 1; invHist("foreign2", code); saveInv(); renderInventory();
+    msgTo("inv-status", "\u26a0\ufe0f <b>" + esc(code) + "</b> \u2013 " + ff.cnt + ". db (m\u00e1s raklapr\u00f3l)", "warn"); return;
   }
+  if (inv.unknown.indexOf(code) >= 0) { msgTo("inv-status", "\u2139\ufe0f " + esc(code) + " m\u00e1r a list\u00e1n van.", "info"); return; }
   api("GET", "/pda/search?q=" + encodeURIComponent(code)).then(function (js) {
     var f = (js.items || []).filter(function (x) { return String(x.A).toUpperCase() === code; })[0];
     if (f) {
-      inv.foreign.push({ A: f.A, C: f.C, D: f.D, L: f.L || "", moved: false }); invHist("foreign", f.A);
+      inv.foreign.push({ A: f.A, C: f.C, D: f.D, F: f.F, L: f.L || "", moved: false, cnt: 1 }); invHist("foreign", f.A);
       msgTo("inv-status", "\u26a0\ufe0f <b>" + esc(code) + "</b> itt van, de a rendszer szerint a(z) <b>" + palletHtml(f.L) + "</b> raklapon kellene lennie.", "warn");
     } else {
       inv.unknown.push(code); invHist("unknown", code);
@@ -1107,7 +1118,8 @@ function undoInvScanAsk() {
 function undoInvScan() {
   if (!inv || !inv.hist || !inv.hist.length) { msgTo("inv-status", "Nincs visszavonhat\u00f3 csippant\u00e1s.", "info"); return; }
   var h = inv.hist.pop();
-  if (h.type === "found") delete inv.found[h.code];
+  if (h.type === "found") { if (cntOf(h.code) > 1) inv.found[h.code] = cntOf(h.code) - 1; else delete inv.found[h.code]; }
+  if (h.type === "foreign2") { var f2 = inv.foreign.filter(function (x) { return x.A === h.code; })[0]; if (f2 && f2.cnt > 1) f2.cnt--; }
   if (h.type === "foreign") {
     var f = inv.foreign.filter(function (x) { return x.A === h.code; })[0];
     if (f && f.moved) { inv.hist.push(h); msgTo("inv-status", "\u26a0\ufe0f " + esc(h.code) + " m\u00e1r \u00e1t lett helyezve \u2013 el\u0151bb azt vond vissza a Napl\u00f3 f\u00fcl\u00f6n.", "warn"); return; }
@@ -1117,6 +1129,59 @@ function undoInvScan() {
   saveInv(); renderInventory();
   msgTo("inv-status", "\u21a9\ufe0f Visszavonva: " + esc(h.code) + " csippant\u00e1sa", "info");
   focusScan();
+}
+// "DB elt\u00e9r\u00e9s: R18-1 6\u21924 (\u00e1t\u00edrva), R18-2 5\u21921 (t\u00f6bb raklapon \u2013 nem \u00edrtam \u00e1t)."
+function dbText() {
+  var t = inv.items.filter(function (x) { var c = String(x.A).toUpperCase(); return cntOf(c) > 0 && cntOf(c) !== parseInt(x.F_regi || stockOf(x), 10); })
+    .map(function (x) {
+      var c = String(x.A).toUpperCase(), n = cntOf(c);
+      return x.A + " " + (x.F_regi || stockOf(x)) + "\u2192" + n + (inv.dbset && inv.dbset[c] === n ? " (\u00e1t\u00edrva)" : isMulti(x) ? " (t\u00f6bb raklapon \u2013 nem \u00edrtam \u00e1t)" : " (nem \u00e1t\u00edrva)");
+    });
+  return t.length ? " DB elt\u00e9r\u00e9s: " + t.join(", ") + "." : "";
+}
+function cntOf(code) { var v = inv && inv.found[code]; return v === true ? 1 : (parseInt(v, 10) || 0); }
+function isMulti(x) { return palletTokens(x.L).length > 1; }
+function invItem(code) { return inv.items.filter(function (x) { return String(x.A).toUpperCase() === code; })[0]; }
+// K\u00e9zi darab-jav\u00edt\u00e1s (pl. ha egy dobozban 3 van, nem kell 3-szor csippantani)
+function invAdj(code, d) {
+  var n = Math.max(0, cntOf(code) + d);
+  if (n) inv.found[code] = n; else delete inv.found[code];
+  saveInv(); renderInventory();
+}
+// Az elt\u00e9r\u0151 darabsz\u00e1mok (csak a megtal\u00e1lt, nem t\u00f6bb raklapos term\u00e9kek; amit m\u00e1r \u00e1t\u00edrtunk, az nem)
+function dbDiffs() {
+  return inv.items.filter(function (x) {
+    var c = String(x.A).toUpperCase(), n = cntOf(c);
+    return n > 0 && !isMulti(x) && n !== stockOf(x) && !(inv.dbset && inv.dbset[c] === n);
+  });
+}
+function sendDb(x, n) {
+  var c = String(x.A).toUpperCase(), regi = stockOf(x);
+  return api("POST", "/pda/change", { A: x.A, valtozasok: { F: String(n) }, tipus: "MODOSITAS", eszkoz: deviceName(), megjegyzes: "Lelt\u00e1r (raklap " + inv.raklap + ")" },
+             "Lelt\u00e1r DB \u00e1t\u00edr\u00e1s (" + x.A + ": " + regi + " \u2192 " + n + " db)").then(function (js) {
+    inv.dbset = inv.dbset || {}; inv.dbset[c] = n; inv.dbvid = inv.dbvid || {}; inv.dbvid[c] = js.valtozas_id;
+    x.F_regi = x.F_regi || x.F; x.F = String(n); saveInv();
+    return js;
+  });
+}
+function dbWrite(code) {
+  var x = invItem(code); if (!x) return;
+  var n = cntOf(code), db = stockOf(x);
+  var warn = isMulti(x) ? "<br><br>\u26a0\ufe0f Ez a term\u00e9k <b>t\u00f6bb raklapon</b> van (" + esc(palletTokens(x.L).join(" + ")) +
+             ") \u2013 a DB az \u00f6sszes raklapra vonatkozik! Csak akkor \u00edrd \u00e1t, ha a t\u00f6bbin nincs bel\u0151le." : "";
+  confirmBox("\ud83d\udcbe DB \u00e1t\u00edr\u00e1sa?", "<b>" + esc(x.A) + "</b> \u2013 " + esc([x.C, x.D].filter(Boolean).join(" ")) +
+             "<br>T\u00e1bl\u00e1zatban: <b>" + db + " db</b> \u00b7 Most csippantva: <b>" + n + " db</b><br><br>\u00c1t\u00edrod <b>" + n + " db</b>-ra?" + warn,
+             "\ud83d\udcbe Igen, \u00e1t\u00edrom " + n + " db-ra").then(function (ok) {
+    if (!ok) return;
+    sendDb(x, n).then(function (js) {
+      renderInventory();
+      msgTo("inv-status", "\u2705 " + esc(x.A) + " DB: " + db + " \u2192 <b>" + n + "</b> elk\u00fcldve (az asztali program \u00edrja \u00e1t mindenhol).", "ok");
+      var lbl = x.A + " DB: " + db + " \u2192 " + n;
+      showUndo("\ud83d\udcbe " + esc(lbl), function () {
+        undoChange(js.valtozas_id, lbl).then(function () { if (inv) { delete inv.dbset[String(x.A).toUpperCase()]; x.F = x.F_regi || x.F; saveInv(); renderInventory(); } });
+      });
+    }).catch(function (e) { errBox(e); });
+  });
 }
 function moveHere(i) {
   var f = inv.foreign[i], t = palletTokens(f.L), here = inv.raklap;
@@ -1145,9 +1210,12 @@ function renderInventory() {
   $("inv-title").textContent = "Raklap " + inv.raklap;
   $("inv-count").textContent = got + "/" + total;
   var dbsum = inv.items.reduce(function (a, x) { return a + stockOf(x); }, 0);
+  var scanned = inv.items.reduce(function (a, x) { return a + cntOf(String(x.A).toUpperCase()); }, 0);
+  var nd = dbDiffs().length;
   $("inv-expected").innerHTML = "\ud83d\udccb A t\u00e1bl\u00e1zat szerint ezen a raklapon <b>" + total + " f\u00e9le term\u00e9k</b> kellene legyen" +
-      (dbsum !== total ? " (\u00f6sszesen <b>" + dbsum + " db</b>)" : "") + ".<br>Megtal\u00e1lva: <b>" + got + "</b> \u00b7 Hi\u00e1nyzik: <b>" + (total - got) + "</b>" +
-      (inv.foreign.length ? " \u00b7 M\u00e1s raklapr\u00f3l: <b>" + inv.foreign.length + "</b>" : "");
+      " (\u00f6sszesen <b>" + dbsum + " db</b>).<br>Megtal\u00e1lva: <b>" + got + "</b> f\u00e9le, <b>" + scanned + " db</b> \u00b7 Hi\u00e1nyzik: <b>" + (total - got) + "</b>" +
+      (inv.foreign.length ? " \u00b7 M\u00e1s raklapr\u00f3l: <b>" + inv.foreign.length + "</b>" : "") +
+      (nd ? '<br><span class="diff">\u26a0\ufe0f ' + nd + " term\u00e9kn\u00e9l elt\u00e9r a darabsz\u00e1m</span>" : "");
   $("inv-bar").style.width = (total ? Math.round(got * 100 / total) : 100) + "%";
   var missing = inv.items.filter(function (x) { return !inv.found[String(x.A).toUpperCase()]; });
   var ok = inv.items.filter(function (x) { return inv.found[String(x.A).toUpperCase()]; });
@@ -1155,7 +1223,7 @@ function renderInventory() {
   if (inv.foreign.length) {
     h += '<div class="small" style="margin-top:10px">\u26a0\ufe0f M\u00c1S RAKLAPR\u00d3L (' + inv.foreign.length + ")</div>";
     h += inv.foreign.map(function (f, i) {
-      return '<div class="row wb"><div class="top"><span>' + esc(f.A) + "</span><span>rendszer: " + palletHtml(f.L) + "</span></div>" +
+      return '<div class="row wb"><div class="top"><span>' + esc(f.A) + (f.cnt > 1 ? " \u00b7 " + f.cnt + " db" : "") + "</span><span>rendszer: " + palletHtml(f.L) + "</span></div>" +
              "<div>" + esc([f.C, f.D].filter(Boolean).join(" ")) + "</div>" +
              (f.moved ? '<div class="done">\u2714 \u00c1thelyez\u00e9s elk\u00fcldve ide</div>'
                       : '<button class="btn orange" style="padding:9px;font-size:15px" onclick="moveHere(' + i + ')">\u27a1\ufe0f \u00c1thelyez\u00e9s ide (' + esc(inv.raklap) + ")</button>") + "</div>";
@@ -1167,14 +1235,21 @@ function renderInventory() {
   }
   h += '<div class="small" style="margin-top:10px">\u2717 M\u00c9G NEM CSIPPANTOTT (' + missing.length + ")</div>";
   h += missing.map(function (x) {
-    return '<div class="row bad"><div class="top"><span>' + esc(x.A) + "</span><span>" + esc((x.F || "1") + " db") + "</span></div><div>" +
+    return '<div class="row bad"><div class="top"><span>' + esc(x.A) + "</span><span>0 / " + stockOf(x) + " db</span></div><div>" +
            esc([x.C, x.D, x.E].filter(Boolean).join(" ")) + "</div>" +
            (palletTokens(x.L).length > 1 ? '<div class="pallets">T\u00f6bb raklapon: ' + esc(palletTokens(x.L).join(" + ")) + "</div>" : "") + "</div>";
   }).join("");
   h += '<div class="small" style="margin-top:10px">\u2713 MEGVAN (' + ok.length + ")</div>";
   h += ok.map(function (x) {
-    return '<div class="row okb"><div class="top"><span>\u2713 ' + esc(x.A) + "</span><span>" + esc((x.F || "1") + " db") + "</span></div><div>" +
-           esc([x.C, x.D].filter(Boolean).join(" ")) + "</div></div>";
+    var c = String(x.A).toUpperCase(), n = cntOf(c), db = stockOf(x), kesz = inv.dbset && inv.dbset[c] === n;
+    var diff = n !== db && !kesz;
+    return '<div class="row ' + (diff ? "wb" : "okb") + '"><div class="top"><span>\u2713 ' + esc(x.A) + "</span><span" + (diff ? ' class="diff"' : "") + ">" +
+           n + " / " + db + " db</span></div><div>" + esc([x.C, x.D].filter(Boolean).join(" ")) + "</div>" +
+           (isMulti(x) ? '<div class="pallets">T\u00f6bb raklapon: ' + esc(palletTokens(x.L).join(" + ")) + " (a DB az \u00f6sszesre vonatkozik)</div>" : "") +
+           '<div class="cnt"><button onclick="invAdj(\'' + esc(c) + '\',-1)">\u2796</button><b class="n">' + n + "</b>" +
+           '<button onclick="invAdj(\'' + esc(c) + '\',1)">\u2795</button>' +
+           (diff ? '<button class="db" onclick="dbWrite(\'' + esc(c) + '\')">\ud83d\udcbe DB: ' + db + " \u2192 " + n + "</button>" : "") +
+           (kesz ? '<span class="done">\u2714 DB \u00e1t\u00edr\u00e1s elk\u00fcldve (' + n + " db)</span>" : "") + "</div></div>";
   }).join("");
   $("inv-list").innerHTML = h;
 }
@@ -1182,18 +1257,44 @@ function finishInventory() {
   if (!inv) return;
   var missing = inv.items.filter(function (x) { return !inv.found[String(x.A).toUpperCase()]; }).map(function (x) { return x.A; });
   var got = inv.items.length - missing.length;
-  var txt = "Raklap " + inv.raklap + ": " + got + "/" + inv.items.length + " megvan." +
+  var diffs = dbDiffs();
+  var txt = "Raklap " + inv.raklap + ": " + got + "/" + inv.items.length + " megvan." + dbText() +
             (missing.length ? " Hi\u00e1nyzik (" + missing.length + "): " + missing.join(", ") + "." : "") +
             (inv.foreign.length ? " M\u00e1s raklapr\u00f3l itt (" + inv.foreign.length + "): " + inv.foreign.map(function (f) { return f.A + " (" + (f.L || "-") + (f.moved ? ", \u00e1thelyezve" : "") + ")"; }).join(", ") + "." : "") +
             (inv.unknown.length ? " Ismeretlen k\u00f3d: " + inv.unknown.join(", ") + "." : "") +
             " Kezd\u00e9s: " + inv.start;
+  if (diffs.length) {
+    var lista = diffs.map(function (x) { return "<b>" + esc(x.A) + "</b>: " + stockOf(x) + " \u2192 <b>" + cntOf(String(x.A).toUpperCase()) + " db</b>"; }).join("<br>");
+    ask("\ud83d\udcbe Elt\u00e9r\u0151 darabsz\u00e1mok", diffs.length + " term\u00e9kn\u00e9l m\u00e1s a csippantott darabsz\u00e1m, mint a t\u00e1bl\u00e1zatban:<br><br>" + lista +
+        "<br><br>\u00c1t\u00edrod a DB-t a csippantott \u00e9rt\u00e9kre? (Az asztali program \u00edrja \u00e1t mindenhol, a Google t\u00e1bl\u00e1zatban is.)",
+        [{ label: "\ud83d\udcbe Igen, mind a(z) " + diffs.length + " term\u00e9kn\u00e9l \u00e1t\u00edrom", value: "ir", cls: "green" },
+         { label: "Nem \u00edrom \u00e1t, csak lez\u00e1rom", value: "nem", cls: "grey" },
+         { label: "\u2716 M\u00e9gse (folytatom a lelt\u00e1rt)", value: false, cls: "grey" }]).then(function (v) {
+      if (!v) return;
+      if (v === "nem") { askFinish(txt, missing); return; }
+      var chain = Promise.resolve(), hibak = [];
+      diffs.forEach(function (x) {
+        chain = chain.then(function () { return sendDb(x, cntOf(String(x.A).toUpperCase())).catch(function (e) { hibak.push(x.A + ": " + errText(e)); }); });
+      });
+      chain.then(function () {
+        renderInventory();
+        if (hibak.length) { infoBox("\u274c Nem minden DB \u00e1t\u00edr\u00e1s siker\u00fclt", esc(hibak.join("\n")) + "<br><br>A lelt\u00e1r nyitva maradt, pr\u00f3b\u00e1ld \u00fajra."); return; }
+        var txt2 = "Raklap " + inv.raklap + ": " + got + "/" + inv.items.length + " megvan." + dbText() + txt.slice(txt.indexOf(" megvan.") + 8).replace(/^ DB elt\u00e9r\u00e9s: [^.]*\./, "");
+        doFinishInventory(txt2, missing);
+      });
+    });
+    return;
+  }
+  askFinish(txt, missing);
+}
+function askFinish(txt, missing) {
   confirmBox("\u2705 Lelt\u00e1r lez\u00e1r\u00e1sa?", esc(txt) + "<br><br>Az \u00f6sszes\u00edt\u00e9s a \ud83d\udcdc Napl\u00f3ba ker\u00fcl.", "\u2705 Igen, lez\u00e1rom").then(function (ok) {
     if (ok) doFinishInventory(txt, missing);
   });
 }
 function doFinishInventory(txt, missing) {
   if (!inv) return;
-  var bad = missing.length || inv.foreign.length || inv.unknown.length;
+  var bad = missing.length || inv.foreign.length || inv.unknown.length || /DB elt\u00e9r\u00e9s/.test(txt);
   api("POST", "/pda/log", { eszkoz: deviceName(), szint: bad ? "FIGYELEM" : "INFO", esemeny: "LELT\u00c1R \u2013 raklap " + inv.raklap, reszletek: txt },
       "Lelt\u00e1r lez\u00e1r\u00e1sa (" + inv.raklap + ")").then(function () {
     inv = null; saveInv(); renderInventory();
