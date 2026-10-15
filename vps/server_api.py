@@ -918,6 +918,30 @@ def pda_history_push():
         return pda_err(500, "S-500", str(e))
 
 
+_HIST_LBL = dict(PDA_EDITABLE, vevo="Vevo", ar="Ar", tracking="Tracking", megjegyzes="Megjegyzes",
+                 darab="Darab", platform="Platform")
+
+
+def _fmt_change(r):
+    """Olvashato leiras egy PDA-s modositasrol: 'Marka: A -> B | DB: 1 -> 4'."""
+    try:
+        ad = json.loads(r["adat"] or "{}")
+    except Exception:
+        ad = {}
+    if r["tipus"] == "ELADAS_TORLES":
+        txt = "Eladas visszavonasa, keszlet vissza: " + (f"igen (+{ad.get('darab', '')} db)" if ad.get("keszlet_vissza") else "nem")
+    elif ad.get("valtozasok"):
+        regi = ad.get("regi") or {}
+        txt = " | ".join(f"{_HIST_LBL.get(k, k)}: {regi.get(k, '') or '-'} -> {v or '-'}" for k, v in ad["valtozasok"].items())
+    else:
+        txt = f"{_HIST_LBL.get(r['mezo'], r['mezo'])}: {r['regi'] or '-'} -> {r['uj'] or '-'}"
+    if r["eredmeny_uzenet"]:
+        txt += f"  ==> {'OK' if r['eredmeny'] == 'ok' else 'HIBA'}: {r['eredmeny_uzenet']}"
+    elif not r["atvette"]:
+        txt += "  ==> a gep meg nem vette at"
+    return txt
+
+
 @app.route('/pda/history', methods=['GET'])
 def pda_history():
     """Egy termek osszes ismert esemenye (legujabb elol): a gepek naplojabol + PDA eladasok / modositasok."""
@@ -942,8 +966,7 @@ def pda_history():
         cur.execute("SELECT * FROM pda_valtozasok WHERE A=? ORDER BY id DESC LIMIT 100", (code,))
         for r in cur.fetchall():
             out.append({"forras_tipus": "pda", "ido": r["ido"], "esemeny": f"PDA {r['tipus']}",
-                        "reszletek": (f"eladas {r['ref']}: {r['adat']}" if r["ref"] else f"{r['mezo']}: {r['regi']} -> {r['uj']}")
-                                     + (f" | {r['eredmeny_uzenet']}" if r["eredmeny_uzenet"] else ""),
+                        "reszletek": _fmt_change(r),
                         "honnan": f"Zebra PDA ({r['eszkoz']})", "gep": r["atvette"] or ""})
         conn.close()
         out.sort(key=lambda x: str(x.get("ido") or ""), reverse=True)

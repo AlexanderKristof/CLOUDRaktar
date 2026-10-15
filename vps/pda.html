@@ -70,6 +70,11 @@
   summary { font-weight:bold; cursor:pointer; }
   .kodlista div { font-size:13px; margin:5px 0; }
   .kodlista b { color:var(--blue); }
+  .two { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:8px; }
+  .two button { padding:11px 4px; font-size:14px; font-weight:bold; border:none; border-radius:8px; background:#37474f; color:#fff; }
+  .fin.changed { border-color:var(--warn); }
+  .hrow { border-left:3px solid var(--blue); padding:6px 8px; margin:6px 0; background:var(--card); border-radius:4px; font-size:13px; }
+  .hrow.pda { border-left-color:var(--warn); }
   .settings input { font-size:15px; padding:8px; border-radius:6px; border:1px solid #444; background:#2b2b2b; color:#fff; width:100%; }
 </style>
 </head>
@@ -196,6 +201,43 @@
   </div>
 </div>
 
+<!-- ================= TERM&#xC9;K SZERKESZT&#xC9;SE ================= -->
+<div id="edit" class="overlay">
+  <div class="ohead">&#x270F;&#xFE0F; Term&#xE9;k szerkeszt&#xE9;se</div>
+  <div class="pinfo" id="e-info"></div>
+  <div id="e-fields"></div>
+  <div class="small" style="margin-top:8px">A m&#xF3;dos&#xED;t&#xE1;st az asztali program hajtja v&#xE9;gre (Google t&#xE1;bl&#xE1;zat is) &#x2013; az eredm&#xE9;ny a &#x1F4DC; Napl&#xF3; f&#xFC;l&#xF6;n l&#xE1;tszik.</div>
+  <div class="actions">
+    <button class="go" id="e-go" type="button" onclick="submitEdit()">&#x1F4BE; Ment&#xE9;s</button>
+    <button class="cancel" type="button" onclick="closeOverlay('edit')">M&#xE9;gse</button>
+  </div>
+</div>
+
+<!-- ================= TERM&#xC9;K EL&#x150;ZM&#xC9;NYEI ================= -->
+<div id="hist" class="overlay">
+  <div class="ohead" id="h-title">&#x1F558; El&#x151;zm&#xE9;nyek</div>
+  <div id="h-list"></div>
+  <button class="btn grey" type="button" onclick="closeOverlay('hist')">Bez&#xE1;r&#xE1;s</button>
+</div>
+
+<!-- ================= ELAD&#xC1;S P&#xD3;TL&#xC1;SA / JAV&#xCD;T&#xC1;SA ================= -->
+<div id="sedit" class="overlay">
+  <div class="ohead">&#x270F;&#xFE0F; Elad&#xE1;s p&#xF3;tl&#xE1;sa / jav&#xED;t&#xE1;sa</div>
+  <div class="pinfo" id="se-info"></div>
+  <label class="f">&#x1F4B0; Platform</label>
+  <select id="se-platform" class="fin"></select>
+  <label class="f">&#x1F464; Vev&#x151;</label><input id="se-vevo" class="fin">
+  <label class="f">&#x1F4B6; Elad&#xE1;si &#xE1;r</label><input id="se-ar" class="fin">
+  <label class="f">&#x1F522; Eladott darab (a k&#xE9;szletet a g&#xE9;p ehhez igaz&#xED;tja)</label>
+  <input id="se-darab" class="fin" type="number" inputmode="numeric" min="1">
+  <label class="f">&#x1F69A; Tracking number (csippanthat&#xF3;)</label><input id="se-tracking" class="fin" autocapitalize="characters">
+  <label class="f">&#x1F4DD; Megjegyz&#xE9;s</label><input id="se-megjegyzes" class="fin">
+  <div class="actions">
+    <button class="go" id="se-go" type="button" onclick="submitSaleEdit()">&#x1F4BE; Ment&#xE9;s</button>
+    <button class="cancel" type="button" onclick="closeOverlay('sedit')">M&#xE9;gse</button>
+  </div>
+</div>
+
 <!-- ================= ELAD&#xC1;S ABLAK ================= -->
 <div id="sale" class="overlay">
   <div class="ohead" id="s-title">Elad&#xE1;s</div>
@@ -219,7 +261,7 @@
 </div>
 
 <script>
-var VERSION = "2026.10.15-b";
+var VERSION = "2026.10.15-c";
 var PLATFORMS = {
   EBAY_KIVULI: { cim: "eBay-en k\u00edv\u00fcli elad\u00e1s", gomb: "eBay-en k\u00edv\u00fcli", cls: "b-kivul" },
   EBAY:        { cim: "eBay elad\u00e1s",           gomb: "eBay",           cls: "b-ebay" },
@@ -239,7 +281,8 @@ var ERR = {
   "A-21": ["A term\u00e9k nincs meg az asztali g\u00e9pen", "A g\u00e9pi program adatb\u00e1zis\u00e1ban nincs ilyen R18 \u2013 n\u00e9zd meg az Excel Live-on / Szerver adatb\u00e1zis f\u00fcl\u00f6n."],
   "A-22": ["Helyi adatb\u00e1zis / ment\u00e9si hiba a g\u00e9pen", "A g\u00e9pi program Folyamat napl\u00f3j\u00e1ban l\u00e1tszik a r\u00e9szlet."],
   "A-23": ["Ismeretlen platform / mez\u0151", "A PDA fel\u00fclet \u00e9s a g\u00e9pi program verzi\u00f3ja nem egyezik \u2013 friss\u00edtsd mindkett\u0151t."],
-  "A-24": ["V\u00e1ratlan hiba a g\u00e9pen", "A g\u00e9pi program Folyamat napl\u00f3j\u00e1ban l\u00e1tszik a r\u00e9szlet."]
+  "A-24": ["V\u00e1ratlan hiba a g\u00e9pen", "A g\u00e9pi program Folyamat napl\u00f3j\u00e1ban l\u00e1tszik a r\u00e9szlet."],
+  "A-25": ["A k\u00e9szletet nem lehetett jav\u00edtani \u2013 a term\u00e9k m\u00e1r t\u00f6r\u00f6lve van", "\u00c1ll\u00edtsd vissza a g\u00e9pen: Admin f\u00fcl \u2192 T\u00f6r\u00f6lt term\u00e9kek \u2192 Vissza\u00e1ll\u00edt\u00e1s, majd \u00edrd \u00e1t a darabsz\u00e1mot."]
 };
 function $(id) { return document.getElementById(id); }
 var scanInput = $("scan"), moveInput = $("move-scan"), invPalletInput = $("inv-pallet"), invInput = $("inv-scan");
@@ -348,7 +391,9 @@ function api(method, url, body, mit) {
 function errText(e) { return "[" + (e.kod || "?") + "] " + e.message; }
 var lastServerOk = null;
 function setServer(ok) { $("srv").className = "dot " + (ok ? "ok" : "bad"); lastServerOk = ok; }
-function overlayOpen() { return $("sale").classList.contains("on") || $("token").classList.contains("on"); }
+var OVERLAYS = ["sale", "token", "edit", "hist", "sedit"];
+function overlayOpen() { return OVERLAYS.some(function (o) { return $(o).classList.contains("on"); }); }
+function closeOverlay(id) { $(id).classList.remove("on"); focusScan(); }
 function msgTo(id, html, cls) { $(id).innerHTML = html ? '<div class="msg ' + cls + '">' + html + "</div>" : ""; }
 
 // ---- F\u00fclek ----
@@ -396,7 +441,9 @@ function card(it, i) {
   }).join("");
   return '<div class="card"><div class="code">' + esc(it.A || it.B) + '</div><div class="name">' + esc(name || "-") + "</div>" +
          '<div class="grid">' + infoRows(it).map(function (r) { return "<span>" + esc(r[0]) + "</span><span>" + esc(r[1]) + "</span>"; }).join("") +
-         '</div><div class="sell">' + btns + "</div></div>";
+         '</div><div class="sell">' + btns + "</div>" +
+         '<div class="two"><button onclick="openEdit(' + i + ')">\u270f\ufe0f Szerkeszt\u00e9s</button>' +
+         '<button onclick="openHistory(\'' + esc(it.A || it.B) + '\')">\ud83d\udd58 El\u0151zm\u00e9nyek</button></div></div>';
 }
 function stockOf(it) { var m = String(it.F || "").match(/\d+/); return m ? parseInt(m[0], 10) : 1; }
 
@@ -458,6 +505,115 @@ function submitSale() {
     beep(false);
     alert("Nem siker\u00fclt menteni:\n" + errText(e) + "\n\n" + ((ERR[e.kod] || [])[1] || ""));
   });
+}
+
+// ================= TERM\u00c9K SZERKESZT\u00c9SE =================
+var EDIT_FIELDS = [["C", "M\u00e1rka"], ["D", "T\u00edpus"], ["E", "Cikksz\u00e1m"], ["F", "DB (darab)"], ["G", "\u00c1llapot"], ["L", "Raklap"],
+                   ["K", "Polc"], ["M", "S\u00faly"], ["H", "\u00c1r"], ["N", "eBay ID"], ["O", "Megjegyz\u00e9s"], ["P", "\u00c1llapot r\u00e9szlet"]];
+var ALLAPOT = ["\u00daJ", "HASZN\u00c1LT", "FEL\u00daJ\u00cdTOTT"];
+var editItem = null;
+function openEdit(i) {
+  var it = lastItems[i];
+  editItem = it;
+  $("e-info").innerHTML = "\ud83c\udff7\ufe0f <b>" + esc(it.A) + "</b> | " + esc([it.C, it.D].filter(Boolean).join(" ") || "-");
+  $("e-fields").innerHTML = EDIT_FIELDS.map(function (f) {
+    var v = it[f[0]] || "";
+    var inp;
+    if (f[0] === "G") {
+      var opts = ALLAPOT.slice(); if (v && opts.indexOf(String(v).toUpperCase()) < 0) opts.unshift(v);
+      inp = '<select id="e-G" class="fin">' + (v ? "" : '<option value=""></option>') +
+            opts.map(function (o) { return "<option" + (String(v).toUpperCase() === o.toUpperCase() ? " selected" : "") + ">" + esc(o) + "</option>"; }).join("") + "</select>";
+    } else {
+      inp = '<input id="e-' + f[0] + '" class="fin" value="' + esc(v) + '"' + (f[0] === "F" ? ' inputmode="numeric"' : "") + ">";
+    }
+    return '<label class="f">' + esc(f[1]) + " (" + f[0] + ")</label>" + inp;
+  }).join("");
+  EDIT_FIELDS.forEach(function (f) {
+    var el = $("e-" + f[0]);
+    var mark = function () { el.classList.toggle("changed", el.value !== (editItem[f[0]] || "")); };
+    el.addEventListener("input", mark); el.addEventListener("change", mark);
+  });
+  $("e-go").disabled = false;
+  $("edit").classList.add("on");
+}
+function submitEdit() {
+  var it = editItem, valt = {}, n = 0;
+  EDIT_FIELDS.forEach(function (f) {
+    var v = $("e-" + f[0]).value.trim();
+    if (v !== String(it[f[0]] || "").trim()) { valt[f[0]] = v; n++; }
+  });
+  if (!n) { closeOverlay("edit"); return; }
+  if ("C" in valt || "D" in valt || "E" in valt) {
+    if (!confirm("M\u00e1rk\u00e1t / t\u00edpust / cikksz\u00e1mot m\u00f3dos\u00edtasz \u2013 biztos, hogy ugyanarr\u00f3l a term\u00e9kr\u0151l van sz\u00f3?")) return;
+  }
+  $("e-go").disabled = true;
+  api("POST", "/pda/change", { A: it.A, valtozasok: valt, tipus: Object.keys(valt).join() === "L" ? "ATHELYEZES" : "MODOSITAS", eszkoz: deviceName() },
+      "Term\u00e9k szerkeszt\u00e9se (" + it.A + ": " + Object.keys(valt).join(", ") + ")").then(function () {
+    closeOverlay("edit");
+    msgTo("status", "\u2705 <b>" + esc(it.A) + "</b> m\u00f3dos\u00edt\u00e1s elk\u00fcldve (" + n + " mez\u0151).<br><span style='color:#ccc'>Az asztali program hajtja v\u00e9gre \u2013 \ud83d\udcdc Napl\u00f3.</span>", "ok");
+    $("results").innerHTML = ""; beep(true);
+  }).catch(function (e) { $("e-go").disabled = false; alert("Nem siker\u00fclt:\n" + errText(e) + "\n\n" + ((ERR[e.kod] || [])[1] || "")); });
+}
+
+// ================= EL\u0150ZM\u00c9NYEK =================
+function openHistory(code) {
+  $("h-title").textContent = "\ud83d\udd58 El\u0151zm\u00e9nyek: " + code;
+  $("h-list").innerHTML = '<div class="msg info">Bet\u00f6lt\u00e9s\u2026</div>';
+  $("hist").classList.add("on");
+  api("GET", "/pda/history?code=" + encodeURIComponent(code)).then(function (js) {
+    var ev = js.esemenyek || [];
+    $("h-list").innerHTML = ev.length ? ev.map(function (x) {
+      return '<div class="hrow ' + (x.forras_tipus === "pda" ? "pda" : "") + '"><b>' + esc(String(x.ido || "").slice(0, 16)) + "</b> \u00b7 " + esc(x.esemeny) +
+             "<div>" + esc(x.reszletek || "") + '</div><div class="small">' + esc(x.honnan || "") + (x.gep ? " \u00b7 " + esc(x.gep) : "") + "</div></div>";
+    }).join("") + '<div class="small" style="margin-top:8px">K\u00e9k: a g\u00e9pi program napl\u00f3j\u00e1b\u00f3l \u00b7 Narancs: PDA-n t\u00f6rt\u00e9nt. ' +
+                  "A g\u00e9pi napl\u00f3 csak a friss\u00edtett g\u00e9pi programmal ker\u00fcl fel a szerverre.</div>"
+      : '<div class="msg info">Nincs ismert esem\u00e9ny. (A g\u00e9pi program napl\u00f3ja csak az \u00faj verzi\u00f3val ker\u00fcl fel a szerverre.)</div>';
+  }).catch(function (e) { $("h-list").innerHTML = '<div class="msg err">\u274c ' + esc(errText(e)) + "</div>"; });
+}
+
+// ================= ELAD\u00c1S P\u00d3TL\u00c1SA / JAV\u00cdT\u00c1SA / VISSZAVON\u00c1SA =================
+var seditSale = null;
+var SE_FIELDS = ["platform", "vevo", "ar", "darab", "tracking", "megjegyzes"];
+$("se-platform").innerHTML = Object.keys(PLATFORMS).map(function (p) { return '<option value="' + p + '">' + esc(PLATFORMS[p].cim) + "</option>"; }).join("");
+function findSale(eid) { return logData.filter(function (x) { return x.fajta === "eladas" && x.eladas_id === eid; })[0]; }
+function openSaleEdit(eid) {
+  var x = findSale(eid); if (!x) return;
+  seditSale = x;
+  $("se-info").innerHTML = "\ud83d\udcb0 <b>" + esc(x.A) + "</b> | " + esc(x.datum) + "<br>" + esc([x.C, x.D].filter(Boolean).join(" "));
+  SE_FIELDS.forEach(function (k) { $("se-" + k).value = x[k] || ""; });
+  $("se-go").disabled = false;
+  $("sedit").classList.add("on");
+  var first = ["vevo", "ar", "tracking"].filter(function (k) { return !x[k]; })[0];
+  setTimeout(function () { $("se-" + (first || "vevo")).focus(); }, 50);
+}
+function submitSaleEdit() {
+  var x = seditSale, mezok = {}, n = 0;
+  SE_FIELDS.forEach(function (k) {
+    var v = $("se-" + k).value.trim(); if (k === "tracking") v = fixScan(v);
+    if (v !== String(x[k] || "").trim()) { mezok[k] = v; n++; }
+  });
+  if (!n) { closeOverlay("sedit"); return; }
+  if ("darab" in mezok && !(parseInt(mezok.darab, 10) >= 1)) { $("se-darab").focus(); return; }
+  $("se-go").disabled = true;
+  api("POST", "/pda/sale/update", { eladas_id: x.eladas_id, mezok: mezok, eszkoz: deviceName() },
+      "Elad\u00e1s jav\u00edt\u00e1sa (" + x.A + ": " + Object.keys(mezok).join(", ") + ")").then(function (js) {
+    closeOverlay("sedit");
+    alert(js.mod === "helyben" ? "\u2705 Jav\u00edtva. A g\u00e9p m\u00e9g nem vette \u00e1t az elad\u00e1st \u2013 m\u00e1r a jav\u00edtott adattal fogja."
+                               : "\u2705 Elk\u00fcldve. Az asztali program jav\u00edtja (Eladottak + Google t\u00e1bl\u00e1zat" + ("darab" in mezok ? ", k\u00e9szlet" : "") + ").");
+    loadLog();
+  }).catch(function (e) { $("se-go").disabled = false; alert("Nem siker\u00fclt:\n" + errText(e)); });
+}
+function cancelSale(eid) {
+  var x = findSale(eid); if (!x) return;
+  if (!confirm("Visszavonod ezt az elad\u00e1st?\n\n" + x.A + " \u2013 " + x.darab + " db \u2013 " + ((PLATFORMS[x.platform] || {}).cim || x.platform))) return;
+  var vissza = String(x.keszlet_levonas) === "1" ?
+               confirm("Vissza\u00edrjam a k\u00e9szletet (+" + x.darab + " db)?\n\nOK = igen, M\u00e9gse = nem") : false;
+  api("POST", "/pda/sale/cancel", { eladas_id: eid, keszlet_vissza: vissza, eszkoz: deviceName() },
+      "Elad\u00e1s visszavon\u00e1sa (" + x.A + ")").then(function (js) {
+    alert(js.mod === "helyben" ? "\u2705 Visszavonva (a g\u00e9p m\u00e9g nem vette \u00e1t, a k\u00e9szlet nem v\u00e1ltozott)."
+                               : "\u2705 Elk\u00fcldve. Az asztali program vonja vissza" + (vissza ? " \u00e9s \u00edrja vissza a k\u00e9szletet." : "."));
+    loadLog();
+  }).catch(function (e) { alert("Nem siker\u00fclt:\n" + errText(e)); });
 }
 
 // ================= \u00c1THELYEZ\u00c9S =================
@@ -678,9 +834,27 @@ function renderLog() {
              "<div>" + esc((PLATFORMS[x.platform] || {}).cim || x.platform) + " \u00b7 " + esc([x.C, x.D].filter(Boolean).join(" ")) + "</div>" +
              '<div class="small">Vev\u0151: ' + esc(x.vevo || "-") + " \u00b7 \u00c1r: " + esc(x.ar || "-") + " \u00b7 Tracking: " + esc(x.tracking || "-") + " \u00b7 " + esc(x.eszkoz) + "</div>" +
              (miss.length ? '<div class="miss">\u23ed K\u00e9s\u0151bb kit\u00f6ltend\u0151 (g\u00e9pen, Eladottak f\u00fcl): ' + miss.map(function (k) { return { vevo: "vev\u0151", ar: "\u00e1r", tracking: "tracking" }[k]; }).join(", ") + "</div>" : "") +
-             '<div class="st">' + statusHtml(x) + "</div></div>";
+             '<div class="st">' + statusHtml(x) + "</div>" +
+             (x.visszavonva ? '<div class="fail">\u21a9\ufe0f Visszavonva (' + esc(String(x.visszavonva).slice(0, 16)) + ")</div>"
+                            : '<div class="two"><button onclick="openSaleEdit(\'' + esc(x.eladas_id) + '\')">\u270f\ufe0f P\u00f3tl\u00e1s / jav\u00edt\u00e1s</button>' +
+                              '<button onclick="cancelSale(\'' + esc(x.eladas_id) + '\')">\u21a9\ufe0f Visszavon\u00e1s</button></div>') + "</div>";
     }
     if (x.fajta === "valtozas") {
+      var ad = {}; try { ad = JSON.parse(x.adat || "{}") || {}; } catch (e) {}
+      var LBL = { C: "M\u00e1rka", D: "T\u00edpus", E: "Cikksz\u00e1m", F: "DB", G: "\u00c1llapot", H: "\u00c1r", K: "Polc", L: "Raklap", M: "S\u00faly", N: "eBay ID", O: "Megjegyz\u00e9s", P: "\u00c1llapot r\u00e9szlet",
+                  vevo: "Vev\u0151", ar: "\u00c1r", tracking: "Tracking", megjegyzes: "Megjegyz\u00e9s", darab: "Darab", platform: "Platform" };
+      var vlist = function () {
+        var v = ad.valtozasok || {}, r = ad.regi || {};
+        return Object.keys(v).map(function (k) { return esc(LBL[k] || k) + ": " + esc(r[k] || "\u2014") + " \u2192 <b>" + esc(v[k] || "\u2014") + "</b>"; }).join("<br>");
+      };
+      var title = { MODOSITAS: "\u270f\ufe0f Szerkeszt\u00e9s", ELADAS_MODOSITAS: "\u270f\ufe0f Elad\u00e1s jav\u00edt\u00e1sa", ELADAS_TORLES: "\u21a9\ufe0f Elad\u00e1s visszavon\u00e1sa" }[x.tipus];
+      if (title) {
+        var body = x.tipus === "ELADAS_TORLES" ? "K\u00e9szlet vissza\u00edr\u00e1sa: <b>" + (ad.keszlet_vissza ? "igen (+" + esc(ad.darab) + " db)" : "nem") + "</b>" : vlist();
+        return '<div class="row ' + cls + '"><div class="top"><span>' + title + " \u00b7 " + esc(x.A) + "</span><span>" + esc(x.ido) + "</span></div>" +
+               "<div>" + body + "</div>" +
+               '<div class="small">' + esc([x.C, x.D].filter(Boolean).join(" ")) + " \u00b7 " + esc(x.eszkoz) + "</div>" +
+               '<div class="st">' + statusHtml(x) + "</div></div>";
+      }
       return '<div class="row ' + cls + '"><div class="top"><span>\ud83d\udce6 ' + esc(x.A) + "</span><span>" + esc(x.ido) + "</span></div>" +
              "<div>\u00c1thelyez\u00e9s: raklap <b>" + esc(x.regi || "\u2014") + "</b> \u2192 <b>" + esc(x.uj) + "</b>" + (x.megjegyzes ? " (" + esc(x.megjegyzes) + ")" : "") + "</div>" +
              '<div class="small">' + esc([x.C, x.D].filter(Boolean).join(" ")) + " \u00b7 " + esc(x.eszkoz) + "</div>" +
@@ -745,6 +919,13 @@ function deviceName() { try { return localStorage.getItem("devname") || "PDA"; }
 window.onScan = function (code) {
   code = fixScan(code);
   if ($("token").classList.contains("on")) { $("tok-in").value = code; return; }
+  if ($("hist").classList.contains("on")) return;
+  if ($("edit").classList.contains("on") || $("sedit").classList.contains("on")) {
+    var ae = document.activeElement;
+    var tgt = (ae && ae.tagName === "INPUT") ? ae : ($("sedit").classList.contains("on") ? $("se-tracking") : $("e-L"));
+    if (tgt) tgt.value = code;
+    return;
+  }
   if ($("sale").classList.contains("on")) {
     var a = document.activeElement;
     var target = (a && a.tagName === "INPUT" && a.type !== "checkbox" && a.id !== "s-darab") ? a : $("s-tracking");
@@ -769,6 +950,8 @@ document.addEventListener("keydown", function (e) {
 window.onBack = function () {
   if ($("token").classList.contains("on")) return false;
   if ($("sale").classList.contains("on")) { closeSale(); return true; }
+  var open = ["edit", "hist", "sedit"].filter(function (o) { return $(o).classList.contains("on"); })[0];
+  if (open) { closeOverlay(open); return true; }
   if (activeTab !== "sell") { showTab("sell"); return true; }
   return false;
 };
