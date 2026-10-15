@@ -13,24 +13,29 @@
   .title { font-weight:bold; font-size:18px; flex:1; }
   .dot { width:12px; height:12px; border-radius:50%; background:#666; display:inline-block; }
   .dot.ok { background:var(--ok); } .dot.bad { background:var(--err); }
-  .tabs { display:flex; gap:6px; margin-top:8px; }
-  .tabs button { flex:1; padding:10px; font-size:15px; font-weight:bold; border:none; border-radius:6px; background:#2b2b2b; color:var(--txt); }
+  .tabs { display:grid; grid-template-columns: repeat(5, 1fr); gap:4px; margin-top:8px; }
+  .tabs button { padding:7px 2px; font-size:12px; font-weight:bold; border:none; border-radius:6px; background:#2b2b2b; color:var(--txt); line-height:1.25; }
+  .tabs button b { display:block; font-size:19px; }
   .tabs button.on { background:var(--blue); color:#000; }
   main { padding:10px; }
   .scan { display:flex; gap:6px; }
   .scan input { flex:1; min-width:0; font-size:20px; padding:12px; border-radius:8px; border:2px solid #444; background:#2b2b2b; color:#fff; }
   .scan input:focus { border-color:var(--ok); outline:none; }
-  .scan button { font-size:18px; padding:0 14px; border:none; border-radius:8px; background:var(--blue); color:#000; font-weight:bold; }
+  .scan button { font-size:17px; padding:0 14px; border:none; border-radius:8px; background:var(--blue); color:#000; font-weight:bold; }
   .msg { margin:10px 0; padding:12px; border-radius:8px; font-size:15px; }
-  .msg.ok { background:#1b5e20; } .msg.err { background:#b71c1c; } .msg.info { background:#263238; color:var(--dim); }
+  .msg.ok { background:#1b5e20; } .msg.err { background:#b71c1c; } .msg.info { background:#263238; color:#cfd8dc; } .msg.warn { background:#e65100; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; margin:10px 0; }
   .code { font-size:22px; font-weight:bold; color:var(--blue); }
   .name { font-size:17px; font-weight:bold; margin:4px 0 8px; }
   .grid { display:grid; grid-template-columns: auto 1fr; gap:3px 10px; font-size:15px; }
   .grid span:nth-child(odd) { color:var(--dim); }
+  .big { font-size:26px; font-weight:bold; color:var(--warn); }
   .sell { display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px; margin-top:12px; }
   .sell button { padding:14px 4px; font-size:14px; font-weight:bold; border:none; border-radius:8px; color:#000; }
   .b-kivul { background:#ffb74d; } .b-ebay { background:#29b6f6; } .b-web { background:#ba68c8; }
+  .btn { width:100%; padding:14px; font-size:17px; font-weight:bold; border:none; border-radius:8px; margin-top:8px; }
+  .btn.green { background:var(--ok); color:#000; } .btn.grey { background:#3a3a3a; color:#fff; } .btn.orange { background:var(--warn); color:#000; }
+  .btn:disabled { opacity:.5; }
   .overlay { position:fixed; inset:0; background:var(--bg); z-index:20; overflow-y:auto; padding:12px; display:none; }
   .overlay.on { display:block; }
   .ohead { font-size:19px; font-weight:bold; margin-bottom:8px; }
@@ -46,13 +51,25 @@
   .actions button { padding:15px; font-size:17px; font-weight:bold; border:none; border-radius:8px; }
   .go { flex:3; background:var(--ok); color:#000; } .cancel { flex:1; background:#444; color:#fff; }
   .go:disabled { opacity:.5; }
-  .sale { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px; margin:8px 0; font-size:14px; }
-  .sale .top { display:flex; justify-content:space-between; gap:6px; font-weight:bold; }
-  .sale .st { font-size:13px; margin-top:4px; }
-  .pend { color:var(--warn); } .done { color:var(--ok); }
+  .row { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px; margin:8px 0; font-size:14px; }
+  .row .top { display:flex; justify-content:space-between; gap:6px; font-weight:bold; }
+  .row .st { font-size:13px; margin-top:4px; }
+  .row.bad { border-color:var(--err); } .row.okb { border-color:#2e7d32; } .row.wb { border-color:var(--warn); }
+  .pend { color:var(--warn); } .done { color:var(--ok); } .fail { color:var(--err); font-weight:bold; }
   .miss { color:var(--warn); }
   .hidden { display:none; }
-  .settings { color:var(--dim); font-size:13px; margin-top:20px; }
+  .small { color:var(--dim); font-size:13px; }
+  .prog { height:10px; background:#333; border-radius:5px; overflow:hidden; margin:6px 0; }
+  .prog div { height:100%; background:var(--ok); }
+  .seg { display:flex; gap:6px; margin:6px 0; }
+  .seg button { flex:1; padding:9px; border:none; border-radius:6px; background:#2b2b2b; color:#fff; font-weight:bold; font-size:13px; }
+  .seg button.on { background:var(--blue); color:#000; }
+  .log { font-family: monospace; font-size:12px; background:#0b0b0b; border:1px solid var(--line); border-radius:6px; padding:6px; margin:4px 0; white-space:pre-wrap; word-break:break-word; }
+  .log.hiba { border-color:var(--err); color:#ffcdd2; } .log.ok { color:#b9f6ca; } .log.info { color:#cfd8dc; } .log.figy { border-color:var(--warn); color:#ffe0b2; }
+  details { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin:8px 0; }
+  summary { font-weight:bold; cursor:pointer; }
+  .kodlista div { font-size:13px; margin:5px 0; }
+  .kodlista b { color:var(--blue); }
   .settings input { font-size:15px; padding:8px; border-radius:6px; border:1px solid #444; background:#2b2b2b; color:#fff; width:100%; }
 </style>
 </head>
@@ -63,33 +80,110 @@
     <span id="srv" class="dot" title="Szerver"></span>
   </div>
   <div class="tabs">
-    <button id="tab-sell" class="on" onclick="showTab('sell')">&#x1F4B0; Elad&#xE1;s</button>
-    <button id="tab-list" onclick="showTab('list')">&#x1F4CB; Elad&#xE1;sok</button>
+    <button id="tab-sell" class="on" onclick="showTab('sell')"><b>&#x1F4B0;</b>Elad&#xE1;s</button>
+    <button id="tab-move" onclick="showTab('move')"><b>&#x1F4E6;</b>&#xC1;thely.</button>
+    <button id="tab-inv" onclick="showTab('inv')"><b>&#x1F4CB;</b>Lelt&#xE1;r</button>
+    <button id="tab-log" onclick="showTab('log')"><b>&#x1F4DC;</b>Napl&#xF3;</button>
+    <button id="tab-proc" onclick="showTab('proc')"><b>&#x2699;&#xFE0F;</b>Folyamat</button>
   </div>
 </header>
 
 <main>
+  <!-- ================= ELAD&#xC1;S ================= -->
   <section id="page-sell">
     <form class="scan" onsubmit="event.preventDefault(); doSearch(scanInput.value);">
-      <input id="scan" autocomplete="off" autocapitalize="characters" spellcheck="false"
-             placeholder="Csippants a vonalk&#xF3;dra&#x2026;">
+      <input id="scan" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Csippants a vonalk&#xF3;dra&#x2026;">
       <button type="submit">&#x1F50D;</button>
     </form>
     <div id="status"></div>
     <div id="results"></div>
   </section>
 
-  <section id="page-list" class="hidden">
-    <div class="msg info">A PDA-n r&#xF6;gz&#xED;tett elad&#xE1;sok. A rakt&#xE1;rk&#xE9;szletet &#xE9;s a Google t&#xE1;bl&#xE1;zatot az asztali program friss&#xED;ti, amikor &#xE1;tveszi &#x151;ket (&#x23F3; &#x2192; &#x2714;).</div>
-    <div id="sales"></div>
-    <div class="settings">
-      <label class="f">Eszk&#xF6;z neve (az elad&#xE1;sokn&#xE1;l ez l&#xE1;tszik):</label>
-      <input id="devname" placeholder="PDA">
-      <button type="button" onclick="showTokenScreen('')" style="margin-top:14px;width:100%;padding:10px;font-size:15px;border:none;border-radius:6px;background:#2b2b2b;color:#fff">&#x1F511; Szerver jelsz&#xF3; m&#xF3;dos&#xED;t&#xE1;sa</button>
+  <!-- ================= &#xC1;THELYEZ&#xC9;S ================= -->
+  <section id="page-move" class="hidden">
+    <div class="msg info">1&#xFE0F;&#x20E3; Csippantsd a <b>term&#xE9;ket</b>, 2&#xFE0F;&#x20E3; csippantsd vagy &#xED;rd be az <b>&#xFA;j raklapot</b>.<br>
+      <span class="small">A v&#xE1;ltoz&#xE1;st az asztali program hajtja v&#xE9;gre (Google t&#xE1;bl&#xE1;zat is) &#x2013; az eredm&#xE9;ny a Napl&#xF3; f&#xFC;l&#xF6;n l&#xE1;tszik.</span></div>
+    <form class="scan" onsubmit="event.preventDefault(); moveProduct(moveInput.value);">
+      <input id="move-scan" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="1. Term&#xE9;k (R18&#x2026;)">
+      <button type="submit">&#x1F50D;</button>
+    </form>
+    <div id="move-status"></div>
+    <div id="move-card"></div>
+    <div id="move-target" class="hidden">
+      <label class="f">2. &#xDA;j raklap (csippant&#xE1;s vagy be&#xED;r&#xE1;s)</label>
+      <div class="frow"><input id="move-pallet" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="pl. 574">
+        <button class="later" style="background:var(--ok)" type="button" onclick="submitMove()">&#x27A1;&#xFE0F; &#xC1;thelyez</button></div>
     </div>
+    <label class="chk"><input type="checkbox" id="move-keep">
+      <span>Gyors m&#xF3;d: a c&#xE9;l raklap megmarad &#x2013; minden k&#xF6;vetkez&#x151; csippantott term&#xE9;k azonnal erre ker&#xFC;l</span></label>
+  </section>
+
+  <!-- ================= LELT&#xC1;R ================= -->
+  <section id="page-inv" class="hidden">
+    <div id="inv-start">
+      <div class="msg info">Csippantsd vagy &#xED;rd be a <b>raklap</b> sz&#xE1;m&#xE1;t, azt&#xE1;n csippantsd v&#xE9;gig a rajta l&#xE9;v&#x151; term&#xE9;keket.
+        A v&#xE9;g&#xE9;n ki&#xED;rja, mi <b>hi&#xE1;nyzik</b> &#xE9;s mi van ott <b>m&#xE1;s raklapr&#xF3;l</b>.</div>
+      <form class="scan" onsubmit="event.preventDefault(); startInventory(invPalletInput.value);">
+        <input id="inv-pallet" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Raklap (pl. 573)">
+        <button type="submit">&#x25B6;&#xFE0F;</button>
+      </form>
+    </div>
+    <div id="inv-run" class="hidden">
+      <div class="card">
+        <div class="top" style="display:flex;justify-content:space-between"><span class="code" id="inv-title">Raklap</span>
+          <span class="big" id="inv-count">0/0</span></div>
+        <div class="prog"><div id="inv-bar" style="width:0%"></div></div>
+        <div class="small">Csippantsd a term&#xE9;keket. K&#xE9;zi be&#xED;r&#xE1;s:</div>
+        <form class="scan" onsubmit="event.preventDefault(); invScan(invInput.value);" style="margin-top:6px">
+          <input id="inv-scan" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="R18&#x2026;">
+          <button type="submit">&#x2714;</button>
+        </form>
+      </div>
+      <div id="inv-status"></div>
+      <div id="inv-list"></div>
+      <button class="btn green" type="button" onclick="finishInventory()">&#x2705; Lelt&#xE1;r lez&#xE1;r&#xE1;sa</button>
+      <button class="btn grey" type="button" onclick="cancelInventory()">&#x2716; Lelt&#xE1;r elvet&#xE9;se</button>
+    </div>
+  </section>
+
+  <!-- ================= NAPL&#xD3; ================= -->
+  <section id="page-log" class="hidden">
+    <div class="seg">
+      <button id="lf-all" class="on" onclick="setLogFilter('all')">Mind</button>
+      <button id="lf-eladas" onclick="setLogFilter('eladas')">Elad&#xE1;s</button>
+      <button id="lf-valtozas" onclick="setLogFilter('valtozas')">&#xC1;thely.</button>
+      <button id="lf-naplo" onclick="setLogFilter('naplo')">Lelt&#xE1;r/hiba</button>
+    </div>
+    <label class="chk" style="color:#cfd8dc;margin:6px 0"><input type="checkbox" id="log-mine" onchange="renderLog()"><span>Csak ezen a PDA-n</span></label>
+    <div id="log-list"></div>
+  </section>
+
+  <!-- ================= FOLYAMAT NAPL&#xD3; ================= -->
+  <section id="page-proc" class="hidden">
+    <div class="seg">
+      <button id="pf-local" class="on" onclick="setProcView('local')">Ezen a PDA-n</button>
+      <button id="pf-server" onclick="setProcView('server')">Szerver: minden hiba</button>
+    </div>
+    <label class="chk" style="color:#cfd8dc;margin:6px 0"><input type="checkbox" id="proc-err" onchange="renderProc()"><span>Csak a hib&#xE1;k</span></label>
+    <div id="proc-list"></div>
+    <details>
+      <summary>&#x2753; Hibak&#xF3;dok magyar&#xE1;zata</summary>
+      <div class="kodlista" id="kodlista"></div>
+    </details>
+    <details>
+      <summary>&#x2699;&#xFE0F; Be&#xE1;ll&#xED;t&#xE1;sok</summary>
+      <div class="settings">
+        <label class="f">Eszk&#xF6;z neve (a napl&#xF3;ban ez l&#xE1;tszik):</label>
+        <input id="devname" placeholder="PDA">
+        <button class="btn grey" type="button" onclick="showTokenScreen('')">&#x1F511; Szerver jelsz&#xF3; m&#xF3;dos&#xED;t&#xE1;sa</button>
+        <button class="btn grey" type="button" onclick="clearProc()">&#x1F5D1;&#xFE0F; Folyamat napl&#xF3; t&#xF6;rl&#xE9;se (ezen a PDA-n)</button>
+        <div class="small" style="margin-top:10px">Fel&#xFC;let verzi&#xF3;: <span id="ver"></span></div>
+      </div>
+    </details>
   </section>
 </main>
 
+<!-- ================= JELSZ&#xD3; ================= -->
 <div id="token" class="overlay">
   <div class="ohead">&#x1F511; Szerver jelsz&#xF3;</div>
   <div class="msg info">Add meg a rakt&#xE1;r szerver jelszav&#xE1;t (tokent). El&#xE9;g egyszer: a PDA megjegyzi.<br>
@@ -102,6 +196,7 @@
   </div>
 </div>
 
+<!-- ================= ELAD&#xC1;S ABLAK ================= -->
 <div id="sale" class="overlay">
   <div class="ohead" id="s-title">Elad&#xE1;s</div>
   <div class="pinfo" id="s-info"></div>
@@ -124,27 +219,69 @@
 </div>
 
 <script>
+var VERSION = "2026.10.15-b";
 var PLATFORMS = {
   EBAY_KIVULI: { cim: "eBay-en k\u00edv\u00fcli elad\u00e1s", gomb: "eBay-en k\u00edv\u00fcli", cls: "b-kivul" },
   EBAY:        { cim: "eBay elad\u00e1s",           gomb: "eBay",           cls: "b-ebay" },
   WEBSHOP:     { cim: "Webshop elad\u00e1s",        gomb: "Webshop",        cls: "b-web" }
 };
-var scanInput = document.getElementById("scan");
+// ---- Hibak\u00f3dok (a Folyamat napl\u00f3 f\u00fcl\u00f6n a magyar\u00e1zatuk is l\u00e1tszik) ----
+var ERR = {
+  "P-01": ["Nincs kapcsolat a szerverrel", "Van Wi-Fi / mobilnet? Fut a szerver? (VPS: sudo systemctl status raktarapp)"],
+  "P-02": ["Id\u0151t\u00fall\u00e9p\u00e9s \u2013 a szerver nem v\u00e1laszolt id\u0151ben", "Gyenge Wi-Fi, vagy a szerver t\u00falterhelt. Pr\u00f3b\u00e1ld \u00fajra."],
+  "P-03": ["\u00c9rthetetlen v\u00e1lasz a szervert\u0151l", "Val\u00f3sz\u00edn\u0171leg r\u00e9gi server_api.py fut a VPS-en \u2013 t\u00f6ltsd fel az \u00fajat \u00e9s ind\u00edtsd \u00fajra."],
+  "S-400": ["Hib\u00e1s vagy hi\u00e1nyz\u00f3 adat", "N\u00e9zd meg a be\u00edrt \u00e9rt\u00e9ket (pl. darabsz\u00e1m, raklap)."],
+  "S-401": ["Hib\u00e1s vagy hi\u00e1nyz\u00f3 jelsz\u00f3", "Folyamat f\u00fcl \u2192 Be\u00e1ll\u00edt\u00e1sok \u2192 Szerver jelsz\u00f3 (a VPS-en: /opt/raktarapp/api_token.txt)."],
+  "S-404": ["Nem tal\u00e1lhat\u00f3", "A term\u00e9k nincs a rendszerben \u2013 vagy a szerveren m\u00e9g nincs ez a funkci\u00f3 (r\u00e9gi server_api.py)."],
+  "S-409": ["\u00dctk\u00f6z\u00e9s \u2013 m\u00e1r \u00e1tvette egy m\u00e1sik g\u00e9p", "Nincs teend\u0151, egy m\u00e1sik g\u00e9p m\u00e1r feldolgozta."],
+  "S-500": ["Szerver hiba", "A VPS napl\u00f3j\u00e1ban l\u00e1tszik a r\u00e9szlet: sudo journalctl -u raktarapp -n 50"],
+  "A-10": ["Az asztali program m\u00e9g nem vette \u00e1t (2 percn\u00e9l r\u00e9gebben)", "Fut a g\u00e9pi program? A c\u00edm\u00e9ben v2026.10.15-pda vagy \u00fajabb \u00e1ll? Van mellette api_token.txt?"],
+  "A-21": ["A term\u00e9k nincs meg az asztali g\u00e9pen", "A g\u00e9pi program adatb\u00e1zis\u00e1ban nincs ilyen R18 \u2013 n\u00e9zd meg az Excel Live-on / Szerver adatb\u00e1zis f\u00fcl\u00f6n."],
+  "A-22": ["Helyi adatb\u00e1zis / ment\u00e9si hiba a g\u00e9pen", "A g\u00e9pi program Folyamat napl\u00f3j\u00e1ban l\u00e1tszik a r\u00e9szlet."],
+  "A-23": ["Ismeretlen platform / mez\u0151", "A PDA fel\u00fclet \u00e9s a g\u00e9pi program verzi\u00f3ja nem egyezik \u2013 friss\u00edtsd mindkett\u0151t."],
+  "A-24": ["V\u00e1ratlan hiba a g\u00e9pen", "A g\u00e9pi program Folyamat napl\u00f3j\u00e1ban l\u00e1tszik a r\u00e9szlet."]
+};
+function $(id) { return document.getElementById(id); }
+var scanInput = $("scan"), moveInput = $("move-scan"), invPalletInput = $("inv-pallet"), invInput = $("inv-scan");
 var lastItems = [];
 var current = null;   // { platform, item }
+var activeTab = "sell";
+$("ver").textContent = VERSION;
 
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
     return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
   });
 }
-// Magyar billenty\u0171zetre \u00e1ll\u00edtott olvas\u00f3: '-' helyett '\u00fc', '0' helyett '\u00f6' j\u00f6het
+function nowStr() {
+  var n = new Date(), p = function (x) { return ("0" + x).slice(-2); };
+  return n.getFullYear() + "-" + p(n.getMonth() + 1) + "-" + p(n.getDate()) + " " + p(n.getHours()) + ":" + p(n.getMinutes()) + ":" + p(n.getSeconds());
+}
+function isR18(c) { return /^R18-\d+$/i.test(c); }
 function fixScan(t) {
+  // Magyar billenty\u0171zetre \u00e1ll\u00edtott olvas\u00f3: '-' helyett '\u00fc', '0' helyett '\u00f6' j\u00f6het
   t = String(t || "").normalize("NFC").trim();
   var f = t.replace(/[\u00fc\u00dc]/g, "-").replace(/[\u00f6\u00d6]/g, "0");
   return (/\s/.test(f) || /[^\x00-\x7f]/.test(f)) ? t : f;
 }
-// ---- Jelsz\u00f3 (token): a PDA app t\u00e1rolja (RaktarApp), b\u00f6ng\u00e9sz\u0151ben a localStorage ----
+function beep(ok) { try { if (navigator.vibrate) navigator.vibrate(ok ? 60 : [80, 60, 80]); } catch (e) {} }
+
+// ---- Folyamat napl\u00f3 (ezen a PDA-n, max. 400 bejegyz\u00e9s) ----
+function procLoad() { try { return JSON.parse(localStorage.getItem("folyamat") || "[]"); } catch (e) { return []; } }
+function proc(szint, kod, uzenet, reszlet) {
+  var arr = procLoad();
+  arr.unshift({ t: nowStr(), szint: szint, kod: kod || "", uzenet: uzenet || "", reszlet: reszlet || "" });
+  if (arr.length > 400) arr.length = 400;
+  try { localStorage.setItem("folyamat", JSON.stringify(arr)); } catch (e) {}
+  if (activeTab === "proc") renderProc();
+  // A hib\u00e1kat (ha van kapcsolat) a szerverre is elk\u00fcldj\u00fck, hogy a g\u00e9pr\u0151l is l\u00e1tsz\u00f3djanak
+  if (szint === "hiba" && kod !== "P-01" && kod !== "P-02" && kod !== "S-401") {
+    rawApi("POST", "/pda/log", { eszkoz: deviceName(), szint: "HIBA", esemeny: uzenet, kod: kod, reszletek: reszlet }).catch(function () {});
+  }
+}
+function clearProc() { if (confirm("T\u00f6rl\u00f6d a Folyamat napl\u00f3t ezen a PDA-n?")) { try { localStorage.removeItem("folyamat"); } catch (e) {} renderProc(); } }
+
+// ---- Jelsz\u00f3 ----
 function getToken() {
   try { if (window.RaktarApp && RaktarApp.getToken) return RaktarApp.getToken() || ""; } catch (e) {}
   try { return localStorage.getItem("token") || ""; } catch (e) { return ""; }
@@ -155,205 +292,502 @@ function saveToken(t) {
   try { localStorage.setItem("token", t); } catch (e) {}
 }
 function showTokenScreen(msg) {
-  document.getElementById("tok-msg").textContent = msg || "";
-  document.getElementById("tok-in").value = "";
-  document.getElementById("token").classList.add("on");
-  setTimeout(function () { document.getElementById("tok-in").focus(); }, 50);
+  $("tok-msg").textContent = msg || "";
+  $("tok-in").value = "";
+  $("token").classList.add("on");
+  setTimeout(function () { $("tok-in").focus(); }, 50);
 }
 function submitToken() {
-  var t = document.getElementById("tok-in").value.trim();
+  var t = $("tok-in").value.trim();
   if (!t) return;
   saveToken(t);
-  document.getElementById("token").classList.remove("on");
+  proc("info", "", "Szerver jelsz\u00f3 elmentve");
+  $("token").classList.remove("on");
   ping(); focusScan();
 }
-function api(method, url, body) {
+
+// ---- Szerver h\u00edv\u00e1s: minden hiba k\u00f3dot kap (P-xx: PDA / h\u00e1l\u00f3zat, S-xxx: szerver) ----
+function rawApi(method, url, body) {
+  var ctrl = window.AbortController ? new AbortController() : null;
+  var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 15000) : null;
   var opt = { method: method, headers: { "Content-Type": "application/json", "X-Raktar-Token": getToken() } };
+  if (ctrl) opt.signal = ctrl.signal;
   if (body) opt.body = JSON.stringify(body);
+  function fail(kod, msg, http) { var e = new Error(msg); e.kod = kod; e.http = http || 0; return e; }
   return fetch(url, opt).then(function (r) {
-    return r.json().catch(function () { return {}; }).then(function (js) {
+    if (timer) clearTimeout(timer);
+    return r.text().then(function (txt) {
+      var js = null;
+      try { js = JSON.parse(txt); } catch (e) {}
       setServer(true);
-      if (r.status === 401) {
-        showTokenScreen(getToken() ? "A megadott jelsz\u00f3 hib\u00e1s." : "");
-        throw new Error("Jelsz\u00f3 sz\u00fcks\u00e9ges");
-      }
-      if (!r.ok) throw new Error(js.message || ("HTTP " + r.status));
-      return js;
+      if (r.ok && js) return js;
+      if (r.status === 401) throw fail("S-401", (js && js.message) || "Hib\u00e1s vagy hi\u00e1nyz\u00f3 jelsz\u00f3", 401);
+      if (!js) throw fail(r.status === 404 ? "S-404" : "P-03",
+                          r.status === 404 ? "A szerveren nincs ilyen funkci\u00f3 (" + url.split("?")[0] + ") \u2013 r\u00e9gi server_api.py?" :
+                                             "\u00c9rthetetlen v\u00e1lasz (HTTP " + r.status + ")", r.status);
+      throw fail(js.kod || ("S-" + r.status), js.message || ("HTTP " + r.status), r.status);
     });
-  }, function (e) { setServer(false); throw new Error("Nincs kapcsolat a szerverrel"); });
+  }, function (e) {
+    if (timer) clearTimeout(timer);
+    setServer(false);
+    if (e && e.name === "AbortError") throw fail("P-02", "Id\u0151t\u00fall\u00e9p\u00e9s \u2013 a szerver nem v\u00e1laszolt 15 mp alatt");
+    throw fail("P-01", "Nincs kapcsolat a szerverrel");
+  });
 }
-function setServer(ok) { document.getElementById("srv").className = "dot " + (ok ? "ok" : "bad"); }
-function status(html, cls) { document.getElementById("status").innerHTML = html ? '<div class="msg ' + cls + '">' + html + "</div>" : ""; }
-function focusScan() { if (!saleOpen()) { scanInput.focus(); scanInput.select(); } }
-function saleOpen() {
-  return document.getElementById("sale").classList.contains("on") || document.getElementById("token").classList.contains("on");
+// api(): mint rawApi, de a hib\u00e1t a Folyamat napl\u00f3ba is be\u00edrja; 'mit' = mit pr\u00f3b\u00e1ltunk (pl. "Elad\u00e1s r\u00f6gz\u00edt\u00e9se")
+function api(method, url, body, mit) {
+  return rawApi(method, url, body).then(function (js) {
+    if (mit) proc("ok", "", mit + " \u2013 siker\u00fclt");
+    return js;
+  }, function (e) {
+    if (e.kod === "S-401") showTokenScreen(getToken() ? "A megadott jelsz\u00f3 hib\u00e1s." : "");
+    proc("hiba", e.kod, (mit ? mit + ": " : "") + e.message, method + " " + url.split("?")[0] + (e.http ? " \u2192 HTTP " + e.http : ""));
+    throw e;
+  });
 }
+function errText(e) { return "[" + (e.kod || "?") + "] " + e.message; }
+var lastServerOk = null;
+function setServer(ok) { $("srv").className = "dot " + (ok ? "ok" : "bad"); lastServerOk = ok; }
+function overlayOpen() { return $("sale").classList.contains("on") || $("token").classList.contains("on"); }
+function msgTo(id, html, cls) { $(id).innerHTML = html ? '<div class="msg ' + cls + '">' + html + "</div>" : ""; }
 
+// ---- F\u00fclek ----
+var TABS = ["sell", "move", "inv", "log", "proc"];
 function showTab(t) {
-  document.getElementById("page-sell").classList.toggle("hidden", t !== "sell");
-  document.getElementById("page-list").classList.toggle("hidden", t !== "list");
-  document.getElementById("tab-sell").classList.toggle("on", t === "sell");
-  document.getElementById("tab-list").classList.toggle("on", t === "list");
-  if (t === "list") loadSales(); else focusScan();
+  activeTab = t;
+  TABS.forEach(function (x) { $("page-" + x).classList.toggle("hidden", x !== t); $("tab-" + x).classList.toggle("on", x === t); });
+  if (t === "log") loadLog();
+  if (t === "proc") renderProc();
+  if (t === "inv") renderInventory();
+  focusScan();
 }
+function activeInput() {
+  if (activeTab === "sell") return scanInput;
+  if (activeTab === "move") return $("move-target").classList.contains("hidden") ? moveInput : $("move-pallet");
+  if (activeTab === "inv") return inv ? invInput : invPalletInput;
+  return null;
+}
+function focusScan() { var el = activeInput(); if (el && !overlayOpen()) { el.focus(); el.select(); } }
 
-// ---- Keres\u00e9s ----
+// ================= ELAD\u00c1S =================
 function doSearch(q) {
   q = fixScan(q);
   scanInput.value = q;
   if (!q) return;
-  showTab("sell");
-  status("\ud83d\udd0d Keres\u00e9s: <b>" + esc(q) + "</b>\u2026", "info");
-  document.getElementById("results").innerHTML = "";
-  api("GET", "/pda/search?q=" + encodeURIComponent(q)).then(function (js) {
+  if (activeTab !== "sell") showTab("sell");
+  msgTo("status", "\ud83d\udd0d Keres\u00e9s: <b>" + esc(q) + "</b>\u2026", "info");
+  $("results").innerHTML = "";
+  api("GET", "/pda/search?q=" + encodeURIComponent(q), null).then(function (js) {
     lastItems = js.items || [];
-    if (!lastItems.length) { status("\u274c Nincs tal\u00e1lat: <b>" + esc(q) + "</b>", "err"); }
-    else status("", "");
-    document.getElementById("results").innerHTML = lastItems.map(card).join("");
+    if (!lastItems.length) { msgTo("status", "\u274c Nincs tal\u00e1lat: <b>" + esc(q) + "</b>", "err"); proc("info", "", "Keres\u00e9s: nincs tal\u00e1lat \u2013 " + q); beep(false); }
+    else { msgTo("status", "", ""); beep(true); }
+    $("results").innerHTML = lastItems.map(card).join("");
     focusScan();
-  }).catch(function (e) { status("\u274c " + esc(e.message), "err"); focusScan(); });
+  }).catch(function (e) { msgTo("status", "\u274c " + esc(errText(e)), "err"); beep(false); focusScan(); });
+}
+function infoRows(it) {
+  return [["Cikksz\u00e1m", it.E], ["\u00c1llapot", it.G], ["Rakt\u00e1ron", (it.F || "1") + " db"], ["Raklap", it.L],
+          ["S\u00faly", it.M], ["eBay sz\u00e1m", it.N]].filter(function (r) { return r[1]; });
 }
 function card(it, i) {
   var name = [it.C, it.D].filter(Boolean).join(" ");
-  var rows = [["Cikksz\u00e1m", it.E], ["\u00c1llapot", it.G], ["Rakt\u00e1ron", (it.F || "1") + " db"], ["Raklap", it.L],
-              ["S\u00faly", it.M], ["eBay sz\u00e1m", it.N]].filter(function (r) { return r[1]; });
   var btns = Object.keys(PLATFORMS).map(function (p) {
     return '<button class="' + PLATFORMS[p].cls + '" onclick="openSale(\'' + p + '\',' + i + ')">\ud83d\udcb0 ' + esc(PLATFORMS[p].gomb) + "</button>";
   }).join("");
   return '<div class="card"><div class="code">' + esc(it.A || it.B) + '</div><div class="name">' + esc(name || "-") + "</div>" +
-         '<div class="grid">' + rows.map(function (r) { return "<span>" + esc(r[0]) + "</span><span>" + esc(r[1]) + "</span>"; }).join("") +
+         '<div class="grid">' + infoRows(it).map(function (r) { return "<span>" + esc(r[0]) + "</span><span>" + esc(r[1]) + "</span>"; }).join("") +
          '</div><div class="sell">' + btns + "</div></div>";
 }
 function stockOf(it) { var m = String(it.F || "").match(/\d+/); return m ? parseInt(m[0], 10) : 1; }
 
-// ---- Elad\u00e1s ablak ----
 function openSale(platform, i) {
   var it = lastItems[i];
   current = { platform: platform, item: it };
-  var now = new Date();
-  var d = now.getFullYear() + "-" + ("0" + (now.getMonth() + 1)).slice(-2) + "-" + ("0" + now.getDate()).slice(-2) + " " +
-          ("0" + now.getHours()).slice(-2) + ":" + ("0" + now.getMinutes()).slice(-2);
-  document.getElementById("s-title").textContent = "\ud83d\udcb0 " + PLATFORMS[platform].cim;
-  document.getElementById("s-info").innerHTML = "\ud83c\udff7\ufe0f <b>" + esc(it.A) + "</b> | " + esc(it.C || "-") + " | " + esc(it.D || "-") +
-      " | " + esc(it.E || "-") + "<br>\ud83d\udce6 Rakt\u00e1ron: <b>" + stockOf(it) + " db</b> | \ud83d\udcc5 " + d + " (automatikus)";
+  $("s-title").textContent = "\ud83d\udcb0 " + PLATFORMS[platform].cim;
+  $("s-info").innerHTML = "\ud83c\udff7\ufe0f <b>" + esc(it.A) + "</b> | " + esc(it.C || "-") + " | " + esc(it.D || "-") +
+      " | " + esc(it.E || "-") + "<br>\ud83d\udce6 Rakt\u00e1ron: <b>" + stockOf(it) + " db</b> | \ud83d\udcc5 " + nowStr().slice(0, 16) + " (automatikus)";
   ["s-vevo", "s-ar", "s-tracking", "s-megj"].forEach(function (id) {
-    var el = document.getElementById(id); el.value = ""; el.dataset.ph = el.dataset.ph || el.placeholder; el.placeholder = el.dataset.ph;
+    var el = $(id); el.value = ""; el.dataset.ph = el.dataset.ph || el.placeholder; el.placeholder = el.dataset.ph;
   });
-  document.getElementById("s-darab").value = "1";
-  document.getElementById("s-stock").checked = true;
-  document.getElementById("s-go").disabled = false;
-  document.getElementById("s-go").textContent = "\u2705 Elad\u00e1s r\u00f6gz\u00edt\u00e9se";
-  document.getElementById("sale").classList.add("on");
-  setTimeout(function () { document.getElementById("s-vevo").focus(); }, 50);
+  $("s-darab").value = "1";
+  $("s-stock").checked = true;
+  $("s-go").disabled = false;
+  $("s-go").textContent = "\u2705 Elad\u00e1s r\u00f6gz\u00edt\u00e9se";
+  $("sale").classList.add("on");
+  setTimeout(function () { $("s-vevo").focus(); }, 50);
 }
-function closeSale() { document.getElementById("sale").classList.remove("on"); current = null; focusScan(); }
+function closeSale() { $("sale").classList.remove("on"); current = null; focusScan(); }
 function later(id) {
-  var el = document.getElementById(id);
+  var el = $(id);
   el.value = ""; el.placeholder = "\u23ed k\u00e9s\u0151bb kit\u00f6ltend\u0151 (asztali program, Eladottak f\u00fcl)";
   nextField(el);
 }
 var ORDER = ["s-vevo", "s-ar", "s-darab", "s-tracking", "s-megj"];
 function nextField(el) {
   var i = ORDER.indexOf(el.id);
-  if (i >= 0 && i < ORDER.length - 1) { var n = document.getElementById(ORDER[i + 1]); n.focus(); n.select && n.select(); }
+  if (i >= 0 && i < ORDER.length - 1) { var n = $(ORDER[i + 1]); n.focus(); n.select && n.select(); }
   else el.blur();
 }
-document.getElementById("tok-in").addEventListener("keydown", function (e) {
-  if (e.key === "Enter") { e.preventDefault(); submitToken(); }
-});
+$("tok-in").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); submitToken(); } });
 ORDER.forEach(function (id) {
-  document.getElementById(id).addEventListener("keydown", function (e) {
+  $(id).addEventListener("keydown", function (e) {
     if (e.key === "Enter") { e.preventDefault(); if (id === "s-megj") submitSale(); else nextField(this); }
   });
 });
 function submitSale() {
   if (!current) return;
-  var darab = parseInt(document.getElementById("s-darab").value, 10);
-  if (!(darab >= 1)) { document.getElementById("s-darab").focus(); return; }
-  var btn = document.getElementById("s-go");
+  var darab = parseInt($("s-darab").value, 10);
+  if (!(darab >= 1)) { $("s-darab").focus(); return; }
+  var btn = $("s-go");
   btn.disabled = true; btn.textContent = "\u23f3 Ment\u00e9s\u2026";
   var it = current.item, platform = current.platform;
   api("POST", "/pda/sale", {
     platform: platform, A: it.A || it.B, darab: darab,
-    vevo: document.getElementById("s-vevo").value, ar: document.getElementById("s-ar").value,
-    tracking: fixScan(document.getElementById("s-tracking").value), megjegyzes: document.getElementById("s-megj").value,
-    keszlet_levonas: document.getElementById("s-stock").checked, eszkoz: deviceName()
-  }).then(function () {
+    vevo: $("s-vevo").value, ar: $("s-ar").value,
+    tracking: fixScan($("s-tracking").value), megjegyzes: $("s-megj").value,
+    keszlet_levonas: $("s-stock").checked, eszkoz: deviceName()
+  }, "Elad\u00e1s r\u00f6gz\u00edt\u00e9se (" + (it.A || it.B) + ", " + PLATFORMS[platform].cim + ", " + darab + " db)").then(function () {
     closeSale();
-    document.getElementById("results").innerHTML = "";
-    status("\u2705 <b>" + esc(it.A) + "</b> eladva \u2014 " + esc(PLATFORMS[platform].cim) + " \u2014 " + darab + " db<br>" +
-           '<span style="color:#ccc">A k\u00e9szletet az asztali program vonja le, amikor \u00e1tveszi.</span>', "ok");
+    $("results").innerHTML = "";
+    msgTo("status", "\u2705 <b>" + esc(it.A) + "</b> eladva \u2014 " + esc(PLATFORMS[platform].cim) + " \u2014 " + darab + " db<br>" +
+          '<span style="color:#ccc">A k\u00e9szletet az asztali program vonja le \u2013 az eredm\u00e9ny a \ud83d\udcdc Napl\u00f3 f\u00fcl\u00f6n l\u00e1tszik.</span>', "ok");
+    beep(true);
     focusScan();
   }).catch(function (e) {
     btn.disabled = false; btn.textContent = "\u2705 Elad\u00e1s r\u00f6gz\u00edt\u00e9se";
-    alert("Nem siker\u00fclt menteni: " + e.message);
+    beep(false);
+    alert("Nem siker\u00fclt menteni:\n" + errText(e) + "\n\n" + ((ERR[e.kod] || [])[1] || ""));
   });
 }
 
-// ---- Elad\u00e1sok lista ----
-function loadSales() {
-  var box = document.getElementById("sales");
-  box.innerHTML = '<div class="msg info">Bet\u00f6lt\u00e9s\u2026</div>';
-  api("GET", "/pda/sales?limit=60").then(function (js) {
-    var s = js.sales || [];
-    if (!s.length) { box.innerHTML = '<div class="msg info">M\u00e9g nincs PDA-s elad\u00e1s.</div>'; return; }
-    box.innerHTML = s.map(function (x) {
-      var miss = ["vevo", "ar", "tracking"].filter(function (k) { return !x[k]; });
-      var st = x.atvette ? '<span class="done">\u2714 \u00c1tv\u00e9ve: ' + esc(x.atvette) + " (" + esc(x.atvetel_ido) + ")</span>"
-                         : '<span class="pend">\u23f3 Az asztali program m\u00e9g nem vette \u00e1t</span>';
-      return '<div class="sale"><div class="top"><span>' + esc(x.A) + " \u2014 " + esc(x.darab) + " db</span><span>" + esc(x.datum) + "</span></div>" +
-             "<div>" + esc([x.C, x.D, x.E].filter(Boolean).join(" ")) + "</div>" +
-             "<div>" + esc((PLATFORMS[x.platform] || {}).cim || x.platform) + " | Vev\u0151: " + esc(x.vevo || "-") + " | \u00c1r: " + esc(x.ar || "-") +
-             " | Tracking: " + esc(x.tracking || "-") + "</div>" +
-             (miss.length ? '<div class="miss">\u23ed K\u00e9s\u0151bb kit\u00f6ltend\u0151 (asztali program): ' + miss.map(function (k) { return { vevo: "vev\u0151", ar: "\u00e1r", tracking: "tracking" }[k]; }).join(", ") + "</div>" : "") +
-             '<div class="st">' + st + "</div></div>";
-    }).join("");
-  }).catch(function (e) { box.innerHTML = '<div class="msg err">\u274c ' + esc(e.message) + "</div>"; });
+// ================= \u00c1THELYEZ\u00c9S =================
+var moveItem = null;
+function moveProduct(q) {
+  q = fixScan(q);
+  moveInput.value = q;
+  if (!q) return;
+  msgTo("move-status", "\ud83d\udd0d " + esc(q) + "\u2026", "info");
+  api("GET", "/pda/search?q=" + encodeURIComponent(q)).then(function (js) {
+    var items = js.items || [];
+    var it = items.filter(function (x) { return String(x.A).toUpperCase() === q.toUpperCase(); })[0] || (items.length === 1 ? items[0] : null);
+    if (!it) {
+      moveItem = null; $("move-card").innerHTML = ""; $("move-target").classList.add("hidden");
+      msgTo("move-status", items.length ? "\u26a0\ufe0f T\u00f6bb tal\u00e1lat \u2013 csippantsd a pontos R18 k\u00f3dot." : "\u274c Nincs ilyen term\u00e9k: <b>" + esc(q) + "</b>", "err");
+      beep(false); focusScan(); return;
+    }
+    moveItem = it;
+    beep(true);
+    $("move-card").innerHTML = '<div class="card"><div class="code">' + esc(it.A) + '</div><div class="name">' +
+        esc([it.C, it.D].filter(Boolean).join(" ") || "-") + '</div><div class="small">Jelenlegi raklap:</div><div class="big">' +
+        esc(it.L || "\u2014") + "</div></div>";
+    var keep = $("move-keep").checked && $("move-pallet").value.trim();
+    if (keep) { msgTo("move-status", "", ""); submitMove(); return; }
+    msgTo("move-status", "", "");
+    $("move-target").classList.remove("hidden");
+    if (!$("move-keep").checked) $("move-pallet").value = "";
+    focusScan();
+  }).catch(function (e) { msgTo("move-status", "\u274c " + esc(errText(e)), "err"); beep(false); focusScan(); });
+}
+function submitMove() {
+  var it = moveItem;
+  var uj = fixScan($("move-pallet").value).toUpperCase().replace(/\s+/g, "");
+  if (!it) { focusScan(); return; }
+  if (!uj) { $("move-pallet").focus(); return; }
+  if (String(it.L || "").toUpperCase().replace(/\s+/g, "") === uj) {
+    msgTo("move-status", "\u2139\ufe0f <b>" + esc(it.A) + "</b> m\u00e1r a(z) <b>" + esc(uj) + "</b> raklapon van.", "info");
+    resetMove(); return;
+  }
+  api("POST", "/pda/change", { A: it.A, mezo: "L", uj: uj, tipus: "ATHELYEZES", eszkoz: deviceName() },
+      "\u00c1thelyez\u00e9s (" + it.A + ": " + (it.L || "-") + " \u2192 " + uj + ")").then(function () {
+    msgTo("move-status", "\u2705 <b>" + esc(it.A) + "</b>: " + esc(it.L || "\u2014") + " \u2192 <b>" + esc(uj) + "</b><br>" +
+          '<span style="color:#ccc">Elk\u00fcldve \u2013 az asztali program hajtja v\u00e9gre (\ud83d\udcdc Napl\u00f3).</span>', "ok");
+    beep(true);
+    resetMove();
+  }).catch(function (e) { msgTo("move-status", "\u274c " + esc(errText(e)), "err"); beep(false); focusScan(); });
+}
+function resetMove() {
+  moveItem = null; $("move-card").innerHTML = ""; moveInput.value = "";
+  $("move-target").classList.add("hidden");
+  if (!$("move-keep").checked) $("move-pallet").value = "";
+  focusScan();
+}
+$("move-pallet").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); submitMove(); } });
+function moveScan(code) {
+  if (isR18(code) || !moveItem) { moveProduct(code); return; }
+  $("move-pallet").value = code;     // nem R18 k\u00f3d \u00e9s van kiv\u00e1lasztott term\u00e9k: ez a c\u00e9l raklap
+  submitMove();
 }
 
-// ---- Eszk\u00f6z neve ----
-function deviceName() {
-  try { return localStorage.getItem("devname") || "PDA"; } catch (e) { return "PDA"; }
+// ================= LELT\u00c1R =================
+// inv = { raklap, items: [...], found: {kod: true}, foreign: [{A, C, D, L}], unknown: [kod], start }
+var inv = null;
+try { inv = JSON.parse(localStorage.getItem("leltar") || "null"); } catch (e) { inv = null; }
+function saveInv() { try { if (inv) localStorage.setItem("leltar", JSON.stringify(inv)); else localStorage.removeItem("leltar"); } catch (e) {} }
+function normPallet(p) { return fixScan(p).toUpperCase().replace(/\s+/g, ""); }
+function startInventory(p) {
+  p = normPallet(p);
+  invPalletInput.value = p;
+  if (!p) return;
+  if (inv && !confirm("Van egy lez\u00e1ratlan lelt\u00e1r (" + inv.raklap + "). Elveted \u00e9s \u00fajat kezdesz?")) { focusScan(); return; }
+  api("GET", "/pda/pallet?l=" + encodeURIComponent(p), null, "Lelt\u00e1r ind\u00edt\u00e1sa: raklap " + p).then(function (js) {
+    inv = { raklap: p, items: js.items || [], found: {}, foreign: [], unknown: [], start: nowStr() };
+    saveInv(); renderInventory(); beep(true);
+    msgTo("inv-status", "\ud83d\udccb A rendszer szerint <b>" + inv.items.length + "</b> term\u00e9k van a(z) <b>" + esc(p) + "</b> raklapon. Csippants!", "info");
+  }).catch(function (e) { msgTo("inv-status", "\u274c " + esc(errText(e)), "err"); beep(false); });
 }
+function invScan(code) {
+  code = fixScan(code).toUpperCase();
+  invInput.value = "";
+  if (!code || !inv) return;
+  if (!isR18(code)) {
+    if (confirm("Ez nem term\u00e9kk\u00f3d: " + code + "\n\u00daj lelt\u00e1rt kezdesz erre a raklapra?")) { var old = inv; inv = null; startInventory(code); if (!inv) inv = old; }
+    return;
+  }
+  var it = inv.items.filter(function (x) { return String(x.A).toUpperCase() === code; })[0];
+  if (it) {
+    if (inv.found[code]) msgTo("inv-status", "\u2139\ufe0f " + esc(code) + " m\u00e1r meg volt jel\u00f6lve.", "info");
+    else { inv.found[code] = true; msgTo("inv-status", "\u2705 " + esc(code) + " \u2013 megvan", "ok"); }
+    beep(true); saveInv(); renderInventory(); return;
+  }
+  if (inv.foreign.some(function (x) { return x.A === code; }) || inv.unknown.indexOf(code) >= 0) {
+    msgTo("inv-status", "\u2139\ufe0f " + esc(code) + " m\u00e1r a list\u00e1n van.", "info"); return;
+  }
+  api("GET", "/pda/search?q=" + encodeURIComponent(code)).then(function (js) {
+    var f = (js.items || []).filter(function (x) { return String(x.A).toUpperCase() === code; })[0];
+    if (f) {
+      inv.foreign.push({ A: f.A, C: f.C, D: f.D, L: f.L || "", moved: false });
+      msgTo("inv-status", "\u26a0\ufe0f <b>" + esc(code) + "</b> itt van, de a rendszer szerint a(z) <b>" + esc(f.L || "\u2014") + "</b> raklapon kellene lennie.", "warn");
+    } else {
+      inv.unknown.push(code);
+      msgTo("inv-status", "\u2753 <b>" + esc(code) + "</b> nincs a rendszerben.", "err");
+    }
+    beep(false); saveInv(); renderInventory();
+  }).catch(function (e) { msgTo("inv-status", "\u274c " + esc(errText(e)), "err"); beep(false); });
+}
+function moveHere(i) {
+  var f = inv.foreign[i];
+  api("POST", "/pda/change", { A: f.A, mezo: "L", uj: inv.raklap, tipus: "ATHELYEZES", eszkoz: deviceName(), megjegyzes: "Lelt\u00e1r" },
+      "\u00c1thelyez\u00e9s lelt\u00e1rb\u00f3l (" + f.A + ": " + (f.L || "-") + " \u2192 " + inv.raklap + ")").then(function () {
+    f.moved = true; saveInv(); renderInventory();
+    msgTo("inv-status", "\u2705 " + esc(f.A) + " \u00e1thelyez\u00e9se elk\u00fcldve \u2192 " + esc(inv.raklap), "ok");
+  }).catch(function (e) { msgTo("inv-status", "\u274c " + esc(errText(e)), "err"); });
+}
+function renderInventory() {
+  $("inv-start").classList.toggle("hidden", !!inv);
+  $("inv-run").classList.toggle("hidden", !inv);
+  if (!inv) return;
+  var total = inv.items.length, got = Object.keys(inv.found).length;
+  $("inv-title").textContent = "Raklap " + inv.raklap;
+  $("inv-count").textContent = got + "/" + total;
+  $("inv-bar").style.width = (total ? Math.round(got * 100 / total) : 100) + "%";
+  var missing = inv.items.filter(function (x) { return !inv.found[String(x.A).toUpperCase()]; });
+  var ok = inv.items.filter(function (x) { return inv.found[String(x.A).toUpperCase()]; });
+  var h = "";
+  if (inv.foreign.length) {
+    h += '<div class="small" style="margin-top:10px">\u26a0\ufe0f M\u00c1S RAKLAPR\u00d3L (' + inv.foreign.length + ")</div>";
+    h += inv.foreign.map(function (f, i) {
+      return '<div class="row wb"><div class="top"><span>' + esc(f.A) + "</span><span>rendszer: " + esc(f.L || "\u2014") + "</span></div>" +
+             "<div>" + esc([f.C, f.D].filter(Boolean).join(" ")) + "</div>" +
+             (f.moved ? '<div class="done">\u2714 \u00c1thelyez\u00e9s elk\u00fcldve ide</div>'
+                      : '<button class="btn orange" style="padding:9px;font-size:15px" onclick="moveHere(' + i + ')">\u27a1\ufe0f \u00c1thelyez\u00e9s ide (' + esc(inv.raklap) + ")</button>") + "</div>";
+    }).join("");
+  }
+  if (inv.unknown.length) {
+    h += '<div class="small" style="margin-top:10px">\u2753 NINCS A RENDSZERBEN (' + inv.unknown.length + ")</div>";
+    h += inv.unknown.map(function (c) { return '<div class="row bad">' + esc(c) + "</div>"; }).join("");
+  }
+  h += '<div class="small" style="margin-top:10px">\u2717 M\u00c9G NEM CSIPPANTOTT (' + missing.length + ")</div>";
+  h += missing.map(function (x) {
+    return '<div class="row bad"><div class="top"><span>' + esc(x.A) + "</span><span>" + esc((x.F || "1") + " db") + "</span></div><div>" +
+           esc([x.C, x.D, x.E].filter(Boolean).join(" ")) + "</div></div>";
+  }).join("");
+  h += '<div class="small" style="margin-top:10px">\u2713 MEGVAN (' + ok.length + ")</div>";
+  h += ok.map(function (x) {
+    return '<div class="row okb"><div class="top"><span>\u2713 ' + esc(x.A) + "</span><span>" + esc((x.F || "1") + " db") + "</span></div><div>" +
+           esc([x.C, x.D].filter(Boolean).join(" ")) + "</div></div>";
+  }).join("");
+  $("inv-list").innerHTML = h;
+}
+function finishInventory() {
+  if (!inv) return;
+  var missing = inv.items.filter(function (x) { return !inv.found[String(x.A).toUpperCase()]; }).map(function (x) { return x.A; });
+  var got = inv.items.length - missing.length;
+  var txt = "Raklap " + inv.raklap + ": " + got + "/" + inv.items.length + " megvan." +
+            (missing.length ? " Hi\u00e1nyzik (" + missing.length + "): " + missing.join(", ") + "." : "") +
+            (inv.foreign.length ? " M\u00e1s raklapr\u00f3l itt (" + inv.foreign.length + "): " + inv.foreign.map(function (f) { return f.A + " (" + (f.L || "-") + (f.moved ? ", \u00e1thelyezve" : "") + ")"; }).join(", ") + "." : "") +
+            (inv.unknown.length ? " Ismeretlen k\u00f3d: " + inv.unknown.join(", ") + "." : "") +
+            " Kezd\u00e9s: " + inv.start;
+  if (!confirm("Lelt\u00e1r lez\u00e1r\u00e1sa?\n\n" + txt)) return;
+  var bad = missing.length || inv.foreign.length || inv.unknown.length;
+  api("POST", "/pda/log", { eszkoz: deviceName(), szint: bad ? "FIGYELEM" : "INFO", esemeny: "LELT\u00c1R \u2013 raklap " + inv.raklap, reszletek: txt },
+      "Lelt\u00e1r lez\u00e1r\u00e1sa (" + inv.raklap + ")").then(function () {
+    inv = null; saveInv(); renderInventory();
+    msgTo("inv-status", "\u2705 Lelt\u00e1r lez\u00e1rva \u00e9s a Napl\u00f3ba mentve.<br><span style='color:#ccc'>" + esc(txt) + "</span>", bad ? "warn" : "ok");
+    invPalletInput.value = ""; focusScan();
+  }).catch(function (e) { msgTo("inv-status", "\u274c " + esc(errText(e)) + " \u2013 a lelt\u00e1r megmaradt, pr\u00f3b\u00e1ld \u00fajra.", "err"); });
+}
+function cancelInventory() {
+  if (!inv || !confirm("Elveted a(z) " + inv.raklap + " raklap lelt\u00e1r\u00e1t? (Nem ker\u00fcl a Napl\u00f3ba.)")) return;
+  proc("info", "", "Lelt\u00e1r elvetve: raklap " + inv.raklap);
+  inv = null; saveInv(); renderInventory(); msgTo("inv-status", "", ""); focusScan();
+}
+
+// ================= NAPL\u00d3 =================
+var logData = [], logNow = "", logFilter = "all";
+function setLogFilter(f) {
+  logFilter = f;
+  ["all", "eladas", "valtozas", "naplo"].forEach(function (x) { $("lf-" + x).classList.toggle("on", x === f); });
+  renderLog();
+}
+function loadLog() {
+  $("log-list").innerHTML = '<div class="msg info">Bet\u00f6lt\u00e9s\u2026</div>';
+  api("GET", "/pda/log?limit=150").then(function (js) {
+    logData = js.naplo || []; logNow = js.most || ""; renderLog();
+  }).catch(function (e) { $("log-list").innerHTML = '<div class="msg err">\u274c ' + esc(errText(e)) + "<br>" + esc((ERR[e.kod] || [])[1] || "") + "</div>"; });
+}
+function minutesBetween(a, b) {
+  var da = new Date(String(a).replace(" ", "T")), db = new Date(String(b).replace(" ", "T"));
+  return (db - da) / 60000;
+}
+function statusHtml(x) {
+  if (x.eredmeny === "ok") return '<span class="done">\u2714 ' + esc(x.eredmeny_uzenet || "V\u00e9grehajtva") + "</span>" +
+                                  '<div class="small">' + esc(x.atvette || "") + " \u00b7 " + esc(x.eredmeny_ido || x.atvetel_ido || "") + "</div>";
+  if (x.eredmeny === "hiba") return '<span class="fail">\u274c ' + esc(x.eredmeny_uzenet || "Nem siker\u00fclt") + "</span>" +
+                                    '<div class="small">' + esc(x.atvette || "") + " \u00b7 " + esc(x.eredmeny_ido || "") + "</div>";
+  if (x.atvette) return '<span class="done">\u2714 \u00c1tv\u00e9ve: ' + esc(x.atvette) + " (" + esc(x.atvetel_ido) + ")</span>";
+  var mins = logNow ? minutesBetween(x.rendez, logNow) : 0;
+  if (mins > 2) return '<span class="fail">\u23f3 [A-10] Az asztali program m\u00e9g nem vette \u00e1t (' + Math.round(mins) + " perce)</span>" +
+                       '<div class="small">' + esc(ERR["A-10"][1]) + "</div>";
+  return '<span class="pend">\u23f3 Az asztali program m\u00e9g nem vette \u00e1t</span>';
+}
+function renderLog() {
+  var mine = $("log-mine").checked, me = deviceName();
+  var rows = logData.filter(function (x) {
+    if (logFilter !== "all" && x.fajta !== logFilter) return false;
+    if (mine && (x.eszkoz || "") !== me) return false;
+    // Az asztali program hib\u00e1i az adott elad\u00e1s / \u00e1thelyez\u00e9s sor\u00e1ban m\u00e1r l\u00e1tszanak (Folyamat f\u00fcl\u00f6n k\u00fcl\u00f6n is)
+    if (x.fajta === "naplo" && String(x.esemeny || "").indexOf("Asztali program:") === 0) return false;
+    return true;
+  });
+  if (!rows.length) { $("log-list").innerHTML = '<div class="msg info">Nincs bejegyz\u00e9s.</div>'; return; }
+  $("log-list").innerHTML = rows.map(function (x) {
+    var cls = x.eredmeny === "hiba" || x.szint === "HIBA" ? "bad" : (x.eredmeny === "ok" ? "okb" : (x.szint === "FIGYELEM" ? "wb" : ""));
+    if (x.fajta === "eladas") {
+      var miss = ["vevo", "ar", "tracking"].filter(function (k) { return !x[k]; });
+      return '<div class="row ' + cls + '"><div class="top"><span>\ud83d\udcb0 ' + esc(x.A) + " \u2014 " + esc(x.darab) + " db</span><span>" + esc(x.datum) + "</span></div>" +
+             "<div>" + esc((PLATFORMS[x.platform] || {}).cim || x.platform) + " \u00b7 " + esc([x.C, x.D].filter(Boolean).join(" ")) + "</div>" +
+             '<div class="small">Vev\u0151: ' + esc(x.vevo || "-") + " \u00b7 \u00c1r: " + esc(x.ar || "-") + " \u00b7 Tracking: " + esc(x.tracking || "-") + " \u00b7 " + esc(x.eszkoz) + "</div>" +
+             (miss.length ? '<div class="miss">\u23ed K\u00e9s\u0151bb kit\u00f6ltend\u0151 (g\u00e9pen, Eladottak f\u00fcl): ' + miss.map(function (k) { return { vevo: "vev\u0151", ar: "\u00e1r", tracking: "tracking" }[k]; }).join(", ") + "</div>" : "") +
+             '<div class="st">' + statusHtml(x) + "</div></div>";
+    }
+    if (x.fajta === "valtozas") {
+      return '<div class="row ' + cls + '"><div class="top"><span>\ud83d\udce6 ' + esc(x.A) + "</span><span>" + esc(x.ido) + "</span></div>" +
+             "<div>\u00c1thelyez\u00e9s: raklap <b>" + esc(x.regi || "\u2014") + "</b> \u2192 <b>" + esc(x.uj) + "</b>" + (x.megjegyzes ? " (" + esc(x.megjegyzes) + ")" : "") + "</div>" +
+             '<div class="small">' + esc([x.C, x.D].filter(Boolean).join(" ")) + " \u00b7 " + esc(x.eszkoz) + "</div>" +
+             '<div class="st">' + statusHtml(x) + "</div></div>";
+    }
+    var icon = x.szint === "HIBA" ? "\u274c" : (String(x.esemeny).indexOf("LELT\u00c1R") === 0 ? "\ud83d\udccb" : "\u2139\ufe0f");
+    return '<div class="row ' + cls + '"><div class="top"><span>' + icon + " " + (x.kod ? "[" + esc(x.kod) + "] " : "") + esc(x.esemeny) + "</span><span>" + esc(String(x.ido).slice(0, 16)) + "</span></div>" +
+           "<div>" + esc(x.reszletek) + "</div>" +
+           (x.kod && ERR[x.kod] ? '<div class="small">\ud83d\udca1 ' + esc(ERR[x.kod][1]) + "</div>" : "") +
+           '<div class="small">' + esc(x.eszkoz) + "</div></div>";
+  }).join("");
+}
+
+// ================= FOLYAMAT NAPL\u00d3 =================
+var procView = "local", serverErrs = null;
+function setProcView(v) {
+  procView = v;
+  $("pf-local").classList.toggle("on", v === "local");
+  $("pf-server").classList.toggle("on", v === "server");
+  if (v === "server") {
+    $("proc-list").innerHTML = '<div class="msg info">Bet\u00f6lt\u00e9s\u2026</div>';
+    rawApi("GET", "/pda/log?hibak=1&limit=150").then(function (js) { serverErrs = js.naplo || []; renderProc(); })
+      .catch(function (e) { $("proc-list").innerHTML = '<div class="msg err">\u274c ' + esc(errText(e)) + "</div>"; });
+  } else renderProc();
+}
+function renderProc() {
+  var onlyErr = $("proc-err").checked;
+  if (procView === "server") {
+    // (az "Asztali program: ..." bejegyz\u00e9s ugyanazt mondja, mint az elad\u00e1s / \u00e1thelyez\u00e9s sora - csak egyszer mutatjuk)
+    var rows = (serverErrs || []).filter(function (x) { return !(x.fajta === "naplo" && String(x.esemeny || "").indexOf("Asztali program:") === 0); });
+    $("proc-list").innerHTML = rows.length ? rows.map(function (x) {
+      var kod = x.kod || ((String(x.eredmeny_uzenet || "").match(/\[([A-Z]-\d+)\]/) || [])[1] || "");
+      var mit = x.fajta === "eladas" ? "Elad\u00e1s " + x.A : x.fajta === "valtozas" ? "\u00c1thelyez\u00e9s " + x.A + " \u2192 " + x.uj : x.esemeny;
+      var mikor = x.eredmeny_ido || x.ido || x.datum || "";
+      return '<div class="log hiba">' + esc(mikor) + "  " + (kod ? "[" + esc(kod) + "] " : "") + esc(mit) + "\n" +
+             esc(x.eredmeny_uzenet || x.reszletek || "") + (ERR[kod] ? "\n\ud83d\udca1 " + esc(ERR[kod][1]) : "") + "</div>";
+    }).join("") : '<div class="msg ok">\u2714 Nincs hiba az asztali program oldal\u00e1n.</div>';
+    return;
+  }
+  var arr = procLoad().filter(function (x) { return !onlyErr || x.szint === "hiba"; });
+  $("proc-list").innerHTML = arr.length ? arr.slice(0, 200).map(function (x) {
+    var ic = x.szint === "hiba" ? "\u274c" : x.szint === "ok" ? "\u2714" : "\u2139\ufe0f";
+    return '<div class="log ' + esc(x.szint) + '">' + esc(x.t) + "  " + ic + " " + (x.kod ? "[" + esc(x.kod) + "] " : "") + esc(x.uzenet) +
+           (x.reszlet ? "\n   " + esc(x.reszlet) : "") + (x.kod && ERR[x.kod] ? "\n\ud83d\udca1 " + esc(ERR[x.kod][1]) : "") + "</div>";
+  }).join("") : '<div class="msg info">\u00dcres.</div>';
+}
+$("kodlista").innerHTML = Object.keys(ERR).map(function (k) {
+  return "<div><b>" + esc(k) + "</b> \u2013 " + esc(ERR[k][0]) + '<br><span class="small">\ud83d\udca1 ' + esc(ERR[k][1]) + "</span></div>";
+}).join("") + '<div class="small" style="margin-top:8px">P = PDA / h\u00e1l\u00f3zat \u00b7 S = szerver (VPS) \u00b7 A = asztali program</div>';
+
+// ---- Eszk\u00f6z neve ----
+function deviceName() { try { return localStorage.getItem("devname") || "PDA"; } catch (e) { return "PDA"; } }
 (function () {
-  var el = document.getElementById("devname");
+  var el = $("devname");
   el.value = deviceName() === "PDA" ? "" : deviceName();
-  el.addEventListener("change", function () { try { localStorage.setItem("devname", el.value.trim()); } catch (e) {} });
+  el.addEventListener("change", function () { try { localStorage.setItem("devname", el.value.trim()); } catch (e) {} proc("info", "", "Eszk\u00f6z neve: " + deviceName()); });
 })();
 
 // ---- Vonalk\u00f3d-olvas\u00f3 ----
-// A Zebra DataWedge az Android appon kereszt\u00fcl ide k\u00fcldi a beolvasott k\u00f3dot (window.onScan).
-// Ha az elad\u00e1s ablak nyitva van, a k\u00f3d a Tracking mez\u0151be (vagy az \u00e9ppen akt\u00edv mez\u0151be) ker\u00fcl.
+// A Zebra DataWedge az Android appon kereszt\u00fcl ide k\u00fcldi a beolvasott k\u00f3dot (window.onScan); a k\u00f3d oda megy,
+// ahol \u00e9ppen vagyunk: Elad\u00e1s = keres\u00e9s, \u00c1thelyez\u00e9s = term\u00e9k / c\u00e9l raklap, Lelt\u00e1r = raklap / term\u00e9k.
 window.onScan = function (code) {
   code = fixScan(code);
-  if (saleOpen()) {
+  if ($("token").classList.contains("on")) { $("tok-in").value = code; return; }
+  if ($("sale").classList.contains("on")) {
     var a = document.activeElement;
-    var target = (a && a.tagName === "INPUT" && a.type !== "checkbox" && a.id !== "s-darab") ? a : document.getElementById("s-tracking");
+    var target = (a && a.tagName === "INPUT" && a.type !== "checkbox" && a.id !== "s-darab") ? a : $("s-tracking");
     target.value = code;
     nextField(target);
     return;
   }
+  if (activeTab === "move") { moveScan(code); return; }
+  if (activeTab === "inv") { if (inv) invScan(code); else startInventory(code); return; }
   doSearch(code);
 };
-// Billenty\u0171zet-m\u00f3d\u00fa olvas\u00f3: ha nem a keres\u0151mez\u0151ben \u00e1ll a kurzor, oda ir\u00e1ny\u00edtjuk a g\u00e9pel\u00e9st
+// Billenty\u0171zet-m\u00f3d\u00fa olvas\u00f3: ha nem beviteli mez\u0151ben \u00e1ll a kurzor, az akt\u00edv f\u00fcl mez\u0151j\u00e9be ir\u00e1ny\u00edtjuk
 document.addEventListener("keydown", function (e) {
-  if (saleOpen() || e.ctrlKey || e.altKey) return;
+  if (overlayOpen() || e.ctrlKey || e.altKey) return;
   var a = document.activeElement;
-  if (a === scanInput || (a && a.tagName === "INPUT")) return;
-  if (e.key && e.key.length === 1) { e.preventDefault(); scanInput.value = e.key; scanInput.focus(); }
+  if (a && a.tagName === "INPUT") return;
+  var el = activeInput();
+  if (el && e.key && e.key.length === 1) { e.preventDefault(); el.value = e.key; el.focus(); }
 });
 
-// Android "Vissza" gomb: el\u0151bb az elad\u00e1s ablakot / list\u00e1t z\u00e1rja be (true = kezelve)
+// Android "Vissza" gomb (true = kezelve)
 window.onBack = function () {
-  if (document.getElementById("token").classList.contains("on")) return false;
-  if (saleOpen()) { closeSale(); return true; }
-  if (!document.getElementById("page-list").classList.contains("hidden")) { showTab("sell"); return true; }
+  if ($("token").classList.contains("on")) return false;
+  if ($("sale").classList.contains("on")) { closeSale(); return true; }
+  if (activeTab !== "sell") { showTab("sell"); return true; }
   return false;
 };
 
-function ping() { api("GET", "/sync/status").catch(function () {}); }
+// Szerver figyel\u00e9se: a kapcsolat elveszt\u00e9se / visszat\u00e9r\u00e9se a Folyamat napl\u00f3ba ker\u00fcl
+var pingState = null;
+function ping() {
+  rawApi("GET", "/sync/status").then(function () {
+    if (pingState === false) proc("ok", "", "Kapcsolat a szerverrel helyre\u00e1llt");
+    pingState = true;
+  }, function (e) {
+    if (e.kod === "S-401") { showTokenScreen(getToken() ? "A megadott jelsz\u00f3 hib\u00e1s." : ""); }
+    if (pingState !== false) proc("hiba", e.kod, "Szerver ellen\u0151rz\u00e9s: " + e.message, "GET /sync/status");
+    pingState = false;
+  });
+}
 ping(); setInterval(ping, 30000);
-focusScan();
+proc("info", "", "PDA fel\u00fclet elindult (v" + VERSION + ", eszk\u00f6z: " + deviceName() + ")");
+if (inv) { showTab("inv"); } else focusScan();
 </script>
 </body>
 </html>
