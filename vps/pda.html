@@ -104,6 +104,14 @@
   .askbox .btn { margin-top:10px; }
   .btn.red { background:var(--err); color:#fff; }
   .pallets { font-size:13px; color:#ffcc80; }
+  .pgrid { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:8px; }
+  .pgrid img { width:100%; height:150px; object-fit:cover; border-radius:6px; border:1px solid var(--line); background:#000; }
+  #photobig { position:fixed; inset:0; background:#000; z-index:60; display:none; align-items:center; justify-content:center; }
+  #photobig.on { display:flex; }
+  #photobig img { max-width:100%; max-height:100%; }
+  .fullgrid { display:grid; grid-template-columns:auto 1fr; gap:2px 10px; font-size:14px; margin:6px 0; }
+  .fullgrid span:nth-child(odd) { color:var(--dim); white-space:nowrap; }
+  .fullgrid span:nth-child(even) { word-break:break-word; }
   .loc { background:#102a1a; border:1px solid #1b5e20; border-radius:6px; padding:7px 9px; margin:0 0 8px; font-size:16px; color:#c8e6c9; }
   .ocrbtn { display:none; }
   .qdb { display:flex; align-items:center; justify-content:center; gap:14px; margin:16px 0; }
@@ -338,6 +346,16 @@
   <button class="btn grey" type="button" onclick="closeOverlay('orph')">Bez&#xE1;r&#xE1;s</button>
 </div>
 
+<!-- ================= F&#xC9;NYK&#xC9;PEK ================= -->
+<div id="photov" class="overlay">
+  <div class="ohead" id="ph-title">&#x1F5BC;&#xFE0F; K&#xE9;pek</div>
+  <div id="ph-status"></div>
+  <div class="pgrid" id="ph-grid"></div>
+  <button class="btn grey" type="button" onclick="photoRefresh()">&#x1F504; &#xDA;jra lek&#xE9;r&#xE9;s a g&#xE9;pr&#x151;l (&#xFA;j fot&#xF3;k)</button>
+  <button class="btn grey" type="button" onclick="closePhotos()">Bez&#xE1;r&#xE1;s</button>
+</div>
+<div id="photobig" onclick="this.classList.remove('on')"><img id="photobig-img" alt=""></div>
+
 <!-- ================= EXCEL CELLA SZERKESZT&#xC9;SE ================= -->
 <div id="cedit" class="overlay">
   <div class="ohead" id="ce-title">Cella</div>
@@ -397,7 +415,7 @@
 </div>
 
 <script>
-var VERSION = "2026.10.16-h";
+var VERSION = "2026.10.16-i";
 var PLATFORMS = {
   EBAY_KIVULI: { cim: "eBay-en k\u00edv\u00fcli elad\u00e1s", gomb: "eBay-en k\u00edv\u00fcli", cls: "b-kivul" },
   EBAY:        { cim: "eBay elad\u00e1s",           gomb: "eBay",           cls: "b-ebay" },
@@ -535,7 +553,7 @@ function api(method, url, body, mit) {
 function errText(e) { return "[" + (e.kod || "?") + "] " + e.message; }
 var lastServerOk = null;
 function setServer(ok) { $("srv").className = "dot " + (ok ? "ok" : "bad"); lastServerOk = ok; }
-var OVERLAYS = ["sale", "token", "edit", "hist", "sedit", "cedit", "ask", "qdbov", "orph"];
+var OVERLAYS = ["sale", "token", "edit", "hist", "sedit", "cedit", "ask", "qdbov", "orph", "photov"];
 function overlayOpen() { return OVERLAYS.some(function (o) { return $(o).classList.contains("on"); }); }
 function closeOverlay(id) { $(id).classList.remove("on"); focusScan(); }
 function msgTo(id, html, cls) { $(id).innerHTML = html ? '<div class="msg ' + cls + '">' + html + "</div>" : ""; }
@@ -724,7 +742,8 @@ function infoRows(it) {
   return [["Cikksz\u00e1m", it.E], ["\u00c1llapot", it.G], ["Rakt\u00e1ron", (it.F || "1") + " db"],
           ["S\u00faly", it.M], ["eBay sz\u00e1m", it.N]].filter(function (r) { return r[1]; });
 }
-function card(it) {
+var FULL_COLS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"];
+function card(it, full) {
   var i = reg(it);
   var name = [it.C, it.D].filter(Boolean).join(" ");
   var btns = Object.keys(PLATFORMS).map(function (p) {
@@ -732,9 +751,13 @@ function card(it) {
   }).join("");
   return '<div class="card"><div class="code">' + esc(it.A || it.B) + '</div><div class="name">' + esc(name || "-") + "</div>" +
          '<div class="loc">\ud83d\udccd ' + locHtml(it) + "</div>" +
-         '<div class="grid">' + infoRows(it).map(function (r) { return "<span>" + esc(r[0]) + "</span><span>" + esc(r[1]) + "</span>"; }).join("") +
-         '</div><div class="sell">' + btns + "</div>" +
-         '<div class="two"><button onclick="openEdit(' + i + ')">\u270f\ufe0f Szerkeszt\u00e9s</button>' +
+         (full ? '<div class="fullgrid">' + FULL_COLS.filter(function (c) { return it[c]; }).map(function (c) {
+                    return "<span>" + c + " \u00b7 " + esc(XLBL[c]) + "</span><span>" + esc(it[c]) + "</span>"; }).join("") + "</div>"
+               : '<div class="grid">' + infoRows(it).map(function (r) { return "<span>" + esc(r[0]) + "</span><span>" + esc(r[1]) + "</span>"; }).join("") + "</div>") +
+         '<div class="sell">' + btns + "</div>" +
+         '<div class="two"><button onclick="openPhotos(\'' + esc(it.A || it.B) + '\')">\ud83d\uddbc\ufe0f K\u00e9pek</button>' +
+         '<button onclick="openEdit(' + i + ')">\u270f\ufe0f Szerkeszt\u00e9s</button></div>' +
+         '<div class="two">' +
          '<button onclick="openHistory(\'' + esc(it.A || it.B) + '\')">\ud83d\udd58 El\u0151zm\u00e9nyek</button></div>' +
          '<div class="two"><button onclick="xlsJump(\'' + esc(it.A || it.B) + '\')">\ud83d\udcca Excel Live-on</button>' +
          '<button onclick="startMoveFor(' + i + ')">\ud83d\udce6 \u00c1thelyez\u00e9s</button></div>' +
@@ -983,6 +1006,43 @@ function deleteAllOrphans() {
     });
 }
 
+// ================= F\u00c9NYK\u00c9PEK =================
+// A k\u00e9pek a NAS-on vannak: k\u00e9r\u00e9sre a g\u00e9pi program kicsiny\u00edtve felt\u00f6lti \u0151ket a szerverre (els\u0151 alkalommal ~20-40 mp).
+var phCode = "", phTimer = null, phStart = 0;
+function photoUrl(code, f) { return "/pda/photo/" + encodeURIComponent(code) + "/" + f + "?t=" + encodeURIComponent(getToken()); }
+function openPhotos(code) {
+  phCode = code; phStart = Date.now();
+  $("ph-title").textContent = "\ud83d\uddbc\ufe0f K\u00e9pek: " + code;
+  $("ph-grid").innerHTML = "";
+  $("photov").classList.add("on");
+  photoPoll(false);
+}
+function closePhotos() { clearTimeout(phTimer); $("photov").classList.remove("on"); focusScan(); }
+function photoRefresh() {
+  confirmBox("\ud83d\udd04 K\u00e9pek \u00fajra lek\u00e9r\u00e9se?", "A g\u00e9p \u00fajra megkeresi a NAS-on a(z) <b>" + esc(phCode) + "</b> k\u00e9peit (pl. ha \u00faj fot\u00f3k k\u00e9sz\u00fcltek).", "\ud83d\udd04 Igen")
+    .then(function (ok) { if (ok) { phStart = Date.now(); $("ph-grid").innerHTML = ""; photoPoll(true); } });
+}
+function photoPoll(frissit) {
+  clearTimeout(phTimer);
+  if (!$("photov").classList.contains("on")) return;
+  rawApi("GET", "/pda/photos?code=" + encodeURIComponent(phCode) + (frissit ? "&frissit=1" : "")).then(function (js) {
+    var f = js.fotok || [];
+    if (f.length) {
+      msgTo("ph-status", f.length + " k\u00e9p \u00b7 koppints a nagy\u00edt\u00e1shoz", "info");
+      $("ph-grid").innerHTML = f.map(function (n) {
+        return '<img loading="lazy" src="' + photoUrl(phCode, n) + '" onclick="photoBig(this.src)" alt="">';
+      }).join("");
+      return;
+    }
+    if (js.kesz) { msgTo("ph-status", "\ud83d\udcf7 " + esc(js.uzenet || "Nincs f\u00e9nyk\u00e9p") + (js.gep ? " (" + esc(js.gep) + ")" : ""), "warn"); return; }
+    var sec = Math.round((Date.now() - phStart) / 1000);
+    msgTo("ph-status", "\u23f3 A g\u00e9pi program el\u0151keresi a k\u00e9peket a NAS-r\u00f3l\u2026 (" + sec + " mp)" +
+          (sec > 60 ? "<br>\u26a0\ufe0f M\u00e9g egyik g\u00e9p sem v\u00e1laszolt \u2013 fut az \u00faj g\u00e9pi program (v2026.10.16-pda5 vagy \u00fajabb)? El\u00e9ri a NAS-t?" : ""), sec > 60 ? "warn" : "info");
+    if (sec < 180) phTimer = setTimeout(function () { photoPoll(false); }, 3000);
+  }).catch(function (e) { msgTo("ph-status", "\u274c " + esc(errText(e)), "err"); });
+}
+function photoBig(src) { $("photobig-img").src = src; $("photobig").classList.add("on"); }
+
 // ================= EL\u0150ZM\u00c9NYEK =================
 function openHistory(code) {
   $("h-title").textContent = "\ud83d\udd58 El\u0151zm\u00e9nyek: " + code;
@@ -1080,7 +1140,7 @@ function qsRun() {
     if (my !== qsSeq) return;                       // k\u00f6zben tov\u00e1bb g\u00e9peltek
     var items = js.items || [];
     msgTo("qs-status", items.length ? items.length + (items.length >= 40 ? "+ " : " ") + "tal\u00e1lat" : "\u274c Nincs tal\u00e1lat", items.length ? "info" : "err");
-    $("qs-results").innerHTML = items.map(function (it) { return card(it); }).join("");
+    $("qs-results").innerHTML = items.map(function (it) { return card(it, true); }).join("");
   }).catch(function (e) {
     if (my !== qsSeq) return;
     proc("hiba", e.kod, "Gyorskeres\u0151: " + e.message, "GET /pda/search");
@@ -1735,7 +1795,7 @@ window.onScan = function (code) {
   if ($("ask").classList.contains("on")) return;          // k\u00e9rd\u00e9s k\u00f6zben a csippant\u00e1s nem csin\u00e1l semmit
   if ($("token").classList.contains("on")) { $("tok-in").value = code; return; }
   if ($("hist").classList.contains("on")) return;
-  if ($("qdbov").classList.contains("on") || $("orph").classList.contains("on")) return;
+  if ($("qdbov").classList.contains("on") || $("orph").classList.contains("on") || $("photov").classList.contains("on")) return;
   if ($("cedit").classList.contains("on")) { var ci = $("ce-in"); if (ci && ci.tagName === "INPUT") ci.value = code; return; }
   if ($("edit").classList.contains("on") || $("sedit").classList.contains("on")) {
     var ae = document.activeElement;
@@ -1770,6 +1830,8 @@ window.onBack = function () {
   if ($("ask").classList.contains("on")) { askAnswer(-1); return true; }
   if ($("token").classList.contains("on")) return false;
   if ($("sale").classList.contains("on")) { closeSale(); return true; }
+  if ($("photobig").classList.contains("on")) { $("photobig").classList.remove("on"); return true; }
+  if ($("photov").classList.contains("on")) { closePhotos(); return true; }
   var open = ["edit", "hist", "sedit", "cedit", "qdbov", "orph"].filter(function (o) { return $(o).classList.contains("on"); })[0];
   if (open) { closeOverlay(open); return true; }
   if (activeTab !== "sell") { showTab("sell"); return true; }

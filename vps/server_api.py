@@ -51,7 +51,8 @@ def check_token():
     # A VPS-en futo sajat scriptek (127.0.0.1-rol) jelszo nelkul is hivhatjak
     if request.remote_addr in ("127.0.0.1", "::1"):
         return None
-    sent = request.headers.get("X-Raktar-Token", "")
+    # A kepeknel (<img src=...>) a bongeszo nem tud fejlecet kuldeni, ott ?t=<token> jon
+    sent = request.headers.get("X-Raktar-Token", "") or request.args.get("t", "")
     if sent and hmac.compare_digest(sent.encode("utf-8"), API_TOKEN.encode("utf-8")):
         return None
     return jsonify({"status": "error", "kod": "S-401", "message": "Hibas vagy hianyzo jelszo (token)"}), 401
@@ -1324,6 +1325,133 @@ def pda_sheet():
             else:
                 part = [r for r in rows if _r18_num(r["A"]) >= start][:limit]
         return jsonify({"status": "ok", "items": part, "min": minnum, "max": maxnum, "osszes": len(rows)}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+# ---------- Fenykepek (a NAS-on vannak; a gepi program tolti fel keresre) ----------
+PDA_FOTO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pda_fotok")
+FOTO_MAX = 8
+
+
+def init_foto_db():
+    try:
+        os.makedirs(PDA_FOTO_DIR, exist_ok=True)
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("""CREATE TABLE IF NOT EXISTS foto_keresek (
+                            kod TEXT PRIMARY KEY, kert TEXT, kesz TEXT, darab INTEGER, uzenet TEXT, gep TEXT)""")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[VPS] Foto tabla inicializalasi hiba: {e}")
+
+init_foto_db()
+
+
+def _foto_dir(code):
+    return os.path.join(PDA_FOTO_DIR, re.sub(r"[^A-Z0-9-]", "", code))
+
+
+def _foto_list(code):
+    d = _foto_dir(code)
+    if not os.path.isdir(d):
+        return []
+    return sorted(f for f in os.listdir(d) if f.lower().endswith(".jpg"))
+
+
+@app.route('/pda/photos', methods=['GET'])
+def pda_photos():
+    """Egy termek fenykepei. Ha meg nincsenek a szerveren, kerest tesz a gepeknek (azok toltik fel a NAS-rol).
+    ?frissit=1: ujra lekeri a geptol (pl. uj fotok keszultek)."""
+    try:
+        code = clean_code(request.args.get('code', ''))
+        if not code.startswith("R18-"):
+            return pda_err(400, "S-400", "Ervenytelen R18 kod")
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        if request.args.get('frissit'):
+            d = _foto_dir(code)
+            if os.path.isdir(d):
+                for f in os.listdir(d):
+                    try:
+                        os.remove(os.path.join(d, f))
+                    except OSError:
+                        pass
+            cur.execute("DELETE FROM foto_keresek WHERE kod=?", (code,))
+        files = _foto_list(code)
+        cur.execute("SELECT * FROM foto_keresek WHERE kod=?", (code,))
+        req = cur.fetchone()
+        now = pda_now().strftime("%Y-%m-%d %H:%M:%S")
+        if files:
+            conn.close()
+            return jsonify({"status": "ok", "fotok": files, "kesz": True}), 200
+        if req and req["kesz"]:
+            conn.close()
+            return jsonify({"status": "ok", "fotok": [], "kesz": True, "uzenet": req["uzenet"] or "Nincs fenykep", "gep": req["gep"] or ""}), 200
+        if not req:
+            cur.execute("INSERT INTO foto_keresek (kod, kert) VALUES (?, ?)", (code, now))
+            conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "fotok": [], "kesz": False, "kert": (req["kert"] if req else now)}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/pda/photo/<code>/<name>', methods=['GET'])
+def pda_photo_file(code, name):
+    code = clean_code(code)
+    if not re.match(r"^[0-9]+\.jpg$", name):
+        return pda_err(404, "S-404", "Nincs ilyen kep")
+    path = os.path.join(_foto_dir(code), name)
+    if not os.path.exists(path):
+        return pda_err(404, "S-404", "Nincs ilyen kep")
+    resp = send_file(path, mimetype="image/jpeg")
+    resp.headers["Cache-Control"] = "max-age=86400"
+    return resp
+
+
+@app.route('/pda/photo_requests', methods=['GET'])
+def pda_photo_requests():
+    """A gepi programnak: mely termekek kepeit kerte a PDA (meg nincs kesz)."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT kod, kert FROM foto_keresek WHERE kesz IS NULL ORDER BY kert LIMIT 10")
+        rows = [{"kod": r["kod"], "kert": r["kert"]} for r in cur.fetchall()]
+        conn.close()
+        return jsonify({"status": "ok", "keresek": rows}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/pda/photos/upload', methods=['POST'])
+def pda_photos_upload():
+    """A gepi program feltolti egy termek (mar kicsinyitett, JPG) kepeit. Ha nincs kep: uzenet a 'nincs' mezoben."""
+    try:
+        code = clean_code(request.form.get('kod', ''))
+        if not code.startswith("R18-"):
+            return pda_err(400, "S-400", "Ervenytelen R18 kod")
+        d = _foto_dir(code)
+        os.makedirs(d, exist_ok=True)
+        for f in os.listdir(d):
+            try:
+                os.remove(os.path.join(d, f))
+            except OSError:
+                pass
+        files = request.files.getlist('fotok')[:FOTO_MAX]
+        for i, f in enumerate(files, start=1):
+            f.save(os.path.join(d, f"{i}.jpg"))
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("""INSERT INTO foto_keresek (kod, kert, kesz, darab, uzenet, gep) VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(kod) DO UPDATE SET kesz=excluded.kesz, darab=excluded.darab, uzenet=excluded.uzenet, gep=excluded.gep""",
+                     (code, pda_now().strftime("%Y-%m-%d %H:%M:%S"), pda_now().strftime("%Y-%m-%d %H:%M:%S"), len(files),
+                      safe_str(request.form.get('uzenet', '')) or ("" if files else "Nincs fenykep a NAS-on"),
+                      safe_str(request.form.get('gep', ''))))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "darab": len(files)}), 200
     except Exception as e:
         return pda_err(500, "S-500", str(e))
 

@@ -511,6 +511,46 @@ def push_naplo_to_server(max_rows=300):
     return 0
 
 
+def serve_pda_photo_requests():
+    """A PDA által kért termékfotók feltöltése a szerverre (a NAS-ról, kicsinyítve). Háttérszálból hívandó.
+    Visszaad: hány termék képeit töltötte fel."""
+    if not PHOTOS_ENABLED:
+        return 0
+    res = vps_request("GET", f"{VPS_URL}/pda/photo_requests", timeout=8)
+    if res.status_code != 200:
+        return 0
+    keresek = res.json().get("keresek") or []
+    if not keresek:
+        return 0
+    if not photo_index.built_at:
+        photo_index.build()            # első alkalommal megvárjuk a fotó-mappák beolvasását
+    done = 0
+    for k in keresek:
+        code = norm_code(k.get("kod"))
+        paths = photo_index.photos(code)[:8]
+        files, hibak = [], 0
+        for i, path in enumerate(paths):
+            try:
+                with Image.open(path) as im:
+                    im = im.convert("RGB")
+                    im.thumbnail((1280, 1280))
+                    buf = io.BytesIO()
+                    im.save(buf, "JPEG", quality=80)
+                files.append(("fotok", (f"{i + 1}.jpg", buf.getvalue(), "image/jpeg")))
+            except Exception:
+                hibak += 1
+        uzenet = "" if files else ("Nincs fénykép a NAS-on ehhez a termékhez" if not paths else "A képek nem olvashatók")
+        if hibak and files:
+            uzenet = f"{hibak} kép nem volt olvasható"
+        try:
+            vps_request("POST", f"{VPS_URL}/pda/photos/upload", timeout=60, files=files or None,
+                        data={"kod": code, "uzenet": uzenet, "gep": socket.gethostname() or "asztali gep"})
+            done += 1
+        except Exception as e:
+            print(f"[PDA fotó] Feltöltési hiba ({code}): {e}")
+    return done
+
+
 def report_pda_result(tipus, rid, ok, uzenet, kod=""):
     """A PDA-ról jött eladás / módosítás eredményének visszaküldése a szerverre (háttérszálon).
     A PDA a Napló / Folyamat napló fülön mutatja (hiba esetén a kóddal, pl. A-21)."""
@@ -713,7 +753,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.16-pda4"
+APP_VERSION = "v2026.10.16-pda5"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -5907,6 +5947,10 @@ class RaktarApp(QMainWindow):
                 push_naplo_to_server()
             except Exception:
                 pass
+            try:
+                serve_pda_photo_requests()
+            except Exception as e:
+                print(f"[PDA fotó] Hiba: {e}")
             try:
                 leg = send_heartbeat()
                 if leg is not None:
