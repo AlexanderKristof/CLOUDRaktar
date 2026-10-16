@@ -168,6 +168,7 @@
       <button type="button" onclick="xlsLast()">&#x23ED;</button>
     </div>
     <label class="chk" style="color:#cfd8dc;margin:6px 0"><input type="checkbox" id="xls-filled" onchange="xlsReload()"><span>Csak kit&#xF6;lt&#xF6;tt sorok</span></label>
+    <button class="btn grey" type="button" style="padding:9px;font-size:14px;margin-top:2px" onclick="openOrphans()">&#x1F9F9; Az adatb&#xE1;zisban van, de a t&#xE1;bl&#xE1;zatban m&#xE1;r nincs</button>
     <div class="small" id="xls-info"></div>
     <div id="xls-status"></div>
     <div class="xwrap" id="xls-wrap"><table class="x" id="xls-table"></table></div>
@@ -326,6 +327,16 @@
   </div>
 </div>
 
+<!-- ================= CSAK AZ ADATB&#xC1;ZISBAN L&#xC9;V&#x150; SOROK ================= -->
+<div id="orph" class="overlay">
+  <div class="ohead">&#x1F9F9; Csak az adatb&#xE1;zisban</div>
+  <div class="msg info">Ezek az R18-sz&#xE1;mok a szerver adatb&#xE1;zis&#xE1;ban benne vannak, de az &#xE9;l&#x151; Google t&#xE1;bl&#xE1;zatban m&#xE1;r <b>nincsenek</b>.
+    A t&#xF6;rl&#xE9;s el&#x151;tt mindegyik adata a ToroltSor lapra ker&#xFC;l, &#xE9;s a Napl&#xF3;b&#xF3;l visszavonhat&#xF3;.</div>
+  <div id="orph-status"></div>
+  <div id="orph-list"></div>
+  <button class="btn grey" type="button" onclick="closeOverlay('orph')">Bez&#xE1;r&#xE1;s</button>
+</div>
+
 <!-- ================= EXCEL CELLA SZERKESZT&#xC9;SE ================= -->
 <div id="cedit" class="overlay">
   <div class="ohead" id="ce-title">Cella</div>
@@ -385,7 +396,7 @@
 </div>
 
 <script>
-var VERSION = "2026.10.16-f";
+var VERSION = "2026.10.16-g";
 var PLATFORMS = {
   EBAY_KIVULI: { cim: "eBay-en k\u00edv\u00fcli elad\u00e1s", gomb: "eBay-en k\u00edv\u00fcli", cls: "b-kivul" },
   EBAY:        { cim: "eBay elad\u00e1s",           gomb: "eBay",           cls: "b-ebay" },
@@ -405,7 +416,7 @@ var ERR = {
   "A-10": ["Az asztali program m\u00e9g nem vette \u00e1t (2 percn\u00e9l r\u00e9gebben)", "Fut a g\u00e9pi program? A c\u00edm\u00e9ben v2026.10.15-pda vagy \u00fajabb \u00e1ll? Van mellette api_token.txt?"],
   "A-21": ["A term\u00e9k nincs meg az asztali g\u00e9pen", "A g\u00e9pi program adatb\u00e1zis\u00e1ban nincs ilyen R18 \u2013 n\u00e9zd meg az Excel Live-on / Szerver adatb\u00e1zis f\u00fcl\u00f6n."],
   "A-22": ["Helyi adatb\u00e1zis / ment\u00e9si hiba a g\u00e9pen", "A g\u00e9pi program Folyamat napl\u00f3j\u00e1ban l\u00e1tszik a r\u00e9szlet."],
-  "A-23": ["Ismeretlen platform / mez\u0151 \u2013 a g\u00e9pi program r\u00e9gebbi, mint a PDA fel\u00fclet", "Friss\u00edtsd a g\u00e9pi programot (app_pyqt6CLOUD.py, a c\u00edm\u00e9ben v2026.10.16-pda2 vagy \u00fajabb), majd a Napl\u00f3ban nyomd meg a \ud83d\udd01 \u00dajrak\u00fcld\u00e9s gombot."],
+  "A-23": ["Ismeretlen platform / mez\u0151 \u2013 a g\u00e9pi program r\u00e9gebbi, mint a PDA fel\u00fclet", "Friss\u00edtsd a g\u00e9pi programot (app_pyqt6CLOUD.py, a c\u00edm\u00e9ben v2026.10.16-pda3 vagy \u00fajabb), majd a Napl\u00f3ban nyomd meg a \ud83d\udd01 \u00dajrak\u00fcld\u00e9s gombot."],
   "A-24": ["V\u00e1ratlan hiba a g\u00e9pen", "A g\u00e9pi program Folyamat napl\u00f3j\u00e1ban l\u00e1tszik a r\u00e9szlet."],
   "A-25": ["A k\u00e9szletet nem lehetett jav\u00edtani \u2013 a term\u00e9k m\u00e1r t\u00f6r\u00f6lve van", "\u00c1ll\u00edtsd vissza a g\u00e9pen: Admin f\u00fcl \u2192 T\u00f6r\u00f6lt term\u00e9kek \u2192 Vissza\u00e1ll\u00edt\u00e1s, majd \u00edrd \u00e1t a darabsz\u00e1mot."]
 };
@@ -523,7 +534,7 @@ function api(method, url, body, mit) {
 function errText(e) { return "[" + (e.kod || "?") + "] " + e.message; }
 var lastServerOk = null;
 function setServer(ok) { $("srv").className = "dot " + (ok ? "ok" : "bad"); lastServerOk = ok; }
-var OVERLAYS = ["sale", "token", "edit", "hist", "sedit", "cedit", "ask", "qdbov"];
+var OVERLAYS = ["sale", "token", "edit", "hist", "sedit", "cedit", "ask", "qdbov", "orph"];
 function overlayOpen() { return OVERLAYS.some(function (o) { return $(o).classList.contains("on"); }); }
 function closeOverlay(id) { $(id).classList.remove("on"); focusScan(); }
 function msgTo(id, html, cls) { $(id).innerHTML = html ? '<div class="msg ' + cls + '">' + html + "</div>" : ""; }
@@ -715,7 +726,8 @@ function card(it) {
          '<button onclick="openHistory(\'' + esc(it.A || it.B) + '\')">\ud83d\udd58 El\u0151zm\u00e9nyek</button></div>' +
          '<div class="two"><button onclick="xlsJump(\'' + esc(it.A || it.B) + '\')">\ud83d\udcca Excel Live-on</button>' +
          '<button onclick="startMoveFor(' + i + ')">\ud83d\udce6 \u00c1thelyez\u00e9s</button></div>' +
-         '<button class="btn blue" style="padding:11px;font-size:15px" onclick="openQdb(' + i + ')">\ud83d\udd22 Darabsz\u00e1m m\u00f3dos\u00edt\u00e1sa (most: ' + stockOf(it) + ' db)</button></div>';
+         '<button class="btn blue" style="padding:11px;font-size:15px" onclick="openQdb(' + i + ')">\ud83d\udd22 Darabsz\u00e1m m\u00f3dos\u00edt\u00e1sa (most: ' + stockOf(it) + ' db)</button>' +
+         '<button class="btn red" style="padding:9px;font-size:14px" onclick="deleteItem(' + i + ')">\ud83d\uddd1\ufe0f Term\u00e9k t\u00f6rl\u00e9se</button></div>';
 }
 function stockOf(it) { var m = String(it.F || "").match(/\d+/); return m ? parseInt(m[0], 10) : 1; }
 
@@ -880,6 +892,83 @@ function submitQdb() {
       beep(true);
     }).catch(function (e) { $("qdb-go").disabled = false; errBox(e); });
   });
+}
+
+// ================= T\u00d6RL\u00c9S =================
+var DEL_REASONS = ["Nincs a t\u00e1bl\u00e1zatban (felesleges sor)", "Hib\u00e1s / duplik\u00e1lt sor", "Nincs meg a rakt\u00e1rban", "Egy\u00e9b"];
+function sendDelete(code, ok) {
+  return api("POST", "/pda/delete", { A: code, ok: ok, eszkoz: deviceName() }, "T\u00f6rl\u00e9s (" + code + ": " + ok + ")");
+}
+function deleteItem(i) {
+  var it = ITEM_MAP[i]; if (!it) return;
+  ask("\ud83d\uddd1\ufe0f Term\u00e9k t\u00f6rl\u00e9se?", "<b>" + esc(it.A) + "</b> \u2013 " + esc([it.C, it.D, it.E].filter(Boolean).join(" ") || "(\u00fcres sor)") +
+      "<br>DB: " + stockOf(it) + " \u00b7 Raklap: " + palletHtml(it.L) +
+      "<br><br>T\u00f6rl\u0151dik a g\u00e9pen, a szerveren \u00e9s a Google t\u00e1bl\u00e1zatban. Az adatai a <b>ToroltSor</b> lapra ker\u00fclnek, \u00e9s visszavonhat\u00f3.<br><br><b>Mi\u00e9rt t\u00f6rl\u00f6d?</b>",
+      DEL_REASONS.map(function (r) { return { label: "\ud83d\uddd1\ufe0f " + esc(r), value: r, cls: "red" }; }).concat([{ label: "\u2716 M\u00e9gse", value: false, cls: "grey" }]))
+    .then(function (ok) {
+      if (!ok) return;
+      sendDelete(it.A, ok).then(function (js) {
+        var lbl = it.A + " t\u00f6rl\u00e9se";
+        showUndo("\ud83d\uddd1\ufe0f " + esc(lbl), function () { undoChange(js.valtozas_id, lbl); });
+        var box = activeTab === "qs" ? "qs-status" : "status";
+        msgTo(box, "\ud83d\uddd1\ufe0f <b>" + esc(it.A) + "</b> t\u00f6rl\u00e9se elk\u00fcldve \u2013 az asztali program hajtja v\u00e9gre (\ud83d\udcdc Napl\u00f3).", "ok");
+        if (activeTab === "sell") $("results").innerHTML = "";
+        beep(true);
+      }).catch(function (e) { errBox(e); });
+    });
+}
+var orphItems = [];
+function openOrphans() {
+  $("orph").classList.add("on");
+  $("orph-list").innerHTML = "";
+  msgTo("orph-status", "\u23f3 \u00d6sszevet\u00e9s a Google t\u00e1bl\u00e1zattal\u2026 (p\u00e1r m\u00e1sodperc)", "info");
+  api("GET", "/pda/orphans").then(function (js) {
+    orphItems = js.items || [];
+    msgTo("orph-status", "T\u00e1bl\u00e1zatban: <b>" + js.tablazatban + "</b> R18 \u00b7 Adatb\u00e1zisban: <b>" + js.adatbazisban + "</b> \u00b7 Csak az adatb\u00e1zisban: <b>" +
+          orphItems.length + "</b>", orphItems.length ? "warn" : "ok");
+    renderOrphans();
+  }).catch(function (e) { msgTo("orph-status", "\u274c " + esc(errText(e)), "err"); });
+}
+function renderOrphans() {
+  var left = orphItems.filter(function (x) { return !x._sent; });
+  var h = left.length > 1 ? '<button class="btn red" type="button" onclick="deleteAllOrphans()">\ud83d\uddd1\ufe0f Mind a(z) ' + left.length + " t\u00f6rl\u00e9se</button>" : "";
+  h += orphItems.map(function (x, i) {
+    return '<div class="row ' + (x._sent ? "okb" : "wb") + '"><div class="top"><span>' + esc(x.A) + "</span><span>" + esc((x.F || "") ? x.F + " db" : "") + "</span></div>" +
+           "<div>" + esc([x.C, x.D, x.E].filter(Boolean).join(" ") || "(\u00fcres sor)") + "</div>" +
+           '<div class="small">Raklap: ' + esc(x.L || "\u2014") + "</div>" +
+           (x._sent ? '<div class="done">\u2714 T\u00f6rl\u00e9s elk\u00fcldve</div>'
+                    : '<button class="btn red" style="padding:9px;font-size:14px" onclick="deleteOrphan(' + i + ')">\ud83d\uddd1\ufe0f T\u00f6rl\u00e9s</button>') + "</div>";
+  }).join("");
+  $("orph-list").innerHTML = h || '<div class="msg ok">\u2714 Nincs ilyen sor \u2013 az adatb\u00e1zis \u00e9s a t\u00e1bl\u00e1zat egyezik.</div>';
+}
+function deleteOrphan(i) {
+  var x = orphItems[i];
+  confirmBox("\ud83d\uddd1\ufe0f T\u00f6rl\u00e9s?", "<b>" + esc(x.A) + "</b> \u2013 " + esc([x.C, x.D, x.E].filter(Boolean).join(" ") || "(\u00fcres sor)") +
+             "<br><br>A t\u00e1bl\u00e1zatban m\u00e1r nincs meg. T\u00f6rl\u00f6d az adatb\u00e1zisb\u00f3l is? (ToroltSor-ra archiv\u00e1lva, visszavonhat\u00f3)", "\ud83d\uddd1\ufe0f Igen, t\u00f6rl\u00f6m", "red")
+    .then(function (ok) {
+      if (!ok) return;
+      sendDelete(x.A, "Nincs a t\u00e1bl\u00e1zatban (\u00e1rva sor)").then(function (js) {
+        x._sent = true; renderOrphans();
+        showUndo("\ud83d\uddd1\ufe0f " + esc(x.A) + " t\u00f6rl\u00e9se", function () { undoChange(js.valtozas_id, x.A + " t\u00f6rl\u00e9se").then(function () { x._sent = false; renderOrphans(); }); });
+      }).catch(function (e) { errBox(e); });
+    });
+}
+function deleteAllOrphans() {
+  var left = orphItems.filter(function (x) { return !x._sent; });
+  confirmBox("\ud83d\uddd1\ufe0f Mind a(z) " + left.length + " t\u00f6rl\u00e9se?", left.slice(0, 40).map(function (x) { return esc(x.A) + " " + esc([x.C, x.D].filter(Boolean).join(" ")); }).join("<br>") +
+             (left.length > 40 ? "<br>\u2026 \u00e9s m\u00e9g " + (left.length - 40) : "") +
+             "<br><br>Mindegyik a ToroltSor lapra ker\u00fcl, \u00e9s egyenk\u00e9nt visszavonhat\u00f3 a Napl\u00f3ban.", "\ud83d\uddd1\ufe0f Igen, mindet t\u00f6rl\u00f6m", "red")
+    .then(function (ok) {
+      if (!ok) return;
+      var chain = Promise.resolve(), hiba = 0;
+      left.forEach(function (x) {
+        chain = chain.then(function () { return sendDelete(x.A, "Nincs a t\u00e1bl\u00e1zatban (\u00e1rva sor)").then(function () { x._sent = true; }, function () { hiba++; }); });
+      });
+      chain.then(function () {
+        renderOrphans();
+        msgTo("orph-status", "\ud83d\uddd1\ufe0f " + (left.length - hiba) + " t\u00f6rl\u00e9s elk\u00fcldve" + (hiba ? ", " + hiba + " nem siker\u00fclt" : "") + " \u2013 az asztali program hajtja v\u00e9gre (\ud83d\udcdc Napl\u00f3).", hiba ? "warn" : "ok");
+      });
+    });
 }
 
 // ================= EL\u0150ZM\u00c9NYEK =================
@@ -1492,6 +1581,12 @@ function retryFromLog(vid) {
   var x = logData.filter(function (r) { return r.fajta === "valtozas" && r.valtozas_id === vid; })[0];
   if (!x) return;
   var ad = {}; try { ad = JSON.parse(x.adat || "{}") || {}; } catch (e) {}
+  if (x.tipus === "TORLES") {
+    confirmBox("\ud83d\udd01 T\u00f6rl\u00e9s \u00fajrak\u00fcld\u00e9se?", "<b>" + esc(x.A) + "</b><br>El\u0151z\u0151 hiba: " + esc(x.eredmeny_uzenet || ""), "\ud83d\udd01 Igen, \u00fajrak\u00fcld\u00f6m", "red").then(function (ok) {
+      if (ok) sendDelete(x.A, ad.ok || "\u00dajrak\u00fcld\u00e9s").then(function () { loadLog(); }).catch(function (e) { errBox(e); });
+    });
+    return;
+  }
   var valt = ad.valtozasok || {}; if (!Object.keys(valt).length && x.mezo && x.mezo !== "*") valt[x.mezo] = x.uj;
   if (!Object.keys(valt).length) { infoBox("\ud83d\udd01 Nem k\u00fcldhet\u0151 \u00fajra", "Ennek a t\u00e9telnek nincs \u00fajrak\u00fcldhet\u0151 tartalma."); return; }
   var lista = Object.keys(valt).map(function (k) { return esc(k) + ": <b>" + esc(valt[k] || "\u2014") + "</b>"; }).join("<br>");
@@ -1508,7 +1603,7 @@ function retryFromLog(vid) {
 function undoFromLog(vid) {
   var x = logData.filter(function (r) { return r.fajta === "valtozas" && r.valtozas_id === vid; })[0];
   if (!x) return;
-  var lbl = x.A + " \u2013 " + (x.tipus === "ATHELYEZES" ? "\u00e1thelyez\u00e9s " + (x.regi || "\u2014") + " \u2192 " + x.uj :
+  var lbl = x.A + " \u2013 " + (x.tipus === "TORLES" ? "t\u00f6rl\u00e9s (a term\u00e9k visszaker\u00fcl)" : x.tipus === "ATHELYEZES" ? "\u00e1thelyez\u00e9s " + (x.regi || "\u2014") + " \u2192 " + x.uj :
                            x.tipus === "ELADAS_MODOSITAS" ? "elad\u00e1s jav\u00edt\u00e1sa" : "szerkeszt\u00e9s");
   confirmBox("\u21a9\ufe0f Visszavon\u00e1s?", esc(lbl) + "<br><br>A r\u00e9gi \u00e9rt\u00e9k ker\u00fcl vissza.", "\u21a9\ufe0f Igen, vond vissza", "orange")
     .then(function (ok) { if (ok) undoChange(vid, lbl); });
@@ -1545,14 +1640,18 @@ function renderLog() {
         return Object.keys(v).map(function (k) { return esc(LBL[k] || k) + ": " + esc(r[k] || "\u2014") + " \u2192 <b>" + esc(v[k] || "\u2014") + "</b>"; }).join("<br>");
       };
       var title = { MODOSITAS: "\u270f\ufe0f Szerkeszt\u00e9s", ELADAS_MODOSITAS: "\u270f\ufe0f Elad\u00e1s jav\u00edt\u00e1sa", ELADAS_TORLES: "\u21a9\ufe0f Elad\u00e1s visszavon\u00e1sa",
-                    VISSZAVONAS: "\u21a9\ufe0f Visszavon\u00e1s" }[x.tipus];
+                    VISSZAVONAS: "\u21a9\ufe0f Visszavon\u00e1s", TORLES: "\ud83d\uddd1\ufe0f T\u00f6rl\u00e9s", VISSZAALLITAS: "\u267b\ufe0f Vissza\u00e1ll\u00edt\u00e1s (t\u00f6rl\u00e9s visszavonva)" }[x.tipus];
       var undoHtml = x.visszavonva ? '<div class="fail">\u21a9\ufe0f Visszavonva (' + esc(String(x.visszavonva).slice(0, 16)) + ")</div>"
                    : (x.eredmeny === "hiba" && x.tipus !== "ELADAS_TORLES" && !x.ref)
                      ? '<div class="two"><span></span><button onclick="retryFromLog(\'' + esc(x.valtozas_id) + '\')">\ud83d\udd01 \u00dajrak\u00fcld\u00e9s</button></div>'
-                   : (x.tipus === "ELADAS_TORLES" || x.tipus === "VISSZAVONAS" || x.eredmeny === "hiba") ? ""
+                   : (x.tipus === "ELADAS_TORLES" || x.tipus === "VISSZAVONAS" || x.tipus === "VISSZAALLITAS" || x.eredmeny === "hiba") ? ""
                    : '<div class="two"><span></span><button onclick="undoFromLog(\'' + esc(x.valtozas_id) + '\')">\u21a9\ufe0f Visszavon\u00e1s</button></div>';
       if (title) {
-        var body = x.tipus === "ELADAS_TORLES" ? "K\u00e9szlet vissza\u00edr\u00e1sa: <b>" + (ad.keszlet_vissza ? "igen (+" + esc(ad.darab) + " db)" : "nem") + "</b>" : vlist();
+        var sor = ad.sor || {};
+        var body = x.tipus === "ELADAS_TORLES" ? "K\u00e9szlet vissza\u00edr\u00e1sa: <b>" + (ad.keszlet_vissza ? "igen (+" + esc(ad.darab) + " db)" : "nem") + "</b>"
+                 : (x.tipus === "TORLES" || x.tipus === "VISSZAALLITAS") ? esc([sor.C, sor.D, sor.E].filter(Boolean).join(" ") || "(\u00fcres sor)") +
+                   (sor.F ? " \u00b7 " + esc(sor.F) + " db" : "") + (sor.L ? " \u00b7 raklap " + esc(sor.L) : "") + (ad.ok ? "<br>Ok: " + esc(ad.ok) : "")
+                 : vlist();
         return '<div class="row ' + cls + '"><div class="top"><span>' + title + " \u00b7 " + esc(x.A) + "</span><span>" + esc(x.ido) + "</span></div>" +
                "<div>" + body + "</div>" +
                '<div class="small">' + esc([x.C, x.D].filter(Boolean).join(" ")) + " \u00b7 " + esc(x.eszkoz) + "</div>" +
@@ -1624,7 +1723,7 @@ window.onScan = function (code) {
   if ($("ask").classList.contains("on")) return;          // k\u00e9rd\u00e9s k\u00f6zben a csippant\u00e1s nem csin\u00e1l semmit
   if ($("token").classList.contains("on")) { $("tok-in").value = code; return; }
   if ($("hist").classList.contains("on")) return;
-  if ($("qdbov").classList.contains("on")) return;
+  if ($("qdbov").classList.contains("on") || $("orph").classList.contains("on")) return;
   if ($("cedit").classList.contains("on")) { var ci = $("ce-in"); if (ci && ci.tagName === "INPUT") ci.value = code; return; }
   if ($("edit").classList.contains("on") || $("sedit").classList.contains("on")) {
     var ae = document.activeElement;
@@ -1659,7 +1758,7 @@ window.onBack = function () {
   if ($("ask").classList.contains("on")) { askAnswer(-1); return true; }
   if ($("token").classList.contains("on")) return false;
   if ($("sale").classList.contains("on")) { closeSale(); return true; }
-  var open = ["edit", "hist", "sedit", "cedit", "qdbov"].filter(function (o) { return $(o).classList.contains("on"); })[0];
+  var open = ["edit", "hist", "sedit", "cedit", "qdbov", "orph"].filter(function (o) { return $(o).classList.contains("on"); })[0];
   if (open) { closeOverlay(open); return true; }
   if (activeTab !== "sell") { showTab("sell"); return true; }
   return false;

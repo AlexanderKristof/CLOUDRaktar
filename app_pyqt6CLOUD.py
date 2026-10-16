@@ -713,7 +713,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.16-pda2"
+APP_VERSION = "v2026.10.16-pda3"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -5997,6 +5997,10 @@ class RaktarApp(QMainWindow):
             try:
                 if tipus in ("ELADAS_MODOSITAS", "ELADAS_TORLES"):
                     ok, msg, kod = self._apply_pda_sale_change(ch)
+                elif tipus == "TORLES":
+                    ok, msg, kod = self._apply_pda_delete(ch)
+                elif tipus == "VISSZAALLITAS":
+                    ok, msg, kod = self._apply_pda_restore(ch)
                 else:
                     ok, msg, kod = self._apply_pda_product_change(ch)
                 report_pda_result("valtozas", vid, ok, msg, kod)
@@ -6060,6 +6064,62 @@ class RaktarApp(QMainWindow):
         enqueue_row_from_db(code, force=True)
         return True, " | ".join(f"{COLUMN_LABELS.get(k, k)}: {safe_str(elotte.get(k)) or '-'} → {v or '-'}"
                                 for k, v in valt.items()) + megj, ""
+
+    def _apply_pda_delete(self, ch):
+        """Termék törlése a PDA kérésére: ToroltSor-ra archiválja, majd törli a gépen, a szerveren és a táblázatban."""
+        code = norm_code(ch.get("A"))
+        eszkoz = safe_str(ch.get("eszkoz")) or "PDA"
+        adat = self._pda_json(ch.get("adat"))
+        ok_txt = safe_str(adat.get("ok")) or "PDA-ról törölve"
+        src = f"📱 Zebra PDA ({eszkoz}) - 🗑️ Törlés"
+        elotte = get_row_snapshot(code)
+        try:
+            if elotte:
+                archive_row_from_db(code, f"PDA törlés ({eszkoz}): {ok_txt}")
+                conn = get_db_connection()
+                conn.execute("DELETE FROM termekek WHERE UPPER(TRIM(A)) = ? OR UPPER(TRIM(B)) = ?", (code, code))
+                conn.commit()
+                conn.close()
+                msg = "Törölve: gép + szerver + Google táblázat (adatai a ToroltSor lapra kerültek)"
+            else:
+                sor = adat.get("sor") or {}
+                msg = "Ezen a gépen nem volt meg – a szerverről és a táblázatból törölve"
+                if _row_has_product_data(sor):
+                    archive_deleted_row({c: safe_str(sor.get(c, "")) for c in ROW_COLS}, f"PDA törlés ({eszkoz}): {ok_txt}")
+                    msg += " (adatai a ToroltSor lapra kerültek)"
+            enqueue_delete(code)
+        except Exception as e:
+            return False, f"Törlési hiba: {e}", "A-22"
+        log_event(code, "TÖRLÉS (PDA)", ok_txt, elotte, None, src)
+        return True, msg, ""
+
+    def _apply_pda_restore(self, ch):
+        """Egy PDA-s törlés visszavonása: a termék visszakerül ugyanazokkal az adatokkal."""
+        code = norm_code(ch.get("A"))
+        eszkoz = safe_str(ch.get("eszkoz")) or "PDA"
+        sor = self._pda_json(ch.get("adat")).get("sor") or {}
+        if not sor:
+            return False, "Nincs mentett adat a visszaállításhoz", "A-23"
+        data = {c: safe_str(sor.get(c, "")) for c in NAPLO_COLS}
+        data["A"] = code
+        now = get_row_snapshot(code)
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute(f"UPDATE termekek SET {', '.join(c + '=?' for c in NAPLO_COLS)} WHERE UPPER(TRIM(A))=? OR UPPER(TRIM(B))=?",
+                        (*[data[c] for c in NAPLO_COLS], code, code))
+            if cur.rowcount == 0:
+                cur.execute(f"INSERT INTO termekek ({', '.join(NAPLO_COLS)}, szin) VALUES ({', '.join('?' * 16)}, 'FEHÉR')",
+                            [data[c] for c in NAPLO_COLS])
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            return False, f"Helyi adatbázis hiba: {e}", "A-22"
+        payload = dict(data); payload["_force"] = True
+        enqueue_outbox(payload)
+        log_event(code, "FELVÉTEL (PDA-s törlés visszavonva)", "", now, get_row_snapshot(code),
+                  f"📱 Zebra PDA ({eszkoz}) - ↩️ Törlés visszavonása")
+        return True, "Visszaállítva: gép + szerver + Google táblázat", ""
 
     def _change_stock(self, code, delta, src, reason):
         """Készlet (F) módosítása delta-val. 0 alá / 0-ra csökkenésnél a terméket törli (mint az eladás).

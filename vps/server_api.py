@@ -981,6 +981,67 @@ def pda_sale_cancel():
         return pda_err(500, "S-500", str(e))
 
 
+@app.route('/pda/delete', methods=['POST'])
+def pda_delete():
+    """Termek TORLESE a PDA-rol. Az asztali program hajtja vegre: ToroltSor-ra archival, majd torli
+    a gepen, a szerveren es a Google tablazatban. {"A", "ok": "miert", "eszkoz"}"""
+    try:
+        data = request.json or {}
+        code = clean_code(data.get('A', ''))
+        if not code.startswith("R18-"):
+            return pda_err(400, "S-400", "Ervenytelen R18 kod")
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P FROM termekek "
+                    "WHERE UPPER(TRIM(A))=? OR UPPER(TRIM(B))=?", (code, code))
+        row = cur.fetchone()
+        sor = _pda_row(row) if row else {"A": code}
+        now = pda_now()
+        vid = f"V{now.strftime('%Y%m%d%H%M%S')}-{code}-{os.urandom(2).hex()}"
+        ok = safe_str(data.get('ok', '')) or "PDA-rol torolve"
+        cur.execute("""INSERT INTO pda_valtozasok (valtozas_id, ido, tipus, A, C, D, E, mezo, regi, uj, megjegyzes, eszkoz, adat)
+                       VALUES (?, ?, 'TORLES', ?, ?, ?, ?, '*', 'torles', '', ?, ?, ?)""",
+                    (vid, now.strftime("%Y-%m-%d %H:%M"), code, sor.get("C", ""), sor.get("D", ""), sor.get("E", ""),
+                     ok, safe_str(data.get('eszkoz', 'PDA')) or "PDA", json.dumps({"sor": sor, "ok": ok}, ensure_ascii=False)))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "valtozas_id": vid}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/pda/orphans', methods=['GET'])
+def pda_orphans():
+    """Az adatbazisban levo, de az elo Google tablazatban mar NEM szereplo R18-sorok."""
+    try:
+        res = requests.get(f"https://docs.google.com/spreadsheets/d/{LIVE_SHEETS_ID}/export?format=csv", timeout=20)
+        res.encoding = 'utf-8'
+        if res.status_code != 200:
+            return pda_err(500, "S-500", f"A Google tablazat nem toltheto le (HTTP {res.status_code})")
+        df = pd.read_csv(io.StringIO(res.text), header=None, dtype=str, keep_default_na=False)
+        sheet_codes = set()
+        for _, r in df.iterrows():
+            for col in (0, 1):
+                c = clean_code(safe_str(r.get(col)))
+                if c.startswith("R18-"):
+                    sheet_codes.add(c)
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P FROM termekek WHERE A LIKE 'R18-%'")
+        db_rows = [_pda_row(r) for r in cur.fetchall()]
+        conn.close()
+        # Biztonsag: ha a letoltott tablazat gyanusan kicsi, nem mondunk semmit "arvanak"
+        if len(sheet_codes) < max(10, len(db_rows) * 0.5):
+            return pda_err(500, "S-500", f"A letoltott tablazat gyanusan kicsi ({len(sheet_codes)} R18-sor, adatbazisban {len(db_rows)}) - kihagyva")
+        arva = [r for r in db_rows if clean_code(r["A"]) not in sheet_codes and clean_code(r["B"]) not in sheet_codes]
+        arva.sort(key=lambda r: _r18_num(r["A"]))
+        return jsonify({"status": "ok", "tablazatban": len(sheet_codes), "adatbazisban": len(db_rows), "items": arva}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
 @app.route('/pda/change/cancel', methods=['POST'])
 def pda_change_cancel():
     """PDA-s modositas (athelyezes / szerkesztes / eladas-javitas) VISSZAVONASA - pl. veletlen nyomas utan.
@@ -1026,6 +1087,14 @@ def pda_change_cancel():
                             ("(visszavonva a PDA-n)", now_s, "Visszavonva, mielott a gep vegrehajtotta - semmi nem valtozott",
                              now_s, vid))
             mode = "helyben"
+        elif ch["tipus"] == "TORLES":
+            # Mar torolve: visszaallitas ugyanazokkal az adatokkal (a gep hajtja vegre)
+            nvid = f"V{now.strftime('%Y%m%d%H%M%S')}-{ch['A']}-{os.urandom(2).hex()}"
+            cur.execute("""INSERT INTO pda_valtozasok (valtozas_id, ido, tipus, A, C, D, E, mezo, regi, uj, megjegyzes, eszkoz, adat)
+                           VALUES (?, ?, 'VISSZAALLITAS', ?, ?, ?, ?, '*', '', '', ?, ?, ?)""",
+                        (nvid, now.strftime("%Y-%m-%d %H:%M"), ch["A"], ch["C"], ch["D"], ch["E"],
+                         f"Torles visszavonasa: {vid}", eszkoz, json.dumps({"sor": ad.get("sor") or {}, "visszavont": vid}, ensure_ascii=False)))
+            mode = "gepre_var"
         else:
             nvid = f"V{now.strftime('%Y%m%d%H%M%S')}-{ch['A']}-{os.urandom(2).hex()}"
             ntipus = "ELADAS_MODOSITAS" if ch["tipus"] == "ELADAS_MODOSITAS" else "VISSZAVONAS"
@@ -1098,7 +1167,11 @@ def _fmt_change(r):
         ad = json.loads(r["adat"] or "{}")
     except Exception:
         ad = {}
-    if r["tipus"] == "ELADAS_TORLES":
+    if r["tipus"] in ("TORLES", "VISSZAALLITAS"):
+        sor = ad.get("sor") or {}
+        txt = ("TORLES" if r["tipus"] == "TORLES" else "VISSZAALLITAS") + ": " + " ".join(
+            str(sor.get(k, "")) for k in ("C", "D", "E") if sor.get(k)) + (f" | ok: {ad.get('ok')}" if ad.get("ok") else "")
+    elif r["tipus"] == "ELADAS_TORLES":
         txt = "Eladas visszavonasa, keszlet vissza: " + (f"igen (+{ad.get('darab', '')} db)" if ad.get("keszlet_vissza") else "nem")
     elif ad.get("valtozasok"):
         regi = ad.get("regi") or {}
