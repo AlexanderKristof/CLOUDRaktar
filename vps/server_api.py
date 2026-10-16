@@ -483,8 +483,8 @@ PDA_CHANGE_FIELDS = ("valtozas_id", "ido", "tipus", "A", "C", "D", "E", "mezo", 
                      "eszkoz", "atvette", "atvetel_ido", "eredmeny", "eredmeny_uzenet", "eredmeny_ido", "ref", "adat",
                      "visszavonva")
 # A PDA-rol modosithato termek-mezok
-PDA_EDITABLE = {"C": "Marka", "D": "Tipus", "E": "Cikkszam", "F": "DB", "G": "Allapot", "H": "Ar",
-                "K": "Polc", "L": "Raklap", "M": "Suly", "N": "eBay ID", "O": "Megjegyzes", "P": "Allapot reszlet"}
+PDA_EDITABLE = {"C": "Marka", "D": "Tipus", "E": "Cikkszam", "F": "DB", "G": "Allapot", "H": "Ar", "I": "Pater",
+                "K": "Oszlop", "L": "Raklap", "M": "Suly", "N": "eBay ID", "O": "Megjegyzes", "P": "Allapot reszlet"}
 # Az eladasbol a PDA-rol javithato mezok
 PDA_SALE_EDITABLE = ("vevo", "ar", "tracking", "megjegyzes", "darab", "platform")
 
@@ -817,13 +817,15 @@ def pda_sales_claim():
 
 # ---------- Athelyezes (raklap modositas) ----------
 def _norm_pallet(v):
-    v = safe_str(v).upper()
-    return re.sub(r"\s+", "", v)
+    """Egysegesitett hely: nagybetu, egy szokoz, "KISRAKTAR80" -> "KISRAKTAR 80"."""
+    v = re.sub(r"\s+", " ", safe_str(v).upper()).strip()
+    return re.sub(r"([^\W\d_])\s*(\d)", r"\1 \2", v)
 
 
 def _pallet_tokens(v):
-    """Egy raklap-cellaban tobb raklap is lehet: "493 494" = a 493-as ES a 494-es raklapon is van belole."""
-    return [t for t in re.split(r"[\s,;/+]+", safe_str(v).upper()) if t]
+    """Egy raklap-cellaban tobb raklap is lehet: "493 494" = a 493-as ES a 494-es raklapon is van belole.
+    A "KISRAKTAR 80" / "ENCS" tipusu helyek EGY helynek szamitanak (nem ket raklapnak)."""
+    return [_norm_pallet(t) for t in re.findall(r"[^\W\d_]+\s*\d+|[^\s,;/+]+", safe_str(v).upper())]
 
 
 @app.route('/pda/change', methods=['POST'])

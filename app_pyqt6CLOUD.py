@@ -713,7 +713,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.16-pda3"
+APP_VERSION = "v2026.10.16-pda4"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -3172,7 +3172,9 @@ class SummaryDialog(QDialog):
                     db = safe_str(r_dict.get("F")) or "1"
                     allapot = safe_str(r_dict.get("G")) or "HASZNÁLT"
                     ar = safe_str(r_dict.get("H")) or "Nincs"
-                    hely = safe_str(r_dict.get("L")) or safe_str(r_dict.get("I")) or "Ismeretlen"
+                    hely = safe_str(r_dict.get("L")) or "Ismeretlen"
+                    _pater, _polc = safe_str(r_dict.get("I")), safe_str(r_dict.get("K"))
+                    hely_txt = hely + (f" · Páter: {_pater}" if _pater else "") + (f" · Oszlop: {_polc}" if _polc else "")
                     
                     color_val = safe_str(r_dict.get("szin")).upper()
                     c_val = safe_str(r_dict.get("C"))
@@ -3181,10 +3183,10 @@ class SummaryDialog(QDialog):
                     box = QFrame()
                     if is_sold:
                         box.setStyleSheet("QFrame { background-color: rgba(171, 71, 188, 0.25); border: 2px solid #ab47bc; border-radius: 6px; margin-bottom: 6px; padding: 8px; }")
-                        info_text = f"🏷️ <b>{code}</b> | 🟣 <b style='color: #ab47bc;'>[ELADVA / TÖRÖLVE]</b> | 📍 Utolsó Hely: <b>{hely}</b>"
+                        info_text = f"🏷️ <b>{code}</b> | 🟣 <b style='color: #ab47bc;'>[ELADVA / TÖRÖLVE]</b> | 📍 Utolsó Hely: <b>{hely_txt}</b>"
                     else:
                         box.setStyleSheet("QFrame { background-color: #1e1e1e; border: 1px solid #333; border-radius: 6px; margin-bottom: 6px; padding: 8px; }")
-                        info_text = f"🏷️ <b>{code}</b> | 📦 Mennyiség: <b>{db} db</b> | 📍 Hely: <b>{hely}</b> | Állapot: <b>{allapot}</b> | Ár: <b>{ar} EUR</b>"
+                        info_text = f"🏷️ <b>{code}</b> | 📦 Mennyiség: <b>{db} db</b> | 📍 Hely: <b>{hely_txt}</b> | Állapot: <b>{allapot}</b> | Ár: <b>{ar} EUR</b>"
 
                     box_lay = QHBoxLayout(box)
                     lbl_info = QLabel(info_text)
@@ -4738,7 +4740,7 @@ class RaktarApp(QMainWindow):
         
         pater = safe_str(row.get('I'))
         polc = safe_str(row.get('K'))
-        hely = safe_str(row.get('L')) or pater
+        hely = safe_str(row.get('L'))       # a Páter (I) NEM hely - azt külön mutatjuk (a térképen nincs rajta)
         ebay_nr = safe_str(row.get('N')).strip()
         
         left_box = QWidget()
@@ -4879,10 +4881,10 @@ class RaktarApp(QMainWindow):
         inp_pater.setFixedWidth(90)
         row4.addWidget(inp_pater)
 
-        row4.addWidget(QLabel("Polc (K):"))
+        row4.addWidget(QLabel("Oszlop (K):"))
         inp_polc = QLineEdit(str(polc or ""))
         inp_polc.setAlignment(Qt.AlignmentFlag.AlignRight)
-        inp_polc.setPlaceholderText("Polc száma")
+        inp_polc.setPlaceholderText("Oszlop száma")
         inp_polc.setFixedWidth(90)
         row4.addWidget(inp_polc)
 
@@ -5983,7 +5985,7 @@ class RaktarApp(QMainWindow):
             self.refresh_sold_table()
 
     # A PDA-ról módosítható termék-mezők (a szerver is ugyanezt engedi)
-    PDA_EDITABLE_COLS = ("C", "D", "E", "F", "G", "H", "K", "L", "M", "N", "O", "P")
+    PDA_EDITABLE_COLS = ("C", "D", "E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P")
 
     def apply_pda_changes(self, changes):
         """A PDA-n kért módosítások végrehajtása ezen a gépen, majd az eredmény visszaküldése a PDA-nak:

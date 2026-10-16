@@ -104,6 +104,7 @@
   .askbox .btn { margin-top:10px; }
   .btn.red { background:var(--err); color:#fff; }
   .pallets { font-size:13px; color:#ffcc80; }
+  .loc { background:#102a1a; border:1px solid #1b5e20; border-radius:6px; padding:7px 9px; margin:0 0 8px; font-size:16px; color:#c8e6c9; }
   .ocrbtn { display:none; }
   .qdb { display:flex; align-items:center; justify-content:center; gap:14px; margin:16px 0; }
   .qdb button { width:64px; height:64px; border:none; border-radius:12px; background:#37474f; color:#fff; font-size:30px; font-weight:bold; }
@@ -396,7 +397,7 @@
 </div>
 
 <script>
-var VERSION = "2026.10.16-g";
+var VERSION = "2026.10.16-h";
 var PLATFORMS = {
   EBAY_KIVULI: { cim: "eBay-en k\u00edv\u00fcli elad\u00e1s", gomb: "eBay-en k\u00edv\u00fcli", cls: "b-kivul" },
   EBAY:        { cim: "eBay elad\u00e1s",           gomb: "eBay",           cls: "b-ebay" },
@@ -588,7 +589,17 @@ function infoBox(title, html) { return ask(title, html, [{ label: "OK", value: t
 function errBox(e) { return infoBox("\u274c Nem siker\u00fclt", esc(errText(e)) + "<br><br>" + esc((ERR[e.kod] || [])[1] || "")); }
 
 // ---- Raklap: egy cell\u00e1ban t\u00f6bb raklap is lehet (pl. "493 494" = mindk\u00e9t raklapon van bel\u0151le) ----
-function palletTokens(L) { return String(L || "").toUpperCase().split(/[\s,;\/+]+/).filter(Boolean); }
+// "KISRAKT\u00c1R 80" / "ENCS" = EGY hely; "493 494" = k\u00e9t raklap
+function normLoc(v) { return String(v || "").toUpperCase().replace(/\s+/g, " ").trim().replace(/([A-Z\u00c1\u00c9\u00cd\u00d3\u00d6\u0150\u00da\u00dc\u0170])\s*(\d)/g, "$1 $2"); }
+function palletTokens(L) { return (String(L || "").toUpperCase().match(/[A-Z\u00c1\u00c9\u00cd\u00d3\u00d6\u0150\u00da\u00dc\u0170]+\s*\d+|[^\s,;\/+]+/g) || []).map(normLoc); }
+// Teljes hely: raklap / kisrakt\u00e1r (L) + p\u00e1ter (I) + oszlop (K) \u2013 a p\u00e1ter \u00e9s az oszlop nincs a t\u00e9rk\u00e9pen
+function locHtml(it) {
+  var p = [];
+  if (it.L) p.push("<b>" + palletHtml(it.L) + "</b>");
+  if (it.I) p.push("P\u00e1ter: <b>" + esc(it.I) + "</b>");
+  if (it.K) p.push("Oszlop: <b>" + esc(it.K) + "</b>");
+  return p.length ? p.join(" \u00b7 ") : "\u2014";
+}
 function palletHtml(L) {
   var t = palletTokens(L);
   return t.length > 1 ? esc(t.join(" + ")) + ' <span class="pallets">(' + t.length + " raklapon)</span>" : esc(L || "\u2014");
@@ -710,7 +721,7 @@ function doSearch(q) {
   }).catch(function (e) { msgTo("status", "\u274c " + esc(errText(e)), "err"); beep(false); focusScan(); });
 }
 function infoRows(it) {
-  return [["Cikksz\u00e1m", it.E], ["\u00c1llapot", it.G], ["Rakt\u00e1ron", (it.F || "1") + " db"], ["Raklap", it.L],
+  return [["Cikksz\u00e1m", it.E], ["\u00c1llapot", it.G], ["Rakt\u00e1ron", (it.F || "1") + " db"],
           ["S\u00faly", it.M], ["eBay sz\u00e1m", it.N]].filter(function (r) { return r[1]; });
 }
 function card(it) {
@@ -720,6 +731,7 @@ function card(it) {
     return '<button class="' + PLATFORMS[p].cls + '" onclick="openSale(\'' + p + '\',' + i + ')">\ud83d\udcb0 ' + esc(PLATFORMS[p].gomb) + "</button>";
   }).join("");
   return '<div class="card"><div class="code">' + esc(it.A || it.B) + '</div><div class="name">' + esc(name || "-") + "</div>" +
+         '<div class="loc">\ud83d\udccd ' + locHtml(it) + "</div>" +
          '<div class="grid">' + infoRows(it).map(function (r) { return "<span>" + esc(r[0]) + "</span><span>" + esc(r[1]) + "</span>"; }).join("") +
          '</div><div class="sell">' + btns + "</div>" +
          '<div class="two"><button onclick="openEdit(' + i + ')">\u270f\ufe0f Szerkeszt\u00e9s</button>' +
@@ -804,7 +816,7 @@ function doSubmitSale(darab) {
 
 // ================= TERM\u00c9K SZERKESZT\u00c9SE =================
 var EDIT_FIELDS = [["C", "M\u00e1rka"], ["D", "T\u00edpus"], ["E", "Cikksz\u00e1m"], ["F", "DB (darab)"], ["G", "\u00c1llapot"], ["L", "Raklap"],
-                   ["K", "Polc"], ["M", "S\u00faly"], ["H", "\u00c1r"], ["N", "eBay ID"], ["O", "Megjegyz\u00e9s"], ["P", "\u00c1llapot r\u00e9szlet"]];
+                   ["I", "P\u00e1ter"], ["K", "Oszlop (polc poz\u00edci\u00f3)"], ["M", "S\u00faly"], ["H", "\u00c1r"], ["N", "eBay ID"], ["O", "Megjegyz\u00e9s"], ["P", "\u00c1llapot r\u00e9szlet"]];
 var ALLAPOT = ["\u00daJ", "HASZN\u00c1LT", "FEL\u00daJ\u00cdTOTT"];
 var editItem = null;
 function openEdit(i) {
@@ -1079,8 +1091,8 @@ function qsRun() {
 // ================= EXCEL LIVE MUNKALAP =================
 var XCOLS = ["A", "B", "C", "D", "E", "F", "G", "L", "M", "I", "K", "H", "N", "O", "P"];   // mint a g\u00e9pen (J rejtve)
 var XLBL = { A: "F-K\u00f3d", B: "Vonalk\u00f3d", C: "M\u00e1rka", D: "T\u00edpus", E: "Cikksz\u00e1m", F: "DB", G: "\u00c1llapot", H: "\u00c1r", I: "P\u00e1ter",
-             J: "Szabad", K: "Polc", L: "Raklap", M: "S\u00faly", N: "eBay ID", O: "Megjegyz\u00e9s", P: "\u00c1llapot r\u00e9szlet" };
-var XEDIT = { C: 1, D: 1, E: 1, F: 1, G: 1, H: 1, K: 1, L: 1, M: 1, N: 1, O: 1, P: 1 };
+             J: "Szabad", K: "Oszlop", L: "Raklap / hely", M: "S\u00faly", N: "eBay ID", O: "Megjegyz\u00e9s", P: "\u00c1llapot r\u00e9szlet" };
+var XEDIT = { C: 1, D: 1, E: 1, F: 1, G: 1, H: 1, I: 1, K: 1, L: 1, M: 1, N: 1, O: 1, P: 1 };
 var xlsRows = [], xlsLoaded = false, xlsHl = "", xlsPending = {};
 var XLIMIT = 100;
 function r18num(c) { var m = String(c || "").match(/^R18-0*(\d+)/i); return m ? parseInt(m[1], 10) : -1; }
@@ -1203,7 +1215,7 @@ function moveProduct(q) {
     beep(true);
     $("move-card").innerHTML = '<div class="card"><div class="code">' + esc(it.A) + '</div><div class="name">' +
         esc([it.C, it.D].filter(Boolean).join(" ") || "-") + '</div><div class="small">Jelenlegi raklap:</div><div class="big">' +
-        palletHtml(it.L) + "</div></div>";
+        palletHtml(it.L) + '</div><div class="small">' + (it.I || it.K ? "P\u00e1ter: " + esc(it.I || "\u2014") + " \u00b7 Oszlop: " + esc(it.K || "\u2014") : "") + "</div></div>";
     var keep = $("move-keep").checked && $("move-pallet").value.trim();
     if (keep) { msgTo("move-status", "", ""); submitMove(); return; }
     msgTo("move-status", "", "");
@@ -1271,7 +1283,7 @@ function moveScan(code) {
 var inv = null;
 try { inv = JSON.parse(localStorage.getItem("leltar") || "null"); } catch (e) { inv = null; }
 function saveInv() { try { if (inv) localStorage.setItem("leltar", JSON.stringify(inv)); else localStorage.removeItem("leltar"); } catch (e) {} }
-function normPallet(p) { return fixScan(p).toUpperCase().replace(/\s+/g, ""); }
+function normPallet(p) { return normLoc(fixScan(p)); }
 // Term\u00e9kkel ind\u00edtott lelt\u00e1r: a csippantott term\u00e9k raklapja (L) alapj\u00e1n indul, \u00e9s ez a darab m\u00e1r be is sz\u00e1m\u00edt
 function invStartFromProduct(code) {
   code = fixScan(code).toUpperCase();
@@ -1633,7 +1645,7 @@ function renderLog() {
     }
     if (x.fajta === "valtozas") {
       var ad = {}; try { ad = JSON.parse(x.adat || "{}") || {}; } catch (e) {}
-      var LBL = { C: "M\u00e1rka", D: "T\u00edpus", E: "Cikksz\u00e1m", F: "DB", G: "\u00c1llapot", H: "\u00c1r", K: "Polc", L: "Raklap", M: "S\u00faly", N: "eBay ID", O: "Megjegyz\u00e9s", P: "\u00c1llapot r\u00e9szlet",
+      var LBL = { C: "M\u00e1rka", D: "T\u00edpus", E: "Cikksz\u00e1m", F: "DB", G: "\u00c1llapot", H: "\u00c1r", I: "P\u00e1ter", K: "Oszlop", L: "Raklap", M: "S\u00faly", N: "eBay ID", O: "Megjegyz\u00e9s", P: "\u00c1llapot r\u00e9szlet",
                   vevo: "Vev\u0151", ar: "\u00c1r", tracking: "Tracking", megjegyzes: "Megjegyz\u00e9s", darab: "Darab", platform: "Platform" };
       var vlist = function () {
         var v = ad.valtozasok || {}, r = ad.regi || {};
