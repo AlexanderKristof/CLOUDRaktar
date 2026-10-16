@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QCheckBox, QMessageBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QGraphicsOpacityEffect, QTextEdit, QDateEdit, QListWidget, QInputDialog, QAbstractItemView,
     QStyledItemDelegate, QAbstractItemDelegate, QComboBox, QPlainTextEdit, QAbstractSpinBox, QStyle,
-    QToolButton, QMenu, QSplitter
+    QToolButton, QMenu, QSplitter, QGridLayout
 )
 from PyQt6.QtGui import QColor, QPixmap, QFont, QDesktopServices, QCloseEvent, QShortcut, QKeySequence, QIntValidator, QPainter, QImageReader, QImage
 from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -746,6 +746,23 @@ _INVISIBLE_CHARS.update({ord(ch): "-" for ch in "\u2010\u2011\u2012\u2013\u2014\
 _INVISIBLE_CHARS[0xa0] = " "
 
 
+def norm_pallet(v):
+    """Egységes hely: nagybetű, egy szóköz, "KISRAKTÁR80" -> "KISRAKTÁR 80"."""
+    v = re.sub(r"\s+", " ", str(v or "").upper()).strip()
+    return re.sub(r"([^\W\d_])\s*(\d)", r"\1 \2", v)
+
+
+def pallet_tokens(v):
+    """Egy raklap-cellában több raklap is lehet: "493 494" = a 493-as ÉS a 494-es raklapon is van belőle.
+    A "KISRAKTÁR 80" / "ENCS" típusú helyek EGY helynek számítanak."""
+    return [norm_pallet(t) for t in re.findall(r"[^\W\d_]+\s*\d+|[^\s,;/+]+", str(v or "").upper())]
+
+
+def stock_of(f):
+    m = re.search(r"\d+", str(f or ""))
+    return int(m.group(0)) if m else 1
+
+
 def norm_code(code):
     """R18-kód összehasonlításhoz: szóközök és láthatatlan karakterek nélkül, nagybetűvel."""
     return str(code or "").translate(_INVISIBLE_CHARS).strip().upper()
@@ -753,7 +770,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.16-pda5"
+APP_VERSION = "v2026.10.16-pda6"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -3652,6 +3669,7 @@ class RaktarApp(QMainWindow):
     pda_poll_status_signal = pyqtSignal(str, bool, bool)   # PDA-átvétel állapota: (szöveg, hiba?, kézi indítás?)
     version_info_signal = pyqtSignal(object)   # a szerver szerinti legfrissebb verziók -> fő szál
     clients_signal = pyqtSignal(object)        # gépek és verziók listája (Admin fül) -> fő szál
+    leltar_signal = pyqtSignal(str, object)    # leltár szerver-válaszok (fajta, adat) -> fő szál
 
     def __init__(self):
         super().__init__()
@@ -3757,6 +3775,7 @@ class RaktarApp(QMainWindow):
         self.pda_poll_status_signal.connect(self.on_pda_poll_status)
         self.version_info_signal.connect(self.on_version_info)
         self.clients_signal.connect(self.fill_clients_table)
+        self.leltar_signal.connect(self.on_leltar_signal)
         self._pda_last_status = None
         self._pda_poll_busy = False
         self.pda_poll_timer = QTimer(self)
@@ -3790,6 +3809,7 @@ class RaktarApp(QMainWindow):
         self.tab_local_db = QWidget()
         self.tab_pda = QWidget()
         self.tab_sold = QWidget()
+        self.tab_leltar = QWidget()
         self.tab_server = QWidget()
         self.tab_excel = QWidget()
         self.tab_single = QWidget()
@@ -3803,6 +3823,7 @@ class RaktarApp(QMainWindow):
         self.tabs.addTab(self.tab_search, "⚡ Gyorskereső")
         self.tabs.addTab(self.tab_pda, "📱 PDA / Eladás")
         self.tabs.addTab(self.tab_sold, "💰 Eladottak")
+        self.tabs.addTab(self.tab_leltar, "📋 Leltár")
         # TOVÁBBI FÜLEK (a "☰ További fülek" menüből nyílnak)
         self.tabs.addTab(self.tab_add, "📝 Új Termék Felvitele")
         self.tabs.addTab(self.tab_local_db, "💾 Helyi Adatbázis (Élő)")
@@ -3820,6 +3841,7 @@ class RaktarApp(QMainWindow):
         self.init_local_db_tab()
         self.init_pda_tab()
         self.init_sold_tab()
+        self.init_leltar_tab()
         self.init_server_tab()
         self.init_excel_tab()
         self.init_single_tab()
@@ -7090,6 +7112,607 @@ class RaktarApp(QMainWindow):
     # -------------------------------------------------------------------
     # TAB 6: RAKTÁRTÉRKÉP TAB
     # -------------------------------------------------------------------
+    # ==========================================================
+    # 📋 LELTÁR – Régi (raklaponként mi és mennyi) + Új leltár (gépen kézzel / csippantva, PDA-ról is)
+    # ==========================================================
+    LELTAR_TIP = {"egyezik": ("✅", "egyezik", "#00e676"), "elter": ("❌", "eltér", "#ff5252"),
+                  "hiany": ("❌", "hiányzik", "#ff5252"), "tobb": ("⚠️", "több raklapon", "#ffb74d"),
+                  "idegen": ("📦", "más raklapról", "#ffb74d"), "ismeretlen": ("❓", "nincs a rendszerben", "#ff5252")}
+
+    def init_leltar_tab(self):
+        layout = QVBoxLayout(self.tab_leltar)
+        self.lel_tabs = QTabWidget()
+        layout.addWidget(self.lel_tabs)
+
+        # ---- RÉGI: raklaponként ----
+        w1 = QWidget()
+        l1 = QVBoxLayout(w1)
+        bar = QHBoxLayout()
+        self.lel_old_filter = QLineEdit()
+        self.lel_old_filter.setPlaceholderText("🔍 Raklap szűrés (pl. 573, KISRAKTÁR) vagy R18-szám")
+        attach_scanner_fix(self.lel_old_filter)
+        self.lel_old_filter.textChanged.connect(self.leltar_fill_pallets)
+        bar.addWidget(self.lel_old_filter, stretch=2)
+        b = QPushButton("🔄 Frissítés")
+        b.clicked.connect(self.leltar_refresh_old)
+        bar.addWidget(b)
+        self.lel_old_info = QLabel("")
+        self.lel_old_info.setStyleSheet("color: #29b6f6; font-weight: bold;")
+        bar.addWidget(self.lel_old_info, stretch=2)
+        l1.addLayout(bar)
+        split = QSplitter(Qt.Orientation.Horizontal)
+        self.lel_pallets = self._admin_table(["Raklap / hely", "Termékfajta", "Összes db"], [150, 100, 90])
+        self.lel_pallets.itemSelectionChanged.connect(self.leltar_show_pallet)
+        split.addWidget(self.lel_pallets)
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        rl.setContentsMargins(0, 0, 0, 0)
+        top = QHBoxLayout()
+        self.lel_old_title = QLabel("Válassz egy raklapot bal oldalt.")
+        self.lel_old_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffb74d;")
+        top.addWidget(self.lel_old_title, stretch=1)
+        b2 = QPushButton("📋 Új leltár ezen a raklapon")
+        b2.setStyleSheet("background-color: #29b6f6; color: black; font-weight: bold;")
+        b2.clicked.connect(self.leltar_start_from_old)
+        top.addWidget(b2)
+        rl.addLayout(top)
+        self.lel_old_items = self._admin_table(["R18", "Márka", "Típus", "Cikkszám", "DB", "Állapot", "Raklap (L)", "Páter (I)", "Oszlop (K)"],
+                                               [100, 120, 160, 120, 50, 110, 110, 70])
+        rl.addWidget(self.lel_old_items)
+        split.addWidget(right)
+        split.setSizes([360, 900])
+        l1.addWidget(split, stretch=1)
+        self.lel_tabs.addTab(w1, "📦 Régi – raklaponként")
+
+        # ---- ÚJ LELTÁR ----
+        w2 = QWidget()
+        l2 = QHBoxLayout(w2)
+        split2 = QSplitter(Qt.Orientation.Horizontal)
+        left = QGroupBox("✍️ Új leltár a gépen (kézzel vagy vonalkód-olvasóval)")
+        ll = QVBoxLayout(left)
+        r1 = QHBoxLayout()
+        self.lel_pallet_in = QLineEdit()
+        self.lel_pallet_in.setPlaceholderText("Raklap szám (pl. 573)")
+        attach_scanner_fix(self.lel_pallet_in)
+        self.lel_pallet_in.returnPressed.connect(self.leltar_start)
+        r1.addWidget(self.lel_pallet_in, stretch=1)
+        b = QPushButton("▶️ Leltár indítása")
+        b.setStyleSheet("background-color: #00e676; color: black; font-weight: bold;")
+        b.clicked.connect(self.leltar_start)
+        r1.addWidget(b)
+        ll.addLayout(r1)
+        self.lel_run_info = QLabel("Írd be a raklap számát és indítsd a leltárt. Utána csippantsd a termékeket (minden darabot), "
+                                   "vagy írd be kézzel a darabszámot a „Számolt” oszlopba.")
+        self.lel_run_info.setWordWrap(True)
+        self.lel_run_info.setStyleSheet("color: #29b6f6; font-weight: bold; padding: 4px;")
+        ll.addWidget(self.lel_run_info)
+        r2 = QHBoxLayout()
+        self.lel_scan_in = QLineEdit()
+        self.lel_scan_in.setPlaceholderText("R18 csippantás / beírás + Enter")
+        attach_scanner_fix(self.lel_scan_in)
+        self.lel_scan_in.returnPressed.connect(self.leltar_scan)
+        r2.addWidget(self.lel_scan_in, stretch=1)
+        r2.addWidget(QLabel("db:"))
+        self.lel_qty = QSpinBox()
+        self.lel_qty.setRange(1, 999)
+        r2.addWidget(self.lel_qty)
+        b = QPushButton("➕ Hozzáad")
+        b.clicked.connect(self.leltar_scan)
+        r2.addWidget(b)
+        ll.addLayout(r2)
+        self.lel_run_table = self._admin_table(["R18", "Termék", "Előtte", "Számolt", "Megjegyzés"], [100, 190, 70, 90])
+        ll.addWidget(self.lel_run_table)
+        r3 = QHBoxLayout()
+        b = QPushButton("↩️ Utolsó csippantás visszavonása")
+        b.clicked.connect(self.leltar_undo_scan)
+        r3.addWidget(b)
+        b = QPushButton("✖ Leltár elvetése")
+        b.setStyleSheet("background-color: #555; color: white;")
+        b.clicked.connect(self.leltar_discard)
+        r3.addWidget(b)
+        ll.addLayout(r3)
+        self.lel_btn_done = QPushButton("✅ Kész – összegzés (előtte / most)")
+        self.lel_btn_done.setStyleSheet("background-color: #00e676; color: black; font-weight: bold; font-size: 15px; padding: 8px;")
+        self.lel_btn_done.clicked.connect(self.leltar_finish)
+        ll.addWidget(self.lel_btn_done)
+        split2.addWidget(left)
+
+        right2 = QWidget()
+        rl2 = QVBoxLayout(right2)
+        rl2.setContentsMargins(0, 0, 0, 0)
+        top2 = QHBoxLayout()
+        t = QLabel("📋 Leltárak (PDA + gép)")
+        t.setStyleSheet("font-size: 16px; font-weight: bold; color: #29b6f6;")
+        top2.addWidget(t)
+        self.lel_list_filter = QLineEdit()
+        self.lel_list_filter.setPlaceholderText("Raklap szűrés")
+        self.lel_list_filter.returnPressed.connect(self.leltar_load_list)
+        top2.addWidget(self.lel_list_filter)
+        b = QPushButton("🔄 Frissítés")
+        b.clicked.connect(self.leltar_load_list)
+        top2.addWidget(b)
+        rl2.addLayout(top2)
+        self.lel_list_info = QLabel("")
+        self.lel_list_info.setStyleSheet("color: #888;")
+        rl2.addWidget(self.lel_list_info)
+        self.lel_scroll = QScrollArea()
+        self.lel_scroll.setWidgetResizable(True)
+        self.lel_cards = QWidget()
+        self.lel_cards_layout = QGridLayout(self.lel_cards)
+        self.lel_cards_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.lel_scroll.setWidget(self.lel_cards)
+        rl2.addWidget(self.lel_scroll)
+        split2.addWidget(right2)
+        split2.setSizes([560, 800])
+        l2.addWidget(split2)
+        self.lel_tabs.addTab(w2, "📋 Új leltár (PDA + gép)")
+
+        self._lel = None          # a futó gépi leltár: {raklap, kezdes, rows: [{A, nev, elotte, L, megj}], cnt: {A: n}, hist: [A]}
+        self._lel_list = {}
+        self._lel_old_rows = []
+        self.lel_timer = QTimer(self)
+        self.lel_timer.timeout.connect(lambda: self._tab_is_current("tab_leltar") and self.leltar_load_list())
+        self.lel_timer.start(30000)
+
+    # ---- Régi: raklaponként a helyi adatbázisból ----
+    def leltar_refresh_old(self):
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT A, C, D, E, F, G, I, K, L FROM termekek WHERE C IS NOT NULL AND TRIM(C) != ''")
+            self._lel_old_rows = [{k: safe_str(r[k]) for k in r.keys()} for r in cur.fetchall()]
+            conn.close()
+        except Exception as e:
+            self.lel_old_info.setText(f"❌ Adatbázis hiba: {e}")
+            return
+        self.leltar_fill_pallets()
+
+    def _lel_pallet_map(self):
+        m = {}
+        for r in self._lel_old_rows:
+            for t in pallet_tokens(r["L"]) or ["(nincs raklap)"]:
+                m.setdefault(t, []).append(r)
+        return m
+
+    def leltar_fill_pallets(self):
+        m = self._lel_pallet_map()
+        f = norm_pallet(self.lel_old_filter.text())
+        if f and re.match(r"^R18", f):
+            keys = sorted({t for t, rows in m.items() if any(norm_code(r["A"]) == norm_code(f) for r in rows)})
+        else:
+            keys = [k for k in m if not f or f in k]
+        keys.sort(key=lambda k: (0, int(k), "") if k.isdigit() else (1, 0, k))
+        t = self.lel_pallets
+        t.setRowCount(len(keys))
+        for i, k in enumerate(keys):
+            rows = m[k]
+            for c, v in enumerate([k, len(rows), sum(stock_of(r["F"]) for r in rows)]):
+                it = QTableWidgetItem(str(v))
+                it.setData(Qt.ItemDataRole.UserRole, k)
+                t.setItem(i, c, it)
+        self.lel_old_info.setText(f"{len(keys)} raklap / hely · {len(self._lel_old_rows)} termék")
+        if len(keys) == 1:
+            t.selectRow(0)
+
+    def leltar_show_pallet(self):
+        it = self.lel_pallets.item(self.lel_pallets.currentRow(), 0) if self.lel_pallets.currentRow() >= 0 else None
+        if not it:
+            return
+        k = it.data(Qt.ItemDataRole.UserRole)
+        rows = sorted(self._lel_pallet_map().get(k, []), key=lambda r: r["A"])
+        self._lel_old_sel = k
+        self.lel_old_title.setText(f"📦 Raklap {k}: {len(rows)} féle termék, összesen {sum(stock_of(r['F']) for r in rows)} db")
+        t = self.lel_old_items
+        t.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            vals = [r["A"], r["C"], r["D"], r["E"], r["F"] or "1", r["G"], r["L"], r["I"], r["K"]]
+            for c, v in enumerate(vals):
+                cell = QTableWidgetItem(str(v))
+                if c == 6 and len(pallet_tokens(r["L"])) > 1:
+                    cell.setForeground(QColor("#ffb74d"))
+                    cell.setToolTip("Több raklapon van – a DB az összes raklapra együtt vonatkozik")
+                t.setItem(i, c, cell)
+
+    def leltar_start_from_old(self):
+        k = getattr(self, "_lel_old_sel", "")
+        if not k or k == "(nincs raklap)":
+            self.trigger_toast("Előbb válassz egy raklapot.")
+            return
+        self.lel_tabs.setCurrentIndex(1)
+        self.lel_pallet_in.setText(k)
+        self.leltar_start()
+
+    # ---- Új leltár a gépen ----
+    def _lel_find(self, code):
+        code = norm_code(code)
+        for r in self._lel_old_rows:
+            if norm_code(r["A"]) == code:
+                return r
+        return None
+
+    def leltar_start(self):
+        raklap = norm_pallet(fix_scanner_text(self.lel_pallet_in.text()))
+        if not raklap:
+            return
+        if self._lel and self._lel["raklap"] != raklap or (self._lel and self._lel["cnt"] and self._lel["raklap"] == raklap):
+            if QMessageBox.question(self, "Új leltár?", f"Van egy folyamatban lévő leltár: {self._lel['raklap']} "
+                                    f"({sum(self._lel['cnt'].values())} db számolva).\n\nElveted, és új leltárt kezdesz a(z) {raklap} raklapra?"
+                                    ) != QMessageBox.StandardButton.Yes:
+                return
+        self.leltar_refresh_old()
+        rows = [r for r in self._lel_old_rows if raklap in pallet_tokens(r["L"])]
+        rows.sort(key=lambda r: r["A"])
+        self._lel = {"raklap": raklap, "kezdes": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "cnt": {}, "hist": [],
+                     "rows": [{"A": r["A"], "nev": " ".join(x for x in (r["C"], r["D"]) if x), "elotte": stock_of(r["F"]), "L": r["L"],
+                               "megj": ("több raklapon: " + r["L"]) if len(pallet_tokens(r["L"])) > 1 else ""} for r in rows]}
+        self.lel_pallet_in.setText(raklap)
+        self.leltar_render_run()
+        self.lel_scan_in.setFocus()
+
+    def leltar_render_run(self):
+        L = self._lel
+        t = self.lel_run_table
+        t.blockSignals(True)
+        t.setRowCount(0)
+        if not L:
+            self.lel_run_info.setText("Írd be a raklap számát és indítsd a leltárt.")
+            t.blockSignals(False)
+            return
+        t.setRowCount(len(L["rows"]))
+        for i, r in enumerate(L["rows"]):
+            n = L["cnt"].get(norm_code(r["A"]), 0)
+            vals = [r["A"], r["nev"], "–" if r["elotte"] is None else str(r["elotte"]), None, r["megj"]]
+            for c, v in enumerate(vals):
+                if c == 3:
+                    sp = QSpinBox()
+                    sp.setRange(0, 9999)
+                    sp.setValue(n)
+                    sp.valueChanged.connect(lambda val, code=norm_code(r["A"]): self._leltar_set_cnt(code, val))
+                    t.setCellWidget(i, 3, sp)
+                    continue
+                it = QTableWidgetItem(v)
+                if r["elotte"] is not None and c == 2 and n != r["elotte"] and (n or L["cnt"]):
+                    it.setForeground(QColor("#ff5252" if n != r["elotte"] else "#00e676"))
+                if c == 4 and v:
+                    it.setForeground(QColor("#ffb74d"))
+                t.setItem(i, c, it)
+        found = sum(1 for r in L["rows"] if L["cnt"].get(norm_code(r["A"]), 0) > 0)
+        exp = [r for r in L["rows"] if r["elotte"] is not None and not r["megj"].startswith(("más", "nincs"))]
+        self.lel_run_info.setText(
+            f"📦 Raklap {L['raklap']} – a táblázat szerint {len(exp)} féle termék, összesen {sum(r['elotte'] for r in exp)} db.  "
+            f"Számolva: {found} féle, {sum(L['cnt'].values())} db.")
+        t.blockSignals(False)
+
+    def _leltar_set_cnt(self, code, val):
+        if not self._lel:
+            return
+        if val:
+            self._lel["cnt"][code] = val
+        else:
+            self._lel["cnt"].pop(code, None)
+        QTimer.singleShot(0, self._leltar_update_info)
+
+    def _leltar_update_info(self):
+        L = self._lel
+        if not L:
+            return
+        found = sum(1 for r in L["rows"] if L["cnt"].get(norm_code(r["A"]), 0) > 0)
+        exp = [r for r in L["rows"] if r["elotte"] is not None and not r["megj"].startswith(("más", "nincs"))]
+        self.lel_run_info.setText(
+            f"📦 Raklap {L['raklap']} – a táblázat szerint {len(exp)} féle termék, összesen {sum(r['elotte'] for r in exp)} db.  "
+            f"Számolva: {found} féle, {sum(L['cnt'].values())} db.")
+
+    def leltar_scan(self):
+        code = norm_code(fix_scanner_text(self.lel_scan_in.text()))
+        self.lel_scan_in.clear()
+        if not code:
+            return
+        if not self._lel:
+            # raklap-szám csippantva leltár nélkül: azzal indul
+            self.lel_pallet_in.setText(code)
+            self.leltar_start()
+            return
+        if not code.startswith("R18"):
+            self.lel_pallet_in.setText(code)
+            self.leltar_start()
+            return
+        L = self._lel
+        if not any(norm_code(r["A"]) == code for r in L["rows"]):
+            p = self._lel_find(code)
+            if p:
+                L["rows"].append({"A": p["A"], "nev": " ".join(x for x in (p["C"], p["D"]) if x), "elotte": 0, "L": p["L"],
+                                  "megj": f"más raklapról (rendszer: {p['L'] or '—'})"})
+                self.trigger_toast(f"⚠️ {code} a rendszer szerint a(z) {p['L'] or '—'} raklapon van")
+            else:
+                L["rows"].append({"A": code, "nev": "", "elotte": None, "L": "", "megj": "nincs a rendszerben"})
+                self.trigger_toast(f"❓ {code} nincs a rendszerben")
+        q = self.lel_qty.value()
+        L["cnt"][code] = L["cnt"].get(code, 0) + q
+        L["hist"].append((code, q))
+        self.lel_qty.setValue(1)
+        self.leltar_render_run()
+        for i, r in enumerate(L["rows"]):
+            if norm_code(r["A"]) == code:
+                self.lel_run_table.selectRow(i)
+                self.lel_run_table.scrollToItem(self.lel_run_table.item(i, 0))
+        self.lel_scan_in.setFocus()
+
+    def leltar_undo_scan(self):
+        L = self._lel
+        if not L or not L["hist"]:
+            self.trigger_toast("Nincs visszavonható csippantás.")
+            return
+        code, q = L["hist"][-1]
+        if QMessageBox.question(self, "Visszavonás?", f"Utolsó csippantás visszavonása: {code} ({q} db)?") != QMessageBox.StandardButton.Yes:
+            return
+        L["hist"].pop()
+        n = L["cnt"].get(code, 0) - q
+        if n > 0:
+            L["cnt"][code] = n
+        else:
+            L["cnt"].pop(code, None)
+        self.leltar_render_run()
+
+    def leltar_discard(self):
+        if not self._lel:
+            return
+        if QMessageBox.question(self, "Leltár elvetése?", f"Raklap {self._lel['raklap']} – a számolás elvész, semmi nem kerül mentésre.\n\nElveted?"
+                                ) != QMessageBox.StandardButton.Yes:
+            return
+        self._lel = None
+        self.lel_pallet_in.clear()
+        self.leltar_render_run()
+
+    def _lel_job(self, kind, method, path, body=None, extra=None):
+        def job():
+            try:
+                res = vps_request(method, f"{VPS_URL}{path}", json=body, params=None, timeout=15)
+                try:
+                    data = res.json()
+                except Exception:
+                    data = {"status": "error", "message": f"HTTP {res.status_code}"}
+                if res.status_code != 200 and "message" not in data:
+                    data["message"] = f"HTTP {res.status_code}"
+                if res.status_code == 404 and not data.get("kod"):
+                    data["message"] = "A VPS-en még a régi server_api.py fut (nincs leltár végpont) – töltsd fel az újat"
+                data["_ok"] = res.status_code == 200
+            except Exception as e:
+                data = {"_ok": False, "message": f"Nem érem el a szervert ({e.__class__.__name__})"}
+            data["_extra"] = extra
+            self.leltar_signal.emit(kind, data)
+        threading.Thread(target=job, daemon=True).start()
+
+    def leltar_finish(self):
+        L = self._lel
+        if not L:
+            self.trigger_toast("Nincs folyamatban leltár.")
+            return
+        self.lel_btn_done.setEnabled(False)
+        self._lel_job("osszegzes", "POST", "/leltar/osszegzes", {"raklap": L["raklap"], "szamlalt": L["cnt"]})
+
+    def leltar_load_list(self):
+        f = norm_pallet(self.lel_list_filter.text()) if hasattr(self, "lel_list_filter") else ""
+        self._lel_job("lista", "GET", "/leltarak?limit=40" + (f"&raklap={urllib.parse.quote(f)}" if f else ""))
+
+    def on_leltar_signal(self, kind, data):
+        if kind == "osszegzes":
+            self.lel_btn_done.setEnabled(True)
+        if not data.get("_ok"):
+            msg = f"❌ Leltár: {data.get('message', 'hiba')}" + (f" [{data['kod']}]" if data.get("kod") else "")
+            if kind == "lista":
+                self.lel_list_info.setText(msg)
+            else:
+                QMessageBox.warning(self, "Leltár", msg)
+            return
+        if kind == "osszegzes":
+            self.leltar_summary_dialog(data)
+        elif kind == "lista":
+            self.leltar_fill_cards(data.get("leltarak") or [])
+        elif kind in ("mentes", "felulir", "visszavon"):
+            hibak = data.get("hibak") or []
+            if kind == "mentes":
+                self._lel = None
+                self.lel_pallet_in.clear()
+                self.leltar_render_run()
+                txt = f"✅ Leltár lezárva" + (f" – {data.get('modositas')} felülírás" if data.get("modositas") else "")
+            elif kind == "felulir":
+                txt = f"💾 {data.get('modositas', 0)} felülírás elküldve"
+            else:
+                txt = f"↩️ Leltár visszavonva" + (f" – {data.get('visszavont')} érték visszaáll" if data.get("visszavont") else "")
+            if hibak:
+                QMessageBox.warning(self, "Leltár", txt + "\n\nNem sikerült:\n" + "\n".join(hibak))
+            else:
+                self.trigger_toast(txt, 3500)
+            log_event("-", "LELTÁR", f"{txt} (raklap {(data.get('leltar') or {}).get('raklap', '')})", None, None, "Gép")
+            # a felülírásokat / visszaállításokat ez a gép rögtön végre is hajtja
+            QTimer.singleShot(1200, self.poll_pda_sales)
+            QTimer.singleShot(5000, self.leltar_load_list)
+            self.leltar_load_list()
+
+    @staticmethod
+    def _lel_muv(m):
+        return ", ".join(("DB → " + v + " db") if k == "F" else ("Raklap → " + (v or "(üres)")) if k == "L" else f"{k} → {v}"
+                         for k, v in (m or {}).items())
+
+    def leltar_summary_dialog(self, data):
+        L = self._lel
+        if not L:
+            return
+        rows = data.get("sorok") or []
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"📋 Raklap {L['raklap']} – leltár összegzés")
+        dlg.resize(980, 560)
+        v = QVBoxLayout(dlg)
+        ok_n = sum(1 for r in rows if r["tipus"] == "egyezik")
+        head = QLabel(f"✅ Minden egyezik ({ok_n} termék) – nincs mit felülírni." if data.get("egyezik") else
+                      f"⚠️ Eltérés: {len(rows) - ok_n} sor · egyezik: {ok_n}.  Pipáld ki, mit írjon felül (előtte → most).")
+        head.setStyleSheet("font-size: 15px; font-weight: bold; color: %s;" % ("#00e676" if data.get("egyezik") else "#ffb74d"))
+        v.addWidget(head)
+        t = self._admin_table(["Felülír", "Állapot", "R18", "Termék", "Előtte", "Most", "Javasolt módosítás"], [70, 150, 100, 220, 60, 60])
+        t.setRowCount(len(rows))
+        checks = []
+        for i, r in enumerate(rows):
+            ic, txt, col = self.LELTAR_TIP.get(r["tipus"], ("•", r["tipus"], "#fff"))
+            cb = None
+            if r.get("muvelet"):
+                cb = QCheckBox()
+                cb.setChecked(bool(r.get("javasolt")))
+                t.setCellWidget(i, 0, cb)
+            checks.append((cb, r))
+            vals = [None, f"{ic} {txt}", r["A"], r.get("nev", ""), "–" if r.get("elotte") is None else str(r["elotte"]), str(r["utana"]),
+                    self._lel_muv(r.get("muvelet")) + (f"  (rendszer: {r.get('L') or '—'})" if r["tipus"] == "idegen" else "")]
+            for c, val in enumerate(vals):
+                if c == 0:
+                    continue
+                it = QTableWidgetItem(val)
+                if c == 1:
+                    it.setForeground(QColor(col))
+                t.setItem(i, c, it)
+        v.addWidget(t)
+        has = any(cb for cb, _ in checks)
+        hint = QLabel("A kijelölt sorokat ez a gép írja át mindenhol (Google táblázat is). A leltár a kártyáján később visszavonható."
+                      if has else "")
+        hint.setStyleSheet("color: #888;")
+        v.addWidget(hint)
+        bb = QHBoxLayout()
+        res = {"v": None}
+        if has:
+            bw = QPushButton("💾 Felülírás (kijelöltek)")
+            bw.setStyleSheet("background-color: #00e676; color: black; font-weight: bold; padding: 8px;")
+            bw.clicked.connect(lambda: (res.update(v="ir"), dlg.accept()))
+            bb.addWidget(bw)
+        bc = QPushButton("✅ Lezárás felülírás nélkül" if has else "✅ Leltár lezárása")
+        bc.setStyleSheet("font-weight: bold; padding: 8px;")
+        bc.clicked.connect(lambda: (res.update(v="zar"), dlg.accept()))
+        bb.addWidget(bc)
+        bx = QPushButton("↩️ Vissza a leltárhoz")
+        bx.clicked.connect(dlg.reject)
+        bb.addWidget(bx)
+        v.addLayout(bb)
+        if not dlg.exec() or not res["v"]:
+            return
+        kod = [r["A"] for cb, r in checks if cb and cb.isChecked()] if res["v"] == "ir" else []
+        if res["v"] == "ir":
+            if not kod:
+                QMessageBox.information(self, "Leltár", "Nincs kijelölve semmi – pipáld ki, mit írjon felül.")
+                return
+            lista = "\n".join(f"{r['A']}: {self._lel_muv(r['muvelet'])}" for cb, r in checks if cb and cb.isChecked())
+            q = f"Raklap {L['raklap']} – {len(kod)} termék felülírása:\n\n{lista}\n\nFelülírod? (Később visszavonható.)"
+        else:
+            q = f"Raklap {L['raklap']} leltárának lezárása felülírás NÉLKÜL?\n(A különbség a leltár kártyáján látszik, később is felülírható.)"
+        if QMessageBox.question(self, "Leltár", q) != QMessageBox.StandardButton.Yes:
+            return
+        self._lel_job("mentes", "POST", "/leltar", {"raklap": L["raklap"], "szamlalt": L["cnt"], "eszkoz": socket.gethostname() or "Gép",
+                                                     "forras": "GEP", "kezdes": L["kezdes"], "felulir": kod})
+
+    # ---- Leltár-kártyák ----
+    def leltar_fill_cards(self, items):
+        lay = self.lel_cards_layout
+        while lay.count():
+            w = lay.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        self._lel_list = {x["id"]: x for x in items}
+        cols = 2 if self.lel_scroll.width() > 700 else 1
+        for i, l in enumerate(items):
+            lay.addWidget(self._leltar_card(l), i // cols, i % cols)
+        self.lel_list_info.setText(f"{len(items)} leltár · frissítve {datetime.datetime.now().strftime('%H:%M:%S')}"
+                                   if items else "Még nincs lezárt leltár.")
+
+    def _leltar_card(self, l):
+        vv = l.get("allapot") == "VISSZAVONVA"
+        border = "#555" if vv else "#00c853" if l.get("egyezik") else "#ff9800"
+        fr = QFrame()
+        fr.setStyleSheet(f"QFrame#lc {{ border: 2px solid {border}; border-radius: 10px; background: #1e1e1e; }}")
+        fr.setObjectName("lc")
+        v = QVBoxLayout(fr)
+        allapot = {"VISSZAVONVA": "↩️ VISSZAVONVA", "FELULIRVA": "💾 FELÜLÍRVA"}.get(l.get("allapot"), "LEZÁRVA")
+        egy = "✅ Egyezik" if l.get("egyezik") else "⚠️ Eltérés"
+        h = QLabel(f"<span style='font-size:20px;font-weight:bold'>📦 {l.get('raklap')}</span>&nbsp;&nbsp;"
+                   f"<span style='background:{'#2e7d32' if l.get('egyezik') else '#ff9800'};color:{'#fff' if l.get('egyezik') else '#000'};"
+                   f"font-weight:bold'>&nbsp;{egy}&nbsp;</span>&nbsp;&nbsp;<span style='background:#37474f;font-weight:bold'>&nbsp;{allapot}&nbsp;</span>"
+                   f"<br><span style='color:#999'>{str(l.get('lezaras') or '')[:16]} · {'🖥️' if l.get('forras') == 'GEP' else '📱'} {l.get('eszkoz', '')}"
+                   + (f" · visszavonta: {l.get('visszavonta')}" if vv else "") + "</span>")
+        h.setTextFormat(Qt.TextFormat.RichText)
+        v.addWidget(h)
+        rows_html = []
+        for r in l.get("sorok") or []:
+            ic, txt, col = self.LELTAR_TIP.get(r.get("tipus"), ("•", r.get("tipus"), "#fff"))
+            st = ""
+            if r.get("vid"):
+                st = {"kesz": " <span style='color:#00e676'>✔ átírva</span>", "visszavonva": " <span style='color:#ffb74d'>↩️ visszavonva</span>",
+                      "hiba": f" <span style='color:#ff5252'>❌ {r.get('allapot_uzenet', '')}</span>"}.get(r.get("allapot"), " <span style='color:#ffb74d'>⏳ gépre vár</span>")
+            elif r.get("hiba"):
+                st = f" <span style='color:#ff5252'>❌ {r['hiba']}</span>"
+            muv = self._lel_muv(r.get("muvelet"))
+            rows_html.append(
+                f"<tr><td width='22' valign='top'>{ic}</td><td><b>{r.get('A')}</b> {r.get('nev', '')}<br><span style='color:{col}'>{txt}</span>"
+                + (f"<span style='color:#999'> · {muv}</span>" if muv else "") + st +
+                f"</td><td align='right' style='white-space:nowrap'><b>{'–' if r.get('elotte') is None else r.get('elotte')} → {r.get('utana')} db</b></td></tr>")
+        body = QLabel("<table width='100%' cellspacing='2'>" + "".join(rows_html) + "</table>" if rows_html else "<i>Üres raklap</i>")
+        body.setTextFormat(Qt.TextFormat.RichText)
+        body.setWordWrap(True)
+        v.addWidget(body)
+        if not vv:
+            bb = QHBoxLayout()
+            if any(r.get("muvelet") and not r.get("vid") for r in l.get("sorok") or []):
+                b = QPushButton("💾 Felülírás")
+                b.setStyleSheet("background-color: #29b6f6; color: black; font-weight: bold;")
+                b.clicked.connect(lambda _=False, lid=l["id"]: self.leltar_write_card(lid))
+                bb.addWidget(b)
+            b = QPushButton("↩️ Visszavonás")
+            b.setStyleSheet("background-color: #ff9800; color: black; font-weight: bold;")
+            b.clicked.connect(lambda _=False, lid=l["id"]: self.leltar_undo_card(lid))
+            bb.addWidget(b)
+            v.addLayout(bb)
+        return fr
+
+    def leltar_write_card(self, lid):
+        l = self._lel_list.get(lid)
+        if not l:
+            return
+        rows = [r for r in l.get("sorok") or [] if r.get("muvelet") and not r.get("vid")]
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"💾 Felülírás – raklap {l['raklap']}")
+        v = QVBoxLayout(dlg)
+        v.addWidget(QLabel("Mit írjon felül?"))
+        cbs = []
+        for r in rows:
+            cb = QCheckBox(f"{r['A']} {r.get('nev', '')}  –  {r.get('elotte', '–')} → {r.get('utana')} db  ·  {self._lel_muv(r['muvelet'])}")
+            cb.setChecked(bool(r.get("javasolt")))
+            v.addWidget(cb)
+            cbs.append((cb, r))
+        bb = QHBoxLayout()
+        b1 = QPushButton("💾 Felülírás")
+        b1.clicked.connect(dlg.accept)
+        b2 = QPushButton("Mégse")
+        b2.clicked.connect(dlg.reject)
+        bb.addWidget(b1)
+        bb.addWidget(b2)
+        v.addLayout(bb)
+        if not dlg.exec():
+            return
+        kod = [r["A"] for cb, r in cbs if cb.isChecked()]
+        if not kod:
+            return
+        if QMessageBox.question(self, "Felülírás?", f"Raklap {l['raklap']} – {len(kod)} termék felülírása:\n\n" +
+                                "\n".join(f"{r['A']}: {self._lel_muv(r['muvelet'])}" for cb, r in cbs if cb.isChecked()) +
+                                "\n\nBiztosan felülírod?") != QMessageBox.StandardButton.Yes:
+            return
+        self._lel_job("felulir", "POST", f"/leltar/{lid}/felulir", {"felulir": kod, "eszkoz": socket.gethostname() or "Gép"})
+
+    def leltar_undo_card(self, lid):
+        l = self._lel_list.get(lid)
+        if not l:
+            return
+        n = sum(1 for r in l.get("sorok") or [] if r.get("vid"))
+        if QMessageBox.question(self, "Leltár visszavonása?",
+                                f"Raklap {l['raklap']} ({str(l.get('lezaras') or '')[:16]}, {l.get('eszkoz', '')}) leltárának visszavonása?\n\n" +
+                                (f"{n} felülírt érték visszaáll a leltár előttire." if n else "Felülírás nem volt, csak a leltár lesz érvénytelen.")
+                                ) != QMessageBox.StandardButton.Yes:
+            return
+        self._lel_job("visszavon", "POST", f"/leltar/{lid}/visszavon", {"eszkoz": socket.gethostname() or "Gép"})
+
     def init_map_tab(self):
         layout = QVBoxLayout(self.tab_map)
 
@@ -8133,7 +8756,7 @@ class RaktarApp(QMainWindow):
     # FÜLSOR: 4 fő fül mindig látszik, a többi a "☰ További fülek" menüből nyílik
     # -------------------------------------------------------------------
     def setup_tab_menu(self):
-        self._main_tabs = [w for w in (getattr(self, "tab_excel_live", None), self.tab_search, self.tab_pda, self.tab_sold) if w]
+        self._main_tabs = [w for w in (getattr(self, "tab_excel_live", None), self.tab_search, self.tab_pda, self.tab_sold, self.tab_leltar) if w]
         self._extra_tabs = [self.tabs.widget(i) for i in range(self.tabs.count()) if self.tabs.widget(i) not in self._main_tabs]
 
         self.btn_more_tabs = QToolButton()
@@ -8193,6 +8816,9 @@ class RaktarApp(QMainWindow):
                 self.load_server_items()
             elif w is getattr(self, "tab_map", None):
                 self.ensure_map_view()
+            elif w is getattr(self, "tab_leltar", None):
+                self.leltar_refresh_old()
+                self.leltar_load_list()
             elif w is getattr(self, "tab_admin", None):
                 self._admin_tab_changed(self.admin_tabs.currentIndex())
         QTimer.singleShot(30, later)
