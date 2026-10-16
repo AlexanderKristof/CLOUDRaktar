@@ -1456,6 +1456,58 @@ def pda_photos_upload():
         return pda_err(500, "S-500", str(e))
 
 
+# ---------- Raktarterkep (ugyanaz a Google tablazat, mint a gepi programban) ----------
+MAP_SHEETS_ID = "13uw_-HNPHep94j-Ra9TsJrUYXADa8qcuBYyBuFdL1Fw"
+MAP_CACHE_SEC = 300
+_map_cache = {"ido": 0.0, "rows": None}
+
+
+def _load_map():
+    import openpyxl
+    res = requests.get(f"https://docs.google.com/spreadsheets/d/{MAP_SHEETS_ID}/export?format=xlsx",
+                       headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+    if res.status_code != 200:
+        raise RuntimeError(f"A terkep tablazat nem toltheto le (HTTP {res.status_code})")
+    wb = openpyxl.load_workbook(io.BytesIO(res.content), data_only=True)
+    ws = wb.active
+    rows = []
+    for row in ws.iter_rows():
+        out = []
+        for cell in row:
+            v = "" if cell.value is None else str(cell.value).strip()
+            if v.endswith(".0"):
+                v = v[:-2]
+            col = ""
+            try:
+                rgb = cell.fill.start_color.rgb if cell.fill and cell.fill.start_color else None
+                if isinstance(rgb, str) and len(rgb) >= 6 and rgb != "00000000":
+                    col = "#" + rgb[-6:]
+            except Exception:
+                pass
+            out.append([v, col])
+        rows.append(out)
+    # a jobb oldali / also teljesen ures reszeket levagjuk
+    while rows and not any(v for v, _ in rows[-1]):
+        rows.pop()
+    width = max((max((i + 1 for i, (v, c) in enumerate(r) if v or c), default=0) for r in rows), default=0)
+    return [r[:width] for r in rows]
+
+
+@app.route('/pda/map', methods=['GET'])
+def pda_map():
+    """A raktarterkep cellai (ertek + hatterszin). 5 percig tarolva; ?frissit=1 ujratolti."""
+    try:
+        if request.args.get('frissit') or not _map_cache["rows"] or time.time() - _map_cache["ido"] > MAP_CACHE_SEC:
+            _map_cache["rows"] = _load_map()
+            _map_cache["ido"] = time.time()
+        return jsonify({"status": "ok", "rows": _map_cache["rows"],
+                        "frissitve": datetime.datetime.fromtimestamp(_map_cache["ido"]).strftime("%H:%M:%S")}), 200
+    except ImportError:
+        return pda_err(500, "S-500", "A szerveren nincs telepitve az openpyxl (pip install openpyxl)")
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
 # ---------- Leltar: egy raklap termekei ----------
 @app.route('/pda/pallet', methods=['GET'])
 def pda_pallet():

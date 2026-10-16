@@ -13,9 +13,9 @@
   .title { font-weight:bold; font-size:18px; flex:1; }
   .dot { width:12px; height:12px; border-radius:50%; background:#666; display:inline-block; }
   .dot.ok { background:var(--ok); } .dot.bad { background:var(--err); }
-  .tabs { display:grid; grid-template-columns: repeat(7, 1fr); gap:3px; margin-top:8px; }
+  .tabs { display:grid; grid-template-columns: repeat(4, 1fr); gap:3px; margin-top:8px; }
   .tabs button { padding:6px 0; font-size:10.5px; font-weight:bold; border:none; border-radius:6px; background:#2b2b2b; color:var(--txt); line-height:1.2; overflow:hidden; }
-  .tabs button b { display:block; font-size:18px; }
+  .tabs button b { display:inline; font-size:16px; margin-right:3px; }
   .tabs button.on { background:var(--blue); color:#000; }
   main { padding:10px; }
   .scan { display:flex; gap:6px; }
@@ -125,6 +125,14 @@
   .cnt button { border:none; border-radius:8px; background:#37474f; color:#fff; font-weight:bold; font-size:18px; padding:6px 14px; }
   .cnt button.db { background:var(--warn); color:#000; font-size:14px; padding:9px 10px; }
   .diff { color:var(--warn); font-weight:bold; }
+  .mapwrap { overflow:auto; max-height:calc(100vh - 230px); margin-top:6px; border:1px solid var(--line); border-radius:6px; background:#fff; -webkit-overflow-scrolling:touch; }
+  .maptbl { border-collapse:collapse; text-align:center; background:#fff; }
+  .maptbl td { border:1px solid #888; padding:2px 3px; min-width:24px; height:18px; color:#000; font-weight:bold; white-space:nowrap; }
+  .maptbl td.hit { background:#ff0055 !important; color:#fff !important; outline:3px solid #ffeb3b; animation:mp 1s infinite; }
+  .maptbl td.cur { outline:4px solid #00e5ff; }
+  @keyframes mp { 50% { background:#ffeb3b; color:#000; } }
+  .mapbar { display:flex; gap:4px; margin-top:6px; }
+  .mapbar button { border:none; border-radius:6px; background:#37474f; color:#fff; font-weight:bold; font-size:15px; padding:8px 10px; }
   .settings input { font-size:15px; padding:8px; border-radius:6px; border:1px solid #444; background:#2b2b2b; color:#fff; width:100%; }
 </style>
 </head>
@@ -138,6 +146,7 @@
     <button id="tab-sell" class="on" onclick="showTab('sell')"><b>&#x1F4B0;</b>Elad&#xE1;s</button>
     <button id="tab-qs" onclick="showTab('qs')"><b>&#x1F50D;</b>Keres&#x151;</button>
     <button id="tab-xls" onclick="showTab('xls')"><b>&#x1F4CA;</b>Excel</button>
+    <button id="tab-map" onclick="showTab('map')"><b>&#x1F5FA;&#xFE0F;</b>T&#xE9;rk&#xE9;p</button>
     <button id="tab-move" onclick="showTab('move')"><b>&#x1F4E6;</b>&#xC1;thely.</button>
     <button id="tab-inv" onclick="showTab('inv')"><b>&#x1F4CB;</b>Lelt&#xE1;r</button>
     <button id="tab-log" onclick="showTab('log')"><b>&#x1F4DC;</b>Napl&#xF3;</button>
@@ -165,6 +174,23 @@
     <div class="small" style="margin-top:4px">G&#xE9;pel&#xE9;s k&#xF6;zben keres. T&#xF6;bb sz&#xF3;: mindegyiknek szerepelnie kell (pl. <i>makita 18v</i>).</div>
     <div id="qs-status"></div>
     <div id="qs-results"></div>
+  </section>
+
+  <!-- ================= RAKT&#xC1;RT&#xC9;RK&#xC9;P ================= -->
+  <section id="page-map" class="hidden">
+    <form class="scan" onsubmit="event.preventDefault(); mapSearch(mapInput.value);">
+      <input id="map-in" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Raklap sz&#xE1;m vagy R18 csippant&#xE1;s&#x2026;">
+      <button type="submit">&#x1F50D;</button>
+    </form>
+    <div class="mapbar">
+      <button type="button" onclick="mapZoom(-1)">&#x2796;</button>
+      <button type="button" onclick="mapZoom(1)">&#x2795;</button>
+      <button type="button" id="map-next" onclick="mapNext()">&#x23ED; K&#xF6;vetkez&#x151;</button>
+      <button type="button" onclick="mapLoad(true)">&#x1F504;</button>
+    </div>
+    <div id="map-status"></div>
+    <div class="mapwrap" id="map-wrap"></div>
+    <div class="small" id="map-foot" style="margin-top:4px"></div>
   </section>
 
   <!-- ================= EXCEL LIVE ================= -->
@@ -415,7 +441,7 @@
 </div>
 
 <script>
-var VERSION = "2026.10.16-i";
+var VERSION = "2026.10.16-j";
 var PLATFORMS = {
   EBAY_KIVULI: { cim: "eBay-en k\u00edv\u00fcli elad\u00e1s", gomb: "eBay-en k\u00edv\u00fcli", cls: "b-kivul" },
   EBAY:        { cim: "eBay elad\u00e1s",           gomb: "eBay",           cls: "b-ebay" },
@@ -559,7 +585,7 @@ function closeOverlay(id) { $(id).classList.remove("on"); focusScan(); }
 function msgTo(id, html, cls) { $(id).innerHTML = html ? '<div class="msg ' + cls + '">' + html + "</div>" : ""; }
 
 // ---- F\u00fclek ----
-var TABS = ["sell", "qs", "xls", "move", "inv", "log", "proc"];
+var TABS = ["sell", "qs", "xls", "map", "move", "inv", "log", "proc"];
 function showTab(t) {
   activeTab = t;
   TABS.forEach(function (x) { $("page-" + x).classList.toggle("hidden", x !== t); $("tab-" + x).classList.toggle("on", x === t); });
@@ -567,11 +593,13 @@ function showTab(t) {
   if (t === "proc") renderProc();
   if (t === "inv") renderInventory();
   if (t === "xls" && !xlsLoaded) xlsInit();
+  if (t === "map" && !mapRows) mapLoad(false);
   focusScan();
 }
 function activeInput() {
   if (activeTab === "sell") return scanInput;
   if (activeTab === "qs") return qsInput;
+  if (activeTab === "map") return mapInput;
   if (activeTab === "move") return $("move-target").classList.contains("hidden") ? moveInput : $("move-pallet");
   if (activeTab === "inv") return inv ? invInput : invPalletInput;
   return null;
@@ -758,7 +786,8 @@ function card(it, full) {
          '<div class="two"><button onclick="openPhotos(\'' + esc(it.A || it.B) + '\')">\ud83d\uddbc\ufe0f K\u00e9pek</button>' +
          '<button onclick="openEdit(' + i + ')">\u270f\ufe0f Szerkeszt\u00e9s</button></div>' +
          '<div class="two">' +
-         '<button onclick="openHistory(\'' + esc(it.A || it.B) + '\')">\ud83d\udd58 El\u0151zm\u00e9nyek</button></div>' +
+         '<button onclick="openHistory(\'' + esc(it.A || it.B) + '\')">\ud83d\udd58 El\u0151zm\u00e9nyek</button>' +
+         (mapTokens(it.L).length ? '<button onclick="mapShow(\'' + esc(mapTokens(it.L).join(" ")) + '\')">\ud83d\uddfa\ufe0f T\u00e9rk\u00e9pen</button>' : "") + "</div>" +
          '<div class="two"><button onclick="xlsJump(\'' + esc(it.A || it.B) + '\')">\ud83d\udcca Excel Live-on</button>' +
          '<button onclick="startMoveFor(' + i + ')">\ud83d\udce6 \u00c1thelyez\u00e9s</button></div>' +
          '<button class="btn blue" style="padding:11px;font-size:15px" onclick="openQdb(' + i + ')">\ud83d\udd22 Darabsz\u00e1m m\u00f3dos\u00edt\u00e1sa (most: ' + stockOf(it) + ' db)</button>' +
@@ -1042,6 +1071,103 @@ function photoPoll(frissit) {
   }).catch(function (e) { msgTo("ph-status", "\u274c " + esc(errText(e)), "err"); });
 }
 function photoBig(src) { $("photobig-img").src = src; $("photobig").classList.add("on"); }
+
+// ================= RAKT\u00c1RT\u00c9RK\u00c9P =================
+// Ugyanaz a t\u00e9rk\u00e9p-t\u00e1bl\u00e1zat, mint a g\u00e9pi programban. Csak a sz\u00e1m raklapok vannak rajta \u2013
+// a "KISRAKT\u00c1R 74", a P\u00e1ter (I) \u00e9s az Oszlop (K) nincs a t\u00e9rk\u00e9pen.
+var mapInput = $("map-in"), mapRows = null, mapHits = [], mapIdx = 0, mapFont = 11;
+try { mapFont = parseInt(localStorage.getItem("mapfont"), 10) || 11; } catch (e) {}
+var mapPending = "";
+function mapNorm(v) { var t = String(v == null ? "" : v).replace(/\s+/g, " ").trim().toUpperCase(); return /^\d+\.0$/.test(t) ? t.slice(0, -2) : t; }
+function mapTokens(L) { return palletTokens(L).filter(function (t) { return /^\d+[A-Z]?$/.test(t); }); }
+function mapLoad(frissit) {
+  msgTo("map-status", "\u23f3 T\u00e9rk\u00e9p bet\u00f6lt\u00e9se\u2026", "info");
+  return rawApi("GET", "/pda/map" + (frissit ? "?frissit=1" : "")).then(function (js) {
+    mapRows = js.rows || [];
+    mapRender();
+    $("map-foot").textContent = "T\u00e9rk\u00e9p friss\u00edtve: " + (js.frissitve || "-") + " \u00b7 " + mapRows.length + " sor";
+    msgTo("map-status", "", "");
+    if (mapPending) { var q = mapPending; mapPending = ""; mapSearch(q); }
+    else if (mapInput.value.trim()) mapSearch(mapInput.value);
+  }).catch(function (e) { mapRows = null; msgTo("map-status", "\u274c " + esc(errText(e)), "err"); });
+}
+function mapRender() {
+  var h = '<table class="maptbl" style="font-size:' + mapFont + 'px">';
+  mapRows.forEach(function (r, ri) {
+    h += "<tr>";
+    r.forEach(function (c, ci) {
+      h += '<td id="mc-' + ri + "-" + ci + '"' + (c[1] ? ' style="background:' + c[1] + '"' : "") + ">" + esc(c[0]) + "</td>";
+    });
+    h += "</tr>";
+  });
+  $("map-wrap").innerHTML = h + "</table>";
+  mapMark();
+}
+function mapZoom(d) {
+  mapFont = Math.max(6, Math.min(22, mapFont + d * 2));
+  try { localStorage.setItem("mapfont", mapFont); } catch (e) {}
+  var t = document.querySelector(".maptbl"); if (t) t.style.fontSize = mapFont + "px";
+  mapGo(false);
+}
+function mapMark() {
+  document.querySelectorAll(".maptbl td.hit").forEach(function (td) { td.classList.remove("hit", "cur"); });
+  mapHits.forEach(function (h) { var td = $("mc-" + h); if (td) td.classList.add("hit"); });
+  mapGo(false);
+}
+function mapGo(step) {
+  if (!mapHits.length) return;
+  if (step) mapIdx = (mapIdx + 1) % mapHits.length;
+  document.querySelectorAll(".maptbl td.cur").forEach(function (td) { td.classList.remove("cur"); });
+  var td = $("mc-" + mapHits[mapIdx]); if (!td) return;
+  td.classList.add("cur");
+  var w = $("map-wrap");
+  w.scrollLeft = td.offsetLeft - w.clientWidth / 2 + td.offsetWidth / 2;
+  w.scrollTop = td.offsetTop - w.clientHeight / 2 + td.offsetHeight / 2;
+}
+function mapNext() { mapGo(true); }
+// Megnyit\u00e1s a k\u00e1rty\u00e1r\u00f3l / m\u00e1s f\u00fclr\u0151l
+function mapShow(q) { mapInput.value = q; showTab("map"); if (mapRows) mapSearch(q); else mapPending = q; }
+function mapFind(tokens) {
+  var hits = [], found = {};
+  mapRows.forEach(function (r, ri) {
+    r.forEach(function (c, ci) {
+      var v = mapNorm(c[0]);
+      if (v && tokens.indexOf(v) >= 0) { hits.push(ri + "-" + ci); found[v] = 1; }
+    });
+  });
+  return { hits: hits, found: found };
+}
+function mapSearch(q) {
+  q = fixScan(String(q || "")).trim();
+  if (!q) return;
+  if (!mapRows) { mapPending = q; mapLoad(false); return; }
+  if (isR18(q)) {
+    msgTo("map-status", "\u23f3 " + esc(q) + " keres\u00e9se\u2026", "info");
+    rawApi("GET", "/pda/search?q=" + encodeURIComponent(q)).then(function (js) {
+      var it = (js.items || []).filter(function (x) { return String(x.A || "").toUpperCase() === q.toUpperCase(); })[0] || (js.items || [])[0];
+      if (!it) { mapHits = []; mapMark(); msgTo("map-status", "\u274c Nincs ilyen term\u00e9k: " + esc(q), "err"); beep(false); return; }
+      mapApply(mapTokens(it.L), it);
+    }).catch(function (e) { msgTo("map-status", "\u274c " + esc(errText(e)), "err"); });
+    return;
+  }
+  var toks = palletTokens(q).map(mapNorm);
+  mapApply(toks.length ? toks : [mapNorm(q)], null);
+}
+function mapApply(tokens, it) {
+  var r = mapFind(tokens);
+  mapHits = r.hits; mapIdx = 0; mapMark();
+  var head = it ? "\ud83c\udff7\ufe0f <b>" + esc(it.A) + "</b> " + esc([it.C, it.D].filter(Boolean).join(" ")) + "<br>\ud83d\udccd " + locHtml(it) + "<br>" : "";
+  var miss = tokens.filter(function (t) { return !r.found[t]; });
+  if (!tokens.length || (!mapHits.length && !tokens.some(function (t) { return /^\d/.test(t); }))) {
+    msgTo("map-status", head + "\u2139\ufe0f Ez a hely nincs a t\u00e9rk\u00e9pen (pl. KISRAKT\u00c1R / Encs / P\u00e1ter / Oszlop) \u2013 fejb\u0151l tudjuk, hol van.", "warn");
+    return;
+  }
+  if (!mapHits.length) { msgTo("map-status", head + "\u274c A t\u00e9rk\u00e9pen nem tal\u00e1lhat\u00f3: <b>" + esc(tokens.join(", ")) + "</b>", "err"); beep(false); return; }
+  msgTo("map-status", head + "\u2705 " + mapHits.length + " tal\u00e1lat: <b>" + esc(tokens.filter(function (t) { return r.found[t]; }).join(", ")) + "</b>" +
+        (miss.length ? " \u00b7 \u26a0\ufe0f nincs a t\u00e9rk\u00e9pen: " + esc(miss.join(", ")) : "") +
+        (mapHits.length > 1 ? " \u00b7 \u23ed a K\u00f6vetkez\u0151 gombbal l\u00e9pj" : ""), "ok");
+  beep(true);
+}
 
 // ================= EL\u0150ZM\u00c9NYEK =================
 function openHistory(code) {
@@ -1813,6 +1939,7 @@ window.onScan = function (code) {
   if (activeTab === "move") { moveScan(code); return; }
   if (activeTab === "qs") { qsInput.value = code; qsRun(); return; }
   if (activeTab === "xls") { if (isR18(code)) xlsJump(code); return; }
+  if (activeTab === "map") { mapInput.value = code; mapSearch(code); return; }
   if (activeTab === "inv") { if (inv) invScan(code); else if (isR18(code)) invStartFromProduct(code); else startInventory(code); return; }
   doSearch(code);
 };
