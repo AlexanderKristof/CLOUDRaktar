@@ -483,6 +483,9 @@ REQUIRED_PACKAGES = [
 
 # Változásnapló (a legújabb legfelül). A VERZIÓK fülön ebből látszik, mi változott.
 VALTOZASNAPLO = [
+    ("v2026.10.29-web4", "2026-10-29", [
+        "Excel Live: a 🖨️ Nyomtatás oszlop rögzítve a bal szélen – oldalra görgetéskor is mindig látszik (mint az Excelben az ablaktábla rögzítése)",
+    ]),
     ("v2026.10.29-web3", "2026-10-29", [
         "Excel Live: a 🖨️ Nyomtatás gomb a táblázat fölé került, mindig látható (keskeny képernyőn sem csúszik ki)",
         "A „✍️ most tölti” jelzés kikerült",
@@ -912,7 +915,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.29-web3"
+APP_VERSION = "v2026.10.29-web4"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -3584,6 +3587,70 @@ class PrintButtonDelegate(QStyledItemDelegate):
         if et in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
             return True
         return super().editorEvent(event, model, option, index)
+
+
+class FrozenColumn(QObject):
+    """Rögzített (mindig látható) oszlop egy táblázat bal szélén – mint az Excelben az „ablaktábla rögzítése”.
+    Egy második nézet ugyanazzal az adattal és kijelöléssel, ami fel-le együtt görög a táblázattal, oldalra nem."""
+
+    def __init__(self, table, col, delegate):
+        super().__init__(table)
+        from PyQt6.QtWidgets import QTableView
+        self.t, self.col = table, col
+        v = QTableView(table)
+        self.v = v
+        v.setModel(table.model())
+        v.setSelectionModel(table.selectionModel())
+        v.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        v.verticalHeader().hide()
+        v.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        v.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        v.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        v.setVerticalScrollMode(table.verticalScrollMode())
+        v.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        v.setSelectionBehavior(table.selectionBehavior())
+        v.setFrameShape(QFrame.Shape.NoFrame)
+        v.setMouseTracking(True)
+        v.setStyleSheet(table.styleSheet().replace("QTableWidget", "QTableView"))
+        v.setItemDelegateForColumn(col, delegate)
+        for c in range(table.columnCount()):
+            v.setColumnHidden(c, c != col)
+        v.setColumnWidth(col, table.columnWidth(col))
+        vh, tvh = v.verticalHeader(), table.verticalHeader()
+        vh.setMinimumSectionSize(tvh.minimumSectionSize())
+        vh.setDefaultSectionSize(tvh.defaultSectionSize())
+        for r in range(table.rowCount()):
+            v.setRowHeight(r, table.rowHeight(r))
+        table.viewport().stackUnder(v)
+        table.horizontalHeader().sectionResized.connect(self._col_resized)
+        tvh.sectionResized.connect(lambda i, o, n: v.setRowHeight(i, n))
+        tvh.geometriesChanged.connect(self.update_geometry)
+        table.horizontalHeader().geometriesChanged.connect(self.update_geometry)
+        v.verticalScrollBar().valueChanged.connect(table.verticalScrollBar().setValue)
+        table.verticalScrollBar().valueChanged.connect(v.verticalScrollBar().setValue)
+        table.installEventFilter(self)
+        v.show()
+        self.update_geometry()
+
+    def _col_resized(self, idx, old, new):
+        if idx == self.col:
+            self.v.setColumnWidth(self.col, new)
+            self.update_geometry()
+
+    def eventFilter(self, obj, ev):
+        if ev.type() in (QEvent.Type.Resize, QEvent.Type.Show):
+            QTimer.singleShot(0, self.update_geometry)
+        return False
+
+    def update_geometry(self):
+        t = self.t
+        if t.isColumnHidden(self.col):
+            self.v.hide()
+            return
+        self.v.show()
+        self.v.setGeometry(t.verticalHeader().width() + t.frameWidth(), t.frameWidth(),
+                           t.columnWidth(self.col), t.viewport().height() + t.horizontalHeader().height())
+        self.v.verticalScrollBar().setValue(t.verticalScrollBar().value())
 
 
 # G (Állapot) oszlop választható értékei az Excel Live munkalapon
@@ -10419,6 +10486,8 @@ class RaktarApp(QMainWindow):
         self.excel_print_delegate = PrintButtonDelegate(self.print_row_label, self.excel_table)
         self.excel_table.setItemDelegateForColumn(16, self.excel_print_delegate)
         self.excel_table.setMouseTracking(True)
+        # a 🖨️ oszlop rögzítve: oldalra görgetéskor is mindig látszik a bal szélen
+        self.excel_print_frozen = FrozenColumn(self.excel_table, 16, PrintButtonDelegate(self.print_row_label, self.excel_table))
 
         # Az Excel Live tábla aktuális tartalma soronként (gyors összehasonlításhoz a háttérfrissítésnél)
         self._excel_rows_cache = []
