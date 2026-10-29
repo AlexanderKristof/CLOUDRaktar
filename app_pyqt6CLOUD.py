@@ -8829,7 +8829,12 @@ class RaktarApp(QMainWindow):
             try:
                 res = vps_request("GET", f"{VPS_URL}/app/version", timeout=10)
                 if res.status_code == 404:
-                    self.upd_signal.emit("nincs", {"manual": manual})
+                    # a mi 404-ünk JSON (kod: S-404) = a szerver új, csak a fájl hiányzik; ha nem JSON, régi a server_api.py
+                    try:
+                        uj_szerver = res.json().get("kod") == "S-404"
+                    except Exception:
+                        uj_szerver = False
+                    self.upd_signal.emit("nincs" if uj_szerver else "regi_szerver", {"manual": manual})
                     return
                 if res.status_code != 200:
                     raise RuntimeError(f"A szerver hibát adott (HTTP {res.status_code})")
@@ -8896,9 +8901,16 @@ class RaktarApp(QMainWindow):
                 self.trigger_toast(f"✅ Ez a legfrissebb program ({APP_VERSION})")
         elif kind == "nincs":
             self._ver_server_info = {}
-            self.ver_render(extra="ℹ️ A VPS-en még nincs feltöltve program (/opt/raktarapp/kliens/app_pyqt6CLOUD.py).")
+            self.ver_render(extra="ℹ️ A VPS-en még nincs feltöltve program. Pontosan ide kell: /opt/raktarapp/kliens/app_pyqt6CLOUD.py "
+                                  "(a mappa neve kliens, kisbetűvel; a fájl neve pontosan app_pyqt6CLOUD.py).")
             if manual:
-                self.trigger_toast("ℹ️ A VPS-en még nincs feltöltve program")
+                self.trigger_toast("ℹ️ A VPS-en még nincs feltöltve program a kliens mappába")
+        elif kind == "regi_szerver":
+            self._ver_server_info = {}
+            self.ver_render(extra="⚠️ A VPS-en még a RÉGI server_api.py fut (nem ismeri a frissítést). Töltsd fel az újat az "
+                                  "/opt/raktarapp/ mappába, és indítsd újra: sudo systemctl restart raktarapp")
+            if manual:
+                self.trigger_toast("⚠️ A VPS-en még a régi server_api.py fut – töltsd fel az újat és indítsd újra a szervert")
         elif kind == "hiba":
             self.ver_render(extra=f"❌ Az ellenőrzés nem sikerült: {d.get('message', '')}")
             if manual:
