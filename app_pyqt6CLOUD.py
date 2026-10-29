@@ -483,12 +483,14 @@ REQUIRED_PACKAGES = [
 
 # Változásnapló (a legújabb legfelül). A VERZIÓK fülön ebből látszik, mi változott.
 VALTOZASNAPLO = [
+    ("v2026.10.29-web2", "2026-10-29", [
+        "Excel Live javítás: a másik gépen felvitt sor akkor is azonnal megjelenik, ha ezen a gépen éppen azon a soron áll a kijelölés "
+        "(eddig üres maradt, és üres címkét nyomtathatott)",
+        "Nyomtatás előtt mindig a legfrissebb adatot tölti be a sorba",
+    ]),
     ("v2026.10.29-web1", "2026-10-29", [
-        "Új 🛒 Webes rendelések fül: a Shopify és eBay rendelések maguktól megjelennek (vevő, cím, ár, melyik R18 termék)",
-        "Egy kattintással eladásként rögzíthető (készlet levonás + Eladottak + Google táblázat), előtte rákérdez",
-        "Párosítás: eBay ID (N oszlop), SKU = R18 kód, R18 kód a termék nevében – ami nem párosul, kézzel párosítható",
-        "Új rendelésnél értesítés, a fül nevén a rögzítésre váró rendelések száma",
         "Gépnév: egyedi név gépenként (VERZIÓK fülön átírható)",
+        "(Webes rendelések – Shopify / eBay – előkészítve, egyelőre kikapcsolva)",
     ]),
     ("v2026.10.29-elad1", "2026-10-29", [
         "Eladottak fül: a régi és a más gépen rögzített eladások is látszanak – a program behozza őket a Google táblázat "
@@ -506,6 +508,11 @@ VALTOZASNAPLO = [
                                         "Excel Live: látszik, ki melyik soron dolgozik éppen"]),
     ("v2026.10.16-pda6", "2026-10-16", ["Új 📋 Leltár fül (régi: raklaponként, új: kézi / csippantós leltár, kártyák, visszavonás)"]),
 ]
+
+
+# 🛒 Webes rendelések (Shopify + eBay) fül: egyelőre KIKAPCSOLVA. Bekapcsolás: True (és a VPS-en webshop_api.json,
+# lásd vps/TELEPITES_webrendelesek.md).
+WEBES_RENDELESEK_BE = False
 
 
 def missing_packages(pkgs=None):
@@ -901,7 +908,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.29-web1"
+APP_VERSION = "v2026.10.29-web2"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -1428,10 +1435,12 @@ def archive_row_from_db(code, forras):
 def flush_outbox_async():
     threading.Thread(target=flush_sync_outbox, daemon=True).start()
 
-def get_pending_outbox_codes(cursor):
+def get_pending_outbox_codes(cursor, csak_vps=False):
     """Azok az R18-kódok, amelyeknek van még fel nem töltött módosítása az outboxban.
-    Ezeket a letöltések (VPS / Sheets) NEM írhatják felül a régebbi felhős állapottal."""
-    cursor.execute("SELECT payload FROM sync_outbox")
+    Ezeket a letöltések (VPS / Sheets) NEM írhatják felül a régebbi felhős állapottal.
+    csak_vps=True: csak a VPS-re még fel NEM ment módosítások számítanak (ami a VPS-en már fent van, de a Sheets-be
+    még nem ment fel, az ne tartsa vissza a másik gépről érkező újabb adatot)."""
+    cursor.execute("SELECT payload FROM sync_outbox" + (" WHERE vps_synced = 0" if csak_vps else ""))
     codes = set()
     for row in cursor.fetchall():
         try:
@@ -4079,7 +4088,8 @@ class RaktarApp(QMainWindow):
         self.tabs.addTab(self.tab_search, "⚡ Gyorskereső")
         self.tabs.addTab(self.tab_pda, "📱 PDA / Eladás")
         self.tabs.addTab(self.tab_sold, "💰 Eladottak")
-        self.tabs.addTab(self.tab_web, "🛒 Webes rendelések")
+        if WEBES_RENDELESEK_BE:
+            self.tabs.addTab(self.tab_web, "🛒 Webes rendelések")
         self.tabs.addTab(self.tab_leltar, "📋 Leltár")
         self.tabs.addTab(self.tab_versions, "🆕 VERZIÓK")
         # TOVÁBBI FÜLEK (a "☰ További fülek" menüből nyílnak)
@@ -4101,7 +4111,8 @@ class RaktarApp(QMainWindow):
         self.init_sold_tab()
         self.init_leltar_tab()
         self.init_versions_tab()
-        self.init_web_tab()
+        if WEBES_RENDELESEK_BE:
+            self.init_web_tab()
         self.init_server_tab()
         self.init_excel_tab()
         self.init_single_tab()
@@ -4307,7 +4318,7 @@ class RaktarApp(QMainWindow):
 
             # Amit ez a gép még nem töltött fel (outbox-ban vár), azt NEM írjuk felül a
             # VPS régebbi állapotával - a helyi módosítás úgyis felmegy és az nyer.
-            pending_codes = get_pending_outbox_codes(cursor)
+            pending_codes = get_pending_outbox_codes(cursor, csak_vps=True)
 
             cols = list(ROW_COLS) + ["szin"]
             changed = 0
@@ -4778,8 +4789,11 @@ class RaktarApp(QMainWindow):
             return
 
         current_row = self.excel_table.currentRow()
-        # Ha a felhasználó éppen aktívan gépel egy cellában, azt a sort NEM bántjuk
+        # Csak azt a sort nem bántjuk, amibe ezen a gépen ÉPPEN gépelnek (nyitott cellaszerkesztő vagy még nem mentett
+        # módosítás). Ha csak rajta áll a kijelölés, frissítjük (különben a másik gépen felvitt sor üres maradna).
         active_dirty_rows = getattr(self, 'pending_dirty_rows', set())
+        editing = self.excel_table.state() == QAbstractItemView.State.EditingState
+        self._excel_deferred = False
         old = self._excel_rows_cache
 
         self.excel_table.blockSignals(True)
@@ -4790,8 +4804,10 @@ class RaktarApp(QMainWindow):
         for r_idx, row in enumerate(rows):
             if r_idx < len(old) and old[r_idx] == row:
                 continue
-            if r_idx in active_dirty_rows or r_idx == current_row:
-                new_cache[r_idx] = None   # következő körben újra összeveti
+            if r_idx in active_dirty_rows or (r_idx == current_row and editing):
+                # a régi állapot marad a cache-ben: a következő körben újra összeveti (és az R18-index sem veszíti el)
+                new_cache[r_idx] = old[r_idx] if r_idx < len(old) and old[r_idx] else None
+                self._excel_deferred = True
                 continue
             for c_idx in range(16):
                 val = row[c_idx]
@@ -10042,7 +10058,7 @@ class RaktarApp(QMainWindow):
     # FÜLSOR: 4 fő fül mindig látszik, a többi a "☰ További fülek" menüből nyílik
     # -------------------------------------------------------------------
     def setup_tab_menu(self):
-        self._main_tabs = [w for w in (getattr(self, "tab_excel_live", None), self.tab_search, self.tab_pda, self.tab_sold, self.tab_web, self.tab_leltar, self.tab_versions) if w]
+        self._main_tabs = [w for w in (getattr(self, "tab_excel_live", None), self.tab_search, self.tab_pda, self.tab_sold, self.tab_leltar, self.tab_versions) if w]
         self._extra_tabs = [self.tabs.widget(i) for i in range(self.tabs.count()) if self.tabs.widget(i) not in self._main_tabs]
 
         self.btn_more_tabs = QToolButton()
@@ -10107,7 +10123,7 @@ class RaktarApp(QMainWindow):
             elif w is getattr(self, "tab_leltar", None):
                 self.leltar_refresh_old()
                 self.leltar_load_list()
-            elif w is getattr(self, "tab_web", None):
+            elif WEBES_RENDELESEK_BE and w is getattr(self, "tab_web", None):
                 self.web_load()
             elif w is getattr(self, "tab_versions", None):
                 self.ver_refresh_local()
@@ -10321,6 +10337,13 @@ class RaktarApp(QMainWindow):
         self.excel_print_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.excel_print_shortcut.activated.connect(self.print_current_excel_row)
         self.excel_table.currentCellChanged.connect(self.update_print_selected_label)
+        # a gépelés miatt kihagyott (másik gépről jött) sorok pótlása, amint már nem gépelnek benne
+        self._excel_deferred = False
+        self.excel_deferred_timer = QTimer()
+        self.excel_deferred_timer.timeout.connect(
+            lambda: self._excel_deferred and self.excel_table.state() != QAbstractItemView.State.EditingState
+            and self.silent_update_excel_table())
+        self.excel_deferred_timer.start(3000)
         # G (Állapot): egy kattintásra lenyílik a választólista (ÚJ / HASZNÁLT / FELÚJÍTOTT)
         self.excel_table.cellClicked.connect(
             lambda r, c: self.excel_table.editItem(self.excel_table.item(r, c))
@@ -10657,9 +10680,41 @@ class RaktarApp(QMainWindow):
                     self.excel_table.undo_stack.append([(row, col, old_val, new_val)])
                 item._previous_text = new_val
 
+    def _refresh_excel_row_from_db(self, row_idx):
+        """Nyomtatás előtt: a sor a helyi adatbázis legfrissebb állapotát mutassa (ha közben nem gépelnek bele)."""
+        try:
+            if row_idx in getattr(self, "pending_dirty_rows", set()):
+                return
+            it = self.excel_table.item(row_idx, 0)
+            code = it.text().strip().upper() if it else ""
+            if not code:
+                return
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute(f"SELECT {', '.join(ROW_COLS)} FROM termekek WHERE UPPER(TRIM(A))=? OR UPPER(TRIM(B))=?", (code, code))
+            dbrow = cur.fetchone()
+            conn.close()
+            if not dbrow:
+                return
+            vals = _normalize_excel_row(tuple(dbrow))
+            self.excel_table.blockSignals(True)
+            for c_idx in range(16):
+                val = vals[c_idx]
+                item = self.excel_table.item(row_idx, c_idx)
+                if item is None:
+                    item = QTableWidgetItem(val)
+                    self.excel_table.setItem(row_idx, c_idx, item)
+                elif item.text() != val and not (c_idx == 0 and not val):
+                    item.setText(val)
+            self.excel_table.blockSignals(False)
+        except Exception:
+            self.excel_table.blockSignals(False)
+
     def print_row_label(self, row_idx):
         """🖨️ gomb: kattintás után bekéri a példányszámot (alap: 1, Enter = nyomtat), majd ZPL-lel nyomtat.
         Shift+kattintás: részletes nyomtatási ablak (PNG mód / előnézet)."""
+        if self.excel_table.state() != QAbstractItemView.State.EditingState:
+            self._refresh_excel_row_from_db(row_idx)
         try:
             item_a = self.excel_table.item(row_idx, 0) # A: F-Kód
             item_c = self.excel_table.item(row_idx, 2) # C: Márka
