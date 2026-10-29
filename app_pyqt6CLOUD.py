@@ -483,8 +483,9 @@ REQUIRED_PACKAGES = [
 
 # Változásnapló (a legújabb legfelül). A VERZIÓK fülön ebből látszik, mi változott.
 VALTOZASNAPLO = [
-    ("v2026.10.29-web4", "2026-10-29", [
-        "Excel Live: a 🖨️ Nyomtatás oszlop rögzítve a bal szélen – oldalra görgetéskor is mindig látszik (mint az Excelben az ablaktábla rögzítése)",
+    ("v2026.10.29-web5", "2026-10-29", [
+        "Excel Live: a 🖨️ Nyomtatás oszlop a sorszámokkal együtt külön, rögzített sávban a bal szélen – oldalra görgetéskor is "
+        "mindig látszik, és a táblázat az A oszloppal kezdődik (semmit nem takar el)",
     ]),
     ("v2026.10.29-web3", "2026-10-29", [
         "Excel Live: a 🖨️ Nyomtatás gomb a táblázat fölé került, mindig látható (keskeny képernyőn sem csúszik ki)",
@@ -915,7 +916,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.29-web4"
+APP_VERSION = "v2026.10.29-web5"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -3590,67 +3591,58 @@ class PrintButtonDelegate(QStyledItemDelegate):
 
 
 class FrozenColumn(QObject):
-    """Rögzített (mindig látható) oszlop egy táblázat bal szélén – mint az Excelben az „ablaktábla rögzítése”.
-    Egy második nézet ugyanazzal az adattal és kijelöléssel, ami fel-le együtt görög a táblázattal, oldalra nem."""
+    """Rögzített (mindig látható) oszlop a táblázat BAL OLDALÁN, külön sávban – mint az Excelben az „ablaktábla rögzítése”.
+    A sáv (self.v) a sorszámokat és a rögzített oszlopot mutatja, ugyanazzal az adattal és kijelöléssel; fel-le együtt
+    görög a táblázattal, oldalra nem. A táblázatban az oszlop és a sorszám el van rejtve, így az az A oszloppal kezdődik
+    és semmit nem takar el. A sávot a hívó teszi a táblázat elé a layoutban."""
 
     def __init__(self, table, col, delegate):
         super().__init__(table)
         from PyQt6.QtWidgets import QTableView
         self.t, self.col = table, col
-        v = QTableView(table)
+        v = QTableView()
         self.v = v
         v.setModel(table.model())
         v.setSelectionModel(table.selectionModel())
         v.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        v.verticalHeader().hide()
         v.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        v.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        v.horizontalHeader().setStretchLastSection(False)
+        v.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)   # ugyanolyan magas legyen, mint a táblázat
         v.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         v.setVerticalScrollMode(table.verticalScrollMode())
         v.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         v.setSelectionBehavior(table.selectionBehavior())
-        v.setFrameShape(QFrame.Shape.NoFrame)
+        v.setSelectionMode(table.selectionMode())
         v.setMouseTracking(True)
         v.setStyleSheet(table.styleSheet().replace("QTableWidget", "QTableView"))
         v.setItemDelegateForColumn(col, delegate)
         for c in range(table.columnCount()):
             v.setColumnHidden(c, c != col)
-        v.setColumnWidth(col, table.columnWidth(col))
+        v.setColumnWidth(col, max(table.columnWidth(col), 140))
         vh, tvh = v.verticalHeader(), table.verticalHeader()
         vh.setMinimumSectionSize(tvh.minimumSectionSize())
         vh.setDefaultSectionSize(tvh.defaultSectionSize())
         for r in range(table.rowCount()):
             v.setRowHeight(r, table.rowHeight(r))
-        table.viewport().stackUnder(v)
+        # a táblázatban: a rögzített oszlop és a sorszám rejtve (a sávban látszanak)
+        table.setColumnHidden(col, True)
+        tvh.hide()
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         table.horizontalHeader().sectionResized.connect(self._col_resized)
         tvh.sectionResized.connect(lambda i, o, n: v.setRowHeight(i, n))
-        tvh.geometriesChanged.connect(self.update_geometry)
-        table.horizontalHeader().geometriesChanged.connect(self.update_geometry)
+        vh.geometriesChanged.connect(self.update_width)
         v.verticalScrollBar().valueChanged.connect(table.verticalScrollBar().setValue)
         table.verticalScrollBar().valueChanged.connect(v.verticalScrollBar().setValue)
-        table.installEventFilter(self)
-        v.show()
-        self.update_geometry()
+        self.update_width()
 
     def _col_resized(self, idx, old, new):
-        if idx == self.col:
+        if idx == self.col and new > 0:
             self.v.setColumnWidth(self.col, new)
-            self.update_geometry()
+            self.update_width()
 
-    def eventFilter(self, obj, ev):
-        if ev.type() in (QEvent.Type.Resize, QEvent.Type.Show):
-            QTimer.singleShot(0, self.update_geometry)
-        return False
-
-    def update_geometry(self):
-        t = self.t
-        if t.isColumnHidden(self.col):
-            self.v.hide()
-            return
-        self.v.show()
-        self.v.setGeometry(t.verticalHeader().width() + t.frameWidth(), t.frameWidth(),
-                           t.columnWidth(self.col), t.viewport().height() + t.horizontalHeader().height())
-        self.v.verticalScrollBar().setValue(t.verticalScrollBar().value())
+    def update_width(self):
+        v = self.v
+        v.setFixedWidth(v.verticalHeader().width() + v.columnWidth(self.col) + 2 * v.frameWidth())
 
 
 # G (Állapot) oszlop választható értékei az Excel Live munkalapon
@@ -4365,6 +4357,7 @@ class RaktarApp(QMainWindow):
         if first_unfilled_row != -1:
             self.excel_table.setCurrentCell(first_unfilled_row, 2) # Fókusz a C oszlopra
             self.excel_table.scrollToItem(self.excel_table.item(first_unfilled_row, 2))
+            self.excel_table.horizontalScrollBar().setValue(0)
 
         # Módosított sorok gyűjtője
         self.pending_dirty_rows = set()
@@ -4949,6 +4942,7 @@ class RaktarApp(QMainWindow):
         if item:
             self.excel_table.setCurrentItem(item)
             self.excel_table.scrollToItem(item, self.excel_table.ScrollHint.PositionAtCenter)
+            self.excel_table.horizontalScrollBar().setValue(0)
         if print_it:
             self._remote_printed.add(code.upper())
             self.print_row_label(row)
@@ -10525,7 +10519,12 @@ class RaktarApp(QMainWindow):
         rb.addWidget(btn_clear_remote)
         self.remote_bar.setFixedHeight(54)
         layout.addWidget(self.remote_bar)
-        layout.addWidget(self.excel_table, stretch=1)
+        # a rögzített 🖨️ sáv (sorszám + Nyomtatás) a táblázat bal oldalán
+        excel_row = QHBoxLayout()
+        excel_row.setSpacing(0)
+        excel_row.addWidget(self.excel_print_frozen.v)
+        excel_row.addWidget(self.excel_table, stretch=1)
+        layout.addLayout(excel_row, stretch=1)
 
         # Jelenlét: a többi gép látja, melyik soron dolgozunk éppen (2 mp-enként, csak ha tényleg szerkesztünk)
         self._presence_sent, self._presence_ts, self._last_excel_edit = "", 0.0, 0.0
@@ -10664,6 +10663,7 @@ class RaktarApp(QMainWindow):
                 self.excel_table.setCurrentItem(target_item)
                 # A képernyő közepére pozícionálja a megadott sort, így alatta-felette is látszanak a szomszédos tételek
                 self.excel_table.scrollToItem(target_item, self.excel_table.ScrollHint.PositionAtCenter)
+                self.excel_table.horizontalScrollBar().setValue(0)   # vízszintesen mindig az A oszlopnál kezdődjön
         elif len(rows) > 0:
             # Ha a pontos szám még nem létezik az adatbázisban, az utolsó létező sorra ugrik
             last_idx = len(rows) - 1
@@ -10671,6 +10671,7 @@ class RaktarApp(QMainWindow):
             if target_item:
                 self.excel_table.setCurrentItem(target_item)
                 self.excel_table.scrollToItem(target_item, self.excel_table.ScrollHint.PositionAtCenter)
+                self.excel_table.horizontalScrollBar().setValue(0)   # vízszintesen mindig az A oszlopnál kezdődjön
             
             
     def clear_selected_excel_rows(self):
