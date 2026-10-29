@@ -28,7 +28,7 @@ API_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api_t
 #   /pda           - a PDA app felulete (csak a kepernyo, adat nincs benne; a token a PDA-n van)
 #   /pda/app.apk   - a PDA app telepitoje (titkot nem tartalmaz)
 #   /add_munkalap  - a regi Flutter munkalap app (az nem tud tokent kuldeni)
-OPEN_PATHS = {"/pda", "/pda/app.apk", "/add_munkalap"}
+OPEN_PATHS = {"/pda", "/pda/app.apk", "/add_munkalap", "/ebay/fiok_torles"}
 
 
 def load_api_token():
@@ -2148,6 +2148,456 @@ def pda_log():
         return jsonify({"status": "ok", "most": pda_now().strftime("%Y-%m-%d %H:%M"), "naplo": out[:limit]}), 200
     except Exception as e:
         return pda_err(500, "S-500", str(e))
+
+
+# ==========================================
+# WEBES RENDELESEK: Shopify + eBay (a gepi program "Webes rendelesek" fulen latszanak,
+# onnan egy kattintassal eladaskent rogzithetok). Beallitas: TELEPITES_webrendelesek.md
+#   /opt/raktarapp/webshop_api.json
+#   {"shopify": {"bolt": "xyz.myshopify.com", "client_id": "...", "client_secret": "..."}   (vagy "token": "shpat_...")
+#    "ebay":    {"client_id": "...", "client_secret": "...", "runame": "..."},
+#    "napok": 30}
+# Az eBay engedelyezes (egyszer, bongeszobol): http://<VPS>:5000/ebay/auth?t=<api token>
+# ==========================================
+WEB_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webshop_api.json")
+EBAY_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ebay_token.json")
+WEB_POLL_SEC = 300
+SHOPIFY_API_VER = "2025-07"
+EBAY_SCOPE = "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly"
+_web_lock = threading.Lock()
+_web_state = {"utolso": "", "hibak": {}, "shopify_token": "", "shopify_token_lejar": 0.0,
+              "ebay_token": "", "ebay_token_lejar": 0.0}
+
+
+def init_web_db():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS webrendelesek (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                forras TEXT, rendeles_id TEXT, tetel_id TEXT,
+                rendeles_szam TEXT, datum TEXT, vevo TEXT, email TEXT, cim TEXT,
+                termek TEXT, sku TEXT, ebay_item TEXT, darab INTEGER, ar TEXT, penznem TEXT,
+                statusz TEXT, lemondva INTEGER DEFAULT 0,
+                A TEXT, kezi_A TEXT,
+                rogzitve TEXT, rogzitette TEXT, rogzitve_ido TEXT, kihagyva INTEGER DEFAULT 0,
+                elso_latva TEXT, frissitve TEXT,
+                UNIQUE(forras, tetel_id)
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[VPS] Webrendeles tabla inicializalasi hiba: {e}")
+
+
+init_web_db()
+
+
+def _web_cfg():
+    try:
+        with open(WEB_CFG, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _ebay_refresh_token():
+    try:
+        with open(EBAY_TOKEN_FILE, "r", encoding="utf-8") as f:
+            return json.load(f).get("refresh_token", "")
+    except Exception:
+        return ""
+
+
+# ---------- Shopify ----------
+def _shopify_access_token(sc):
+    if sc.get("token"):
+        return sc["token"]
+    if _web_state["shopify_token"] and time.time() < _web_state["shopify_token_lejar"]:
+        return _web_state["shopify_token"]
+    res = requests.post(f"https://{sc['bolt']}/admin/oauth/access_token",
+                        data={"grant_type": "client_credentials", "client_id": sc.get("client_id", ""),
+                              "client_secret": sc.get("client_secret", "")}, timeout=20)
+    if res.status_code != 200:
+        raise RuntimeError(f"Shopify token keres hiba (HTTP {res.status_code}): {res.text[:200]}")
+    js = res.json()
+    _web_state["shopify_token"] = js["access_token"]
+    _web_state["shopify_token_lejar"] = time.time() + int(js.get("expires_in", 86000)) - 600
+    return _web_state["shopify_token"]
+
+
+_SHOPIFY_Q = """
+query($q: String, $after: String) {
+  orders(first: 50, after: $after, query: $q, sortKey: CREATED_AT, reverse: true) {
+    pageInfo { hasNextPage endCursor }
+    edges { node {
+      id name createdAt cancelledAt displayFinancialStatus displayFulfillmentStatus email
+      customer { displayName }
+      shippingAddress { name address1 address2 city zip country }
+      lineItems(first: 50) { edges { node {
+        id title sku quantity
+        originalUnitPriceSet { shopMoney { amount currencyCode } }
+      } } }
+    } }
+  }
+}"""
+
+
+def _fetch_shopify(sc, napok):
+    tok = _shopify_access_token(sc)
+    since = (datetime.datetime.utcnow() - datetime.timedelta(days=napok)).strftime("%Y-%m-%d")
+    out, after = [], None
+    for _ in range(20):
+        res = requests.post(f"https://{sc['bolt']}/admin/api/{SHOPIFY_API_VER}/graphql.json",
+                            headers={"X-Shopify-Access-Token": tok, "Content-Type": "application/json"},
+                            json={"query": _SHOPIFY_Q, "variables": {"q": f"created_at:>={since}", "after": after}}, timeout=30)
+        if res.status_code != 200:
+            raise RuntimeError(f"Shopify hiba (HTTP {res.status_code}): {res.text[:200]}")
+        js = res.json()
+        if js.get("errors"):
+            raise RuntimeError(f"Shopify hiba: {str(js['errors'])[:300]}")
+        od = js["data"]["orders"]
+        for e in od["edges"]:
+            o = e["node"]
+            sa = o.get("shippingAddress") or {}
+            cim = ", ".join(x for x in (sa.get("address1"), sa.get("address2"), sa.get("zip"), sa.get("city"), sa.get("country")) if x)
+            vevo = sa.get("name") or (o.get("customer") or {}).get("displayName") or ""
+            statusz = " / ".join(x for x in (o.get("displayFinancialStatus"), o.get("displayFulfillmentStatus")) if x)
+            for le in o["lineItems"]["edges"]:
+                li = le["node"]
+                money = ((li.get("originalUnitPriceSet") or {}).get("shopMoney") or {})
+                out.append({"forras": "SHOPIFY", "rendeles_id": o["id"], "tetel_id": li["id"], "rendeles_szam": o["name"],
+                            "datum": str(o["createdAt"]).replace("T", " ")[:16], "vevo": vevo, "email": o.get("email") or "",
+                            "cim": cim, "termek": li.get("title") or "", "sku": li.get("sku") or "", "ebay_item": "",
+                            "darab": int(li.get("quantity") or 1), "ar": str(money.get("amount") or ""),
+                            "penznem": money.get("currencyCode") or "", "statusz": statusz,
+                            "lemondva": 1 if o.get("cancelledAt") else 0})
+        if not od["pageInfo"]["hasNextPage"]:
+            break
+        after = od["pageInfo"]["endCursor"]
+    return out
+
+
+# ---------- eBay ----------
+def _ebay_basic(ec):
+    import base64
+    return "Basic " + base64.b64encode(f"{ec.get('client_id', '')}:{ec.get('client_secret', '')}".encode()).decode()
+
+
+def _ebay_access_token(ec):
+    if _web_state["ebay_token"] and time.time() < _web_state["ebay_token_lejar"]:
+        return _web_state["ebay_token"]
+    rt = _ebay_refresh_token()
+    if not rt:
+        raise RuntimeError("Az eBay meg nincs engedelyezve - nyisd meg bongeszoben: http://<VPS>:5000/ebay/auth?t=<api token>")
+    res = requests.post("https://api.ebay.com/identity/v1/oauth2/token",
+                        headers={"Authorization": _ebay_basic(ec), "Content-Type": "application/x-www-form-urlencoded"},
+                        data={"grant_type": "refresh_token", "refresh_token": rt, "scope": EBAY_SCOPE}, timeout=20)
+    if res.status_code != 200:
+        raise RuntimeError(f"eBay token hiba (HTTP {res.status_code}): {res.text[:200]}")
+    js = res.json()
+    _web_state["ebay_token"] = js["access_token"]
+    _web_state["ebay_token_lejar"] = time.time() + int(js.get("expires_in", 7200)) - 300
+    return _web_state["ebay_token"]
+
+
+def _fetch_ebay(ec, napok):
+    tok = _ebay_access_token(ec)
+    since = (datetime.datetime.utcnow() - datetime.timedelta(days=napok)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    out, offset = [], 0
+    for _ in range(20):
+        res = requests.get("https://api.ebay.com/sell/fulfillment/v1/order",
+                           headers={"Authorization": f"Bearer {tok}"},
+                           params={"filter": f"creationdate:[{since}..]", "limit": 200, "offset": offset}, timeout=30)
+        if res.status_code != 200:
+            raise RuntimeError(f"eBay hiba (HTTP {res.status_code}): {res.text[:200]}")
+        js = res.json()
+        for o in js.get("orders") or []:
+            ship = {}
+            try:
+                ship = o["fulfillmentStartInstructions"][0]["shippingStep"]["shipTo"]
+            except Exception:
+                pass
+            ca = ship.get("contactAddress") or {}
+            cim = ", ".join(x for x in (ca.get("addressLine1"), ca.get("addressLine2"), ca.get("postalCode"), ca.get("city"),
+                                        ca.get("countryCode")) if x)
+            vevo = ship.get("fullName") or ""
+            user = (o.get("buyer") or {}).get("username") or ""
+            if user:
+                vevo = f"{vevo} ({user})" if vevo else user
+            statusz = " / ".join(x for x in (o.get("orderPaymentStatus"), o.get("orderFulfillmentStatus")) if x)
+            lemondva = 1 if str((o.get("cancelStatus") or {}).get("cancelState", "")).upper() == "CANCELED" else 0
+            for li in o.get("lineItems") or []:
+                cost = li.get("lineItemCost") or {}
+                out.append({"forras": "EBAY", "rendeles_id": o.get("orderId", ""), "tetel_id": li.get("lineItemId", ""),
+                            "rendeles_szam": o.get("orderId", ""), "datum": str(o.get("creationDate", "")).replace("T", " ")[:16],
+                            "vevo": vevo, "email": ship.get("email") or "", "cim": cim, "termek": li.get("title") or "",
+                            "sku": li.get("sku") or "", "ebay_item": str(li.get("legacyItemId") or ""),
+                            "darab": int(li.get("quantity") or 1), "ar": str(cost.get("value") or ""),
+                            "penznem": cost.get("currency") or "", "statusz": statusz, "lemondva": lemondva})
+        offset += 200
+        if offset >= int(js.get("total") or 0):
+            break
+    return out
+
+
+# ---------- Parositas + mentes ----------
+_R18_RE = re.compile(r"R18[-/ ]?(\d+[A-Za-z]?)", re.I)
+
+
+def _web_match(cur, t):
+    """A rendeles-tetelhez tartozo R18 kod: eBay ID (N oszlop) -> SKU = R18 -> R18 kod a termek neveben."""
+    if t.get("ebay_item"):
+        digits = re.sub(r"\D", "", t["ebay_item"])
+        if digits:
+            cur.execute("SELECT A, N FROM termekek WHERE N IS NOT NULL AND N != ''")
+            for a, n in cur.fetchall():
+                if digits in re.findall(r"\d{9,}", safe_str(n)) or re.sub(r"\D", "", safe_str(n)) == digits:
+                    return clean_code(a)
+    for i, cand in enumerate((t.get("sku", ""), t.get("termek", ""))):
+        m = _R18_RE.search(clean_code(cand))
+        if m:
+            code = "R18-" + m.group(1).upper()
+            cur.execute("SELECT A FROM termekek WHERE UPPER(TRIM(A))=?", (code,))
+            r = cur.fetchone()
+            if r:
+                return clean_code(r[0])
+        sku = clean_code(cand)
+        if sku and i == 0:
+            cur.execute("SELECT A FROM termekek WHERE UPPER(TRIM(A))=? OR UPPER(TRIM(B))=?", (sku, sku))
+            r = cur.fetchone()
+            if r:
+                return clean_code(r[0])
+    return ""
+
+
+def web_fetch_now():
+    """Shopify + eBay rendelesek lekerese es mentese. Visszaad: {"uj", "hibak"}"""
+    cfg = _web_cfg()
+    napok = int(cfg.get("napok") or 30)
+    tetelek, hibak = [], {}
+    with _web_lock:
+        if (cfg.get("shopify") or {}).get("bolt"):
+            try:
+                tetelek += _fetch_shopify(cfg["shopify"], napok)
+            except Exception as e:
+                hibak["shopify"] = str(e)[:300]
+        if (cfg.get("ebay") or {}).get("client_id"):
+            try:
+                tetelek += _fetch_ebay(cfg["ebay"], napok)
+            except Exception as e:
+                hibak["ebay"] = str(e)[:300]
+        uj = 0
+        now = pda_now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        for t in tetelek:
+            if not t.get("tetel_id"):
+                continue
+            cur.execute("SELECT id, A, kezi_A FROM webrendelesek WHERE forras=? AND tetel_id=?", (t["forras"], t["tetel_id"]))
+            row = cur.fetchone()
+            A = row[1] if row and row[1] else _web_match(cur, t)
+            mezok = ("rendeles_id", "rendeles_szam", "datum", "vevo", "email", "cim", "termek", "sku", "ebay_item",
+                     "darab", "ar", "penznem", "statusz", "lemondva")
+            if row:
+                cur.execute(f"UPDATE webrendelesek SET {', '.join(m + '=?' for m in mezok)}, A=?, frissitve=? WHERE id=?",
+                            (*[t[m] for m in mezok], A, now, row[0]))
+            else:
+                cur.execute(f"INSERT INTO webrendelesek (forras, tetel_id, {', '.join(mezok)}, A, elso_latva, frissitve) "
+                            f"VALUES (?, ?, {', '.join('?' * len(mezok))}, ?, ?, ?)",
+                            (t["forras"], t["tetel_id"], *[t[m] for m in mezok], A, now, now))
+                uj += 1
+        conn.commit()
+        conn.close()
+        _web_state["utolso"] = now
+        _web_state["hibak"] = hibak
+    return {"uj": uj, "hibak": hibak}
+
+
+def _web_loop():
+    time.sleep(20)
+    while True:
+        try:
+            cfg = _web_cfg()
+            if cfg.get("shopify") or cfg.get("ebay"):
+                web_fetch_now()
+        except Exception as e:
+            print(f"[VPS] Webrendeles lekeres hiba: {e}")
+        time.sleep(WEB_POLL_SEC)
+
+
+threading.Thread(target=_web_loop, daemon=True).start()
+
+
+WEB_FIELDS = ("id", "forras", "rendeles_id", "tetel_id", "rendeles_szam", "datum", "vevo", "email", "cim", "termek", "sku",
+              "ebay_item", "darab", "ar", "penznem", "statusz", "lemondva", "A", "kezi_A", "rogzitve", "rogzitette",
+              "rogzitve_ido", "kihagyva", "elso_latva")
+
+
+@app.route('/web/orders', methods=['GET'])
+def web_orders():
+    """A webes rendelesek tetelei (legujabb elol). ?nyitott=1: csak a meg nem rogzitett / nem kihagyott / nem lemondott."""
+    try:
+        cfg = _web_cfg()
+        limit = min(request.args.get('limit', default=300, type=int), 2000)
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        w = " WHERE rogzitve IS NULL AND kihagyva=0 AND lemondva=0" if request.args.get('nyitott') else ""
+        cur.execute(f"SELECT {', '.join(WEB_FIELDS)} FROM webrendelesek{w} ORDER BY datum DESC, id DESC LIMIT ?", (limit,))
+        rows = [{k: (r[k] if r[k] is not None else "") for k in WEB_FIELDS} for r in cur.fetchall()]
+        cur.execute("SELECT COUNT(*) FROM webrendelesek WHERE rogzitve IS NULL AND kihagyva=0 AND lemondva=0")
+        nyitott = cur.fetchone()[0]
+        conn.close()
+        return jsonify({"status": "ok", "rendelesek": rows, "nyitott": nyitott, "utolso_lekeres": _web_state["utolso"],
+                        "hibak": _web_state["hibak"],
+                        "beallitva": {"shopify": bool((cfg.get("shopify") or {}).get("bolt")),
+                                      "ebay": bool((cfg.get("ebay") or {}).get("client_id")),
+                                      "ebay_engedelyezve": bool(_ebay_refresh_token())}}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/web/orders/refresh', methods=['POST'])
+def web_orders_refresh():
+    try:
+        return jsonify({"status": "ok", **web_fetch_now()}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/web/orders/<int:wid>/match', methods=['POST'])
+def web_orders_match(wid):
+    """Kezi parositas: {"A": "R18-123"} (ures = parositas torlese)."""
+    try:
+        code = clean_code((request.json or {}).get("A", ""))
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE webrendelesek SET kezi_A=? WHERE id=?", (code, wid))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/web/orders/<int:wid>/claim', methods=['POST'])
+def web_orders_claim(wid):
+    """Rogzites elott lefoglalja a tetelt (egy rendelest csak egy gep rogzithet): {"eladas_id", "gep"}"""
+    try:
+        d = request.json or {}
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("UPDATE webrendelesek SET rogzitve=?, rogzitette=?, rogzitve_ido=? WHERE id=? AND rogzitve IS NULL",
+                    (safe_str(d.get("eladas_id", "")) or "?", safe_str(d.get("gep", "")), pda_now().strftime("%Y-%m-%d %H:%M"), wid))
+        ok = cur.rowcount == 1
+        conn.commit()
+        cur.execute("SELECT rogzitette, rogzitve_ido FROM webrendelesek WHERE id=?", (wid,))
+        r = cur.fetchone()
+        conn.close()
+        if ok:
+            return jsonify({"status": "ok"}), 200
+        return jsonify({"status": "taken", "kod": "S-409",
+                        "message": f"Ezt a rendelest mar rogzitette: {r[0] if r else '?'} ({r[1] if r else ''})"}), 409
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/web/orders/<int:wid>/unclaim', methods=['POST'])
+def web_orders_unclaim(wid):
+    """Rogzites visszavonasa / sikertelen rogzites utan: a tetel ujra rogzitheto."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE webrendelesek SET rogzitve=NULL, rogzitette=NULL, rogzitve_ido=NULL WHERE id=?", (wid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/web/orders/<int:wid>/skip', methods=['POST'])
+def web_orders_skip(wid):
+    """Kihagyas (pl. nem raktari termek): {"kihagyva": true|false}"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE webrendelesek SET kihagyva=? WHERE id=?", (1 if (request.json or {}).get("kihagyva", True) else 0, wid))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+# ---------- eBay fiok-torlesi ertesites (Marketplace Account Deletion) ----------
+# Az eBay eloirja: ha egy eBay felhasznalo torli a fiokjat, a nala tarolt adatait (nalunk: vevo neve, cime, e-mail)
+# torolni kell. A webshop_api.json "ebay" reszebe kell: "torles_token" (32-80 karakter, betu/szam/_/-) es
+# "torles_url" (PONTOSAN az a HTTPS cim, amit az eBay fejlesztoi oldalon megadtal, pl. https://.../ebay/fiok_torles).
+@app.route('/ebay/fiok_torles', methods=['GET', 'POST'])
+def ebay_fiok_torles():
+    import hashlib
+    ec = _web_cfg().get("ebay") or {}
+    if request.method == "GET":
+        cc = request.args.get("challenge_code", "")
+        h = hashlib.sha256((cc + ec.get("torles_token", "") + ec.get("torles_url", "")).encode("utf-8")).hexdigest()
+        return jsonify({"challengeResponse": h}), 200
+    try:
+        d = request.get_json(silent=True) or {}
+        user = safe_str(((d.get("notification") or {}).get("data") or {}).get("username", ""))
+        if user:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("UPDATE webrendelesek SET vevo='(eBay fiok torolve)', email='', cim='' "
+                         "WHERE forras='EBAY' AND vevo LIKE ?", (f"%({user})%",))
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        print(f"[VPS] eBay fiok-torles hiba: {e}")
+    return "", 204
+
+
+# ---------- eBay engedelyezes (egyszer kell, bongeszobol) ----------
+@app.route('/ebay/auth', methods=['GET', 'POST'])
+def ebay_auth():
+    from urllib.parse import urlencode, urlparse, parse_qs
+    ec = _web_cfg().get("ebay") or {}
+    import html as _html
+    t = _html.escape(request.args.get("t", ""), quote=True)
+    msg = ""
+    if request.method == "POST":
+        raw = (request.form.get("url") or "").strip()
+        code = parse_qs(urlparse(raw).query).get("code", [""])[0] if "code=" in raw else raw
+        if not code:
+            msg = "<p style='color:red'>Nincs benne kod (code=...). Masold be a TELJES cimet a bongeszo cimsorabol.</p>"
+        else:
+            res = requests.post("https://api.ebay.com/identity/v1/oauth2/token",
+                                headers={"Authorization": _ebay_basic(ec), "Content-Type": "application/x-www-form-urlencoded"},
+                                data={"grant_type": "authorization_code", "code": code, "redirect_uri": ec.get("runame", "")}, timeout=20)
+            if res.status_code == 200 and res.json().get("refresh_token"):
+                js = res.json()
+                with open(EBAY_TOKEN_FILE, "w", encoding="utf-8") as f:
+                    json.dump({"refresh_token": js["refresh_token"], "ido": pda_now().strftime("%Y-%m-%d %H:%M"),
+                               "lejar_mp": js.get("refresh_token_expires_in")}, f)
+                _web_state["ebay_token"], _web_state["ebay_token_lejar"] = js.get("access_token", ""), time.time() + 6000
+                msg = "<h2 style='color:green'>KESZ! Az eBay engedelyezve. Ez az ablak bezarhato.</h2>"
+                threading.Thread(target=web_fetch_now, daemon=True).start()
+            else:
+                msg = f"<p style='color:red'>eBay hiba (HTTP {res.status_code}): {res.text[:300]}</p>"
+    if not ec.get("client_id") or not ec.get("runame"):
+        body = "<p style='color:red'>Elobb a webshop_api.json-ba kell az eBay client_id, client_secret es runame (lasd TELEPITES_webrendelesek.md).</p>"
+    else:
+        link = "https://auth.ebay.com/oauth2/authorize?" + urlencode({"client_id": ec["client_id"], "response_type": "code",
+                                                                      "redirect_uri": ec["runame"], "scope": EBAY_SCOPE})
+        allapot = "MAR ENGEDELYEZVE (ujra is lehet)" if _ebay_refresh_token() else "meg nincs engedelyezve"
+        body = (f"<p>Allapot: <b>{allapot}</b></p>"
+                f"<p><b>1.</b> Kattints ide, es lepj be az eBay fiokkal, amelyikkel eladtok, majd fogadd el (Agree):<br>"
+                f"<a href='{link}' target='_blank' style='font-size:20px'>eBay engedelyezes megnyitasa</a></p>"
+                f"<p><b>2.</b> Utana a bongeszo egy masik oldalra visz. A cimsorbol masold ki a TELJES cimet "
+                f"(benne van: code=...) es illeszd be ide:</p>"
+                f"<form method='post' action='/ebay/auth?t={t}'><input name='url' style='width:90%;font-size:16px'>"
+                f"<br><br><button type='submit' style='font-size:18px'>Mentes</button></form>")
+    html = f"<html><head><meta charset='utf-8'><title>eBay engedelyezes</title></head><body style='font-family:Arial;max-width:900px;margin:30px auto'>" \
+           f"<h1>eBay engedelyezes - Raktarprogram</h1>{msg}{body}</body></html>"
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 if __name__ == '__main__':

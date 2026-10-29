@@ -483,6 +483,13 @@ REQUIRED_PACKAGES = [
 
 # Változásnapló (a legújabb legfelül). A VERZIÓK fülön ebből látszik, mi változott.
 VALTOZASNAPLO = [
+    ("v2026.10.29-web1", "2026-10-29", [
+        "Új 🛒 Webes rendelések fül: a Shopify és eBay rendelések maguktól megjelennek (vevő, cím, ár, melyik R18 termék)",
+        "Egy kattintással eladásként rögzíthető (készlet levonás + Eladottak + Google táblázat), előtte rákérdez",
+        "Párosítás: eBay ID (N oszlop), SKU = R18 kód, R18 kód a termék nevében – ami nem párosul, kézzel párosítható",
+        "Új rendelésnél értesítés, a fül nevén a rögzítésre váró rendelések száma",
+        "Gépnév: egyedi név gépenként (VERZIÓK fülön átírható)",
+    ]),
     ("v2026.10.29-elad1", "2026-10-29", [
         "Eladottak fül: a régi és a más gépen rögzített eladások is látszanak – a program behozza őket a Google táblázat "
         "Eladas_Ebay / Eladas_EbayKivul / Eladas_Webshop lapjairól (fül megnyitásakor, 5 percenként és gombbal)",
@@ -894,7 +901,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.29-elad2"
+APP_VERSION = "v2026.10.29-web1"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -3900,6 +3907,7 @@ class RaktarApp(QMainWindow):
     clients_signal = pyqtSignal(object)        # gépek és verziók listája (Admin fül) -> fő szál
     leltar_signal = pyqtSignal(str, object)    # leltár szerver-válaszok (fajta, adat) -> fő szál
     sold_pull_signal = pyqtSignal(object, bool)   # eladások behozása a táblázatból: (eredmény, kézi?) -> fő szál
+    web_signal = pyqtSignal(str, object)          # webes rendelések (Shopify / eBay): (fajta, adat) -> fő szál
     upd_signal = pyqtSignal(str, object)       # VERZIÓK: frissítés-ellenőrzés / letöltés / pip (fajta, adat) -> fő szál
 
     def __init__(self):
@@ -4064,12 +4072,14 @@ class RaktarApp(QMainWindow):
         self.tab_process_log = QWidget()
         self.tab_admin = QWidget()
         self.tab_versions = QWidget()
+        self.tab_web = QWidget()
 
         # Fülek hozzáadása a kívánt sorrendben
         # FŐ FÜLEK (mindig látszanak): Excel Live, Gyorskereső, PDA / Eladás, Eladottak
         self.tabs.addTab(self.tab_search, "⚡ Gyorskereső")
         self.tabs.addTab(self.tab_pda, "📱 PDA / Eladás")
         self.tabs.addTab(self.tab_sold, "💰 Eladottak")
+        self.tabs.addTab(self.tab_web, "🛒 Webes rendelések")
         self.tabs.addTab(self.tab_leltar, "📋 Leltár")
         self.tabs.addTab(self.tab_versions, "🆕 VERZIÓK")
         # TOVÁBBI FÜLEK (a "☰ További fülek" menüből nyílnak)
@@ -4091,6 +4101,7 @@ class RaktarApp(QMainWindow):
         self.init_sold_tab()
         self.init_leltar_tab()
         self.init_versions_tab()
+        self.init_web_tab()
         self.init_server_tab()
         self.init_excel_tab()
         self.init_single_tab()
@@ -8681,6 +8692,300 @@ class RaktarApp(QMainWindow):
             self.lbl_version_warn.hide()
 
     # ==========================================================
+    # 🛒 WEBES RENDELÉSEK – Shopify + eBay (a VPS 5 percenként lekéri; itt 1 kattintással eladás)
+    # ==========================================================
+    WEB_COLS = ["Forrás", "Dátum", "Rendelés", "Vevő", "Cím", "Termék (webes név)", "SKU / eBay ID", "Db", "Ár",
+                "R18 (párosítva)", "Raktáron", "Webes állapot", "Rögzítés"]
+
+    def init_web_tab(self):
+        lay = QVBoxLayout(self.tab_web)
+        bar = QHBoxLayout()
+        self.web_filter = QComboBox()
+        for txt, val in (("🟠 Rögzítésre vár", "nyitott"), ("Mind", "mind"), ("✅ Rögzítve", "rogzitve"),
+                         ("🚫 Kihagyva", "kihagyva"), ("❌ Lemondva", "lemondva")):
+            self.web_filter.addItem(txt, val)
+        self.web_filter.setMinimumWidth(190)
+        self.web_filter.currentIndexChanged.connect(self.web_render)
+        bar.addWidget(self.web_filter)
+        self.web_search = QLineEdit()
+        self.web_search.setPlaceholderText("🔍 Keresés (vevő, termék, R18, rendelésszám...)")
+        self.web_search.textChanged.connect(self.web_render)
+        bar.addWidget(self.web_search, stretch=2)
+        b = QPushButton("🔄 Lekérés most (Shopify + eBay)")
+        b.setStyleSheet("background-color: #29b6f6; color: black; font-weight: bold;")
+        b.clicked.connect(lambda: self.web_load(refresh=True))
+        bar.addWidget(b)
+        lay.addLayout(bar)
+        self.web_status = QLabel("⏳ Betöltés...")
+        self.web_status.setTextFormat(Qt.TextFormat.RichText)
+        self.web_status.setStyleSheet("padding: 4px; font-size: 13px;")
+        lay.addWidget(self.web_status)
+
+        self.web_table = self._admin_table(self.WEB_COLS, [95, 120, 120, 170, 220, 230, 120, 40, 90, 170, 170, 150])
+        self.web_table.setWordWrap(True)
+        self.web_table.cellDoubleClicked.connect(lambda r, c: self.web_record())
+        lay.addWidget(self.web_table, stretch=1)
+
+        bb = QHBoxLayout()
+        self.btn_web_record = QPushButton("💰 Rögzítés eladásként (kijelölt)")
+        self.btn_web_record.setStyleSheet("background-color: #00e676; color: black; font-weight: bold; font-size: 15px; padding: 8px 18px;")
+        self.btn_web_record.clicked.connect(self.web_record)
+        bb.addWidget(self.btn_web_record)
+        b = QPushButton("🔗 Kézi párosítás (R18)")
+        b.clicked.connect(self.web_match)
+        bb.addWidget(b)
+        b = QPushButton("🚫 Kihagyás / visszavétel")
+        b.setToolTip("Pl. nem raktári termék: nem kell rögzíteni, eltűnik a „Rögzítésre vár” listából")
+        b.clicked.connect(self.web_skip)
+        bb.addWidget(b)
+        bb.addStretch()
+        hint = QLabel("Dupla kattintás egy sorra = rögzítés")
+        hint.setStyleSheet("color: #888;")
+        bb.addWidget(hint)
+        lay.addLayout(bb)
+
+        self._web_rows = []
+        self._web_info = {}
+        self._web_known_open = None
+        self._web_busy = False
+        self.web_signal.connect(self.on_web_signal)
+        self.web_timer = QTimer(self)
+        self.web_timer.timeout.connect(self.web_load)
+        self.web_timer.start(2 * 60 * 1000)
+        QTimer.singleShot(18000, self.web_load)
+
+    def web_load(self, refresh=False):
+        if self._web_busy:
+            return
+        self._web_busy = True
+        if refresh:
+            self.web_status.setText("⏳ Lekérés a Shopify-ról és az eBay-ről...")
+
+        def job():
+            try:
+                if refresh:
+                    r = vps_request("POST", f"{VPS_URL}/web/orders/refresh", timeout=90)
+                    if r.status_code == 404:
+                        raise RuntimeError("A VPS-en még a régi server_api.py fut (nincs webes rendelés rész) – töltsd fel az újat")
+                res = vps_request("GET", f"{VPS_URL}/web/orders", params={"limit": 500}, timeout=15)
+                if res.status_code == 404:
+                    raise RuntimeError("A VPS-en még a régi server_api.py fut (nincs webes rendelés rész) – töltsd fel az újat")
+                if res.status_code != 200:
+                    raise RuntimeError(f"Szerver hiba (HTTP {res.status_code})")
+                self.web_signal.emit("lista", dict(res.json(), _kezi=refresh))
+            except Exception as e:
+                self.web_signal.emit("hiba", {"message": str(e)})
+        threading.Thread(target=job, daemon=True).start()
+
+    def on_web_signal(self, kind, d):
+        self._web_busy = False
+        if kind == "hiba":
+            self.web_status.setText(f"<span style='color:#ff5252'>❌ {d.get('message', '')}</span>")
+            return
+        self._web_rows = d.get("rendelesek") or []
+        self._web_info = d
+        nyitott = int(d.get("nyitott") or 0)
+        idx = self.tabs.indexOf(self.tab_web)
+        self.tabs.setTabText(idx, f"🛒 Webes rendelések ({nyitott})" if nyitott else "🛒 Webes rendelések")
+        self.tabs.tabBar().setTabTextColor(idx, QColor("#ff9800") if nyitott else QColor("#ffffff"))
+        if self._web_known_open is not None and nyitott > self._web_known_open:
+            uj = [r for r in self._web_rows if not r.get("rogzitve") and not r.get("kihagyva") and not r.get("lemondva")][:3]
+            self.trigger_toast("🛒 ÚJ WEBES RENDELÉS: " + "; ".join(f"{r['forras']} – {r['termek'][:30]}" for r in uj), 6000)
+            self.append_process_log(f"🛒 Új webes rendelés érkezett ({nyitott} vár rögzítésre)")
+        self._web_known_open = nyitott
+        self.web_render()
+        if d.get("_kezi"):
+            self.trigger_toast("🔄 Webes rendelések lekérve")
+
+    def _web_code(self, r):
+        return norm_code(r.get("kezi_A") or r.get("A") or "")
+
+    def web_render(self):
+        if not hasattr(self, "web_table"):
+            return
+        d = self._web_info or {}
+        be = d.get("beallitva") or {}
+        hibak = d.get("hibak") or {}
+
+        def allapot(nev, kulcs, extra_ok=True, extra_txt=""):
+            if hibak.get(kulcs):
+                return f"<span style='color:#ff5252'>❌ {nev}: {hibak[kulcs][:140]}</span>"
+            if not be.get(kulcs):
+                return f"<span style='color:#888'>⚪ {nev}: nincs beállítva</span>"
+            if not extra_ok:
+                return f"<span style='color:#ffb74d'>⚠️ {nev}: {extra_txt}</span>"
+            return f"<span style='color:#00e676'>✅ {nev}</span>"
+        self.web_status.setText(
+            allapot("Shopify", "shopify") + " &nbsp;·&nbsp; " +
+            allapot("eBay", "ebay", be.get("ebay_engedelyezve"), "még nincs engedélyezve (lásd TELEPITES_webrendelesek.md)") +
+            f" &nbsp;·&nbsp; Utolsó lekérés: {d.get('utolso_lekeres') or '–'} &nbsp;·&nbsp; "
+            f"<b style='color:#ff9800'>Rögzítésre vár: {d.get('nyitott', 0)}</b>")
+
+        flt = self.web_filter.currentData()
+        q = self.web_search.text().strip().lower()
+        rows = []
+        for r in self._web_rows:
+            st = ("lemondva" if r.get("lemondva") else "rogzitve" if r.get("rogzitve") else
+                  "kihagyva" if r.get("kihagyva") else "nyitott")
+            if flt != "mind" and st != flt:
+                continue
+            if q and q not in " ".join(str(r.get(k, "")) for k in ("vevo", "termek", "sku", "ebay_item", "A", "kezi_A",
+                                                                      "rendeles_szam", "cim", "email")).lower():
+                continue
+            rows.append((r, st))
+        t = self.web_table
+        t.setRowCount(len(rows))
+        for i, (r, st) in enumerate(rows):
+            code = self._web_code(r)
+            local = get_row_snapshot(code) if code else None
+            raktar = ""
+            if code:
+                raktar = (f"{local.get('F') or '1'} db · {local.get('L') or ''} {('Páter ' + local['I']) if local.get('I') else ''}".strip()
+                          if local else "– nincs meg ezen a gépen")
+            r18 = (f"{code}{' ✋' if r.get('kezi_A') else ''}  " + (f"{local.get('C', '')} {local.get('D', '')}".strip() if local else "")
+                   if code else "❓ nincs párosítva")
+            rog = {"rogzitve": f"✅ {r.get('rogzitette', '')} {r.get('rogzitve_ido', '')}", "kihagyva": "🚫 kihagyva",
+                   "lemondva": "❌ LEMONDVA", "nyitott": "🟠 rögzítésre vár"}[st]
+            vals = ["🛍️ Shopify" if r["forras"] == "SHOPIFY" else "🏷️ eBay", r.get("datum", ""), r.get("rendeles_szam", ""),
+                    r.get("vevo", "") + (f"\n{r['email']}" if r.get("email") else ""), r.get("cim", ""), r.get("termek", ""),
+                    " / ".join(x for x in (r.get("sku"), r.get("ebay_item")) if x), str(r.get("darab", "")),
+                    f"{r.get('ar', '')} {r.get('penznem', '')}".strip(), r18, raktar, r.get("statusz", ""), rog]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(v)
+                it.setData(Qt.ItemDataRole.UserRole, r["id"])
+                if c == 9 and not code:
+                    it.setForeground(QColor("#ff5252"))
+                if c == 10 and code and not local:
+                    it.setForeground(QColor("#ffb74d"))
+                if c == 12:
+                    it.setForeground(QColor({"nyitott": "#ff9800", "rogzitve": "#00e676", "lemondva": "#ff5252"}.get(st, "#888")))
+                t.setItem(i, c, it)
+        t.resizeRowsToContents()
+
+    def _web_selected(self):
+        r = self.web_table.currentRow()
+        it = self.web_table.item(r, 0) if r >= 0 else None
+        if not it:
+            self.trigger_toast("Előbb jelölj ki egy rendelést a listában.")
+            return None
+        wid = it.data(Qt.ItemDataRole.UserRole)
+        return next((x for x in self._web_rows if x["id"] == wid), None)
+
+    def web_match(self):
+        r = self._web_selected()
+        if not r:
+            return
+        cur = self._web_code(r)
+        uj, ok = QInputDialog.getText(self, "Kézi párosítás",
+                                      f"{r['forras']} rendelés {r['rendeles_szam']}\n{r['termek']}\n\n"
+                                      f"Melyik raktári termék ez? Írd be / csippantsd az R18 kódot (üres = párosítás törlése):", text=cur)
+        if not ok:
+            return
+        code = norm_code(fix_scanner_text(uj))
+        if code and not get_row_snapshot(code):
+            if QMessageBox.question(self, "Kézi párosítás", f"{code} nincs meg ezen a gépen. Így is párosítod?") != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            vps_request("POST", f"{VPS_URL}/web/orders/{r['id']}/match", json={"A": code}, timeout=8)
+        except Exception as e:
+            QMessageBox.warning(self, "Kézi párosítás", f"Nem sikerült: {e}")
+            return
+        r["kezi_A"] = code
+        self.web_render()
+        self.trigger_toast(f"🔗 Párosítva: {code or '(törölve)'}")
+
+    def web_skip(self):
+        r = self._web_selected()
+        if not r:
+            return
+        vissza = bool(r.get("kihagyva"))
+        if QMessageBox.question(self, "Kihagyás", (f"Visszaveszed a rögzítésre várók közé?\n\n{r['termek']}" if vissza else
+                                f"Kihagyod ezt a rendelés-tételt? (pl. nem raktári termék – nem kerül az eladások közé)\n\n"
+                                f"{r['forras']} {r['rendeles_szam']} – {r['termek']}")) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            vps_request("POST", f"{VPS_URL}/web/orders/{r['id']}/skip", json={"kihagyva": not vissza}, timeout=8)
+        except Exception as e:
+            QMessageBox.warning(self, "Kihagyás", f"Nem sikerült: {e}")
+            return
+        self.web_load()
+
+    def web_record(self):
+        r = self._web_selected()
+        if not r:
+            return
+        if r.get("rogzitve"):
+            QMessageBox.information(self, "Rögzítés", f"Ez már rögzítve van ({r.get('rogzitette')} {r.get('rogzitve_ido')}).")
+            return
+        if r.get("lemondva"):
+            QMessageBox.information(self, "Rögzítés", "Ezt a rendelést lemondták – nem kell rögzíteni.")
+            return
+        code = self._web_code(r)
+        if not code:
+            QMessageBox.information(self, "Rögzítés", "Ez a rendelés még nincs párosítva raktári termékkel.\n"
+                                                      "Előbb nyomd meg a „🔗 Kézi párosítás” gombot és add meg az R18 kódot.")
+            return
+        local = get_row_snapshot(code)
+        try:
+            darab = max(1, int(r.get("darab") or 1))
+        except ValueError:
+            darab = 1
+        platform = "EBAY" if r["forras"] == "EBAY" else "WEBSHOP"
+        cim = SALES_SHEETS[platform]["cim"]
+        if local:
+            product = dict(local)
+            stock = stock_of(product.get("F"))
+            keszlet_txt = (f"{stock} db → {stock - darab} db" if stock - darab > 0 else
+                           f"{stock} db → 0 db (ELFOGY – törlődik a raktárból, a ToroltSor lapra kerül)")
+        else:
+            product = {c: "" for c in ROW_COLS}
+            product.update({"A": code, "C": r.get("termek", "")[:60], "N": r.get("ebay_item", "")})
+            stock = None
+            keszlet_txt = "⚠️ a termék nincs meg ezen a gépen – a készlet NEM változik"
+        product["A"] = code
+        if QMessageBox.question(self, "💰 Eladás rögzítése?",
+                                f"{'🏷️ eBay' if platform == 'EBAY' else '🛍️ Shopify'} rendelés: {r['rendeles_szam']}  ({r.get('datum', '')})\n\n"
+                                f"Termék: {code} – {product.get('C', '')} {product.get('D', '')}\n"
+                                f"Webes név: {r.get('termek', '')}\n"
+                                f"Vevő: {r.get('vevo', '')}\nCím: {r.get('cim', '')}\n"
+                                f"Ár: {r.get('ar', '')} {r.get('penznem', '')}   ·   Darab: {darab}\n\n"
+                                f"Készlet: {keszlet_txt}\n\nRögzíted eladásként ({cim})?") != QMessageBox.StandardButton.Yes:
+            return
+        eladas_id = f"W{r['forras'][0]}{r['id']}-{code}-{os.urandom(2).hex()}"
+        try:
+            res = vps_request("POST", f"{VPS_URL}/web/orders/{r['id']}/claim", json={"eladas_id": eladas_id, "gep": GEP_NEV}, timeout=8)
+        except Exception as e:
+            QMessageBox.warning(self, "Rögzítés", f"Nem érem el a szervert ({e}) – próbáld újra.")
+            return
+        if res.status_code != 200:
+            try:
+                msg = res.json().get("message", "")
+            except Exception:
+                msg = f"HTTP {res.status_code}"
+            QMessageBox.warning(self, "Rögzítés", f"Nem rögzíthető: {msg}")
+            self.web_load()
+            return
+        v = {"datum": r.get("datum") or datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+             "vevo": r.get("vevo", "") + (f" | {r['cim']}" if r.get("cim") else ""),
+             "ar": f"{r.get('ar', '')} {r.get('penznem', '')}".strip(), "darab": darab, "tracking": "",
+             "megjegyzes": f"{'eBay' if platform == 'EBAY' else 'Shopify'} rendelés {r['rendeles_szam']}" + (f" | {r['email']}" if r.get("email") else ""),
+             "reduce_stock": True}
+        stock_msg = self.store_sale(platform, product, stock, v, eladas_id=eladas_id,
+                                    sale_src=f"🛒 Webes rendelés ({'eBay' if platform == 'EBAY' else 'Shopify'} {r['rendeles_szam']})")
+        if stock_msg is None:
+            try:
+                vps_request("POST", f"{VPS_URL}/web/orders/{r['id']}/unclaim", timeout=8)
+            except Exception:
+                pass
+            return
+        sync_sales_async()
+        if hasattr(self, "refresh_sold_table"):
+            self.refresh_sold_table()
+        self.trigger_toast(f"💰 {code} eladva ({cim}, {darab} db){stock_msg}", 4000)
+        self.append_process_log(f"🛒 Webes rendelés rögzítve: {r['forras']} {r['rendeles_szam']} → {code} ({darab} db){stock_msg}", "#00e676")
+        self.web_load()
+
+    # ==========================================================
     # 🆕 VERZIÓK – automatikus frissítés a VPS-ről, Python csomagok, régi verziók
     # ==========================================================
     def init_versions_tab(self):
@@ -9737,7 +10042,7 @@ class RaktarApp(QMainWindow):
     # FÜLSOR: 4 fő fül mindig látszik, a többi a "☰ További fülek" menüből nyílik
     # -------------------------------------------------------------------
     def setup_tab_menu(self):
-        self._main_tabs = [w for w in (getattr(self, "tab_excel_live", None), self.tab_search, self.tab_pda, self.tab_sold, self.tab_leltar, self.tab_versions) if w]
+        self._main_tabs = [w for w in (getattr(self, "tab_excel_live", None), self.tab_search, self.tab_pda, self.tab_sold, self.tab_web, self.tab_leltar, self.tab_versions) if w]
         self._extra_tabs = [self.tabs.widget(i) for i in range(self.tabs.count()) if self.tabs.widget(i) not in self._main_tabs]
 
         self.btn_more_tabs = QToolButton()
@@ -9802,6 +10107,8 @@ class RaktarApp(QMainWindow):
             elif w is getattr(self, "tab_leltar", None):
                 self.leltar_refresh_old()
                 self.leltar_load_list()
+            elif w is getattr(self, "tab_web", None):
+                self.web_load()
             elif w is getattr(self, "tab_versions", None):
                 self.ver_refresh_local()
                 self.check_app_update()
