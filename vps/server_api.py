@@ -100,6 +100,12 @@ def init_verzio_oszlop():
         cols = [c[1] for c in cursor.fetchall()]
         if cols and "verzio" not in cols:
             cursor.execute("ALTER TABLE termekek ADD COLUMN verzio INTEGER")
+        # Ki (melyik gep) es mikor modositotta utoljara a sort - az Excel Live-on latszik a tobbi gepen
+        for c in ("utolso_gep", "utolso_ido"):
+            if cols and c not in cols:
+                cursor.execute(f"ALTER TABLE termekek ADD COLUMN {c} TEXT")
+        # Ki melyik soron dolgozik eppen (Excel Live, nehany masodpercig ervenyes)
+        cursor.execute("CREATE TABLE IF NOT EXISTS jelenlet (gep TEXT PRIMARY KEY, A TEXT, ido REAL)")
         if cols:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_termekek_verzio ON termekek(verzio)")
         cursor.execute("""
@@ -115,6 +121,23 @@ def init_verzio_oszlop():
         conn.close()
     except Exception as e:
         print(f"[VPS] Verzio oszlop inicializalasi hiba: {e}")
+
+def _now_s():
+    return pda_now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+JELENLET_SEC = 25
+
+
+def _jelenlet(cursor):
+    """Az elmult nehany masodpercben Excel Live-on szerkesztett sorok: [{"gep", "A", "mp"}]"""
+    try:
+        now = time.time()
+        cursor.execute("SELECT gep, A, ido FROM jelenlet WHERE ido > ? AND A != ''", (now - JELENLET_SEC,))
+        return [{"gep": r[0], "A": r[1], "mp": int(now - r[2])} for r in cursor.fetchall()]
+    except Exception:
+        return []
+
 
 # Alkalmazas inditasakor lefut:
 init_munkalap_db()
@@ -183,14 +206,14 @@ def run_background_sync():
                     cursor.execute(f"""
                         UPDATE termekek
                         SET A=?, B=?, C=?, D=?, E=?, F=?, G=?, H=?, I=?, J=?, K=?, L=?, M=?, N=?, O=?, P=?,
-                            verzio={NEXT_VERZIO}
+                            utolso_gep='Google tablazat', utolso_ido=?, verzio={NEXT_VERZIO}
                         WHERE rowid=?
-                    """, (*vals, existing[0]))
+                    """, (*vals, _now_s(), existing[0]))
                 else:
                     cursor.execute(f"""
-                        INSERT INTO termekek (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, szin, verzio)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FEHER', {NEXT_VERZIO})
-                    """, vals)
+                        INSERT INTO termekek (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, szin, utolso_gep, utolso_ido, verzio)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FEHER', 'Google tablazat', ?, {NEXT_VERZIO})
+                    """, (*vals, _now_s()))
                 changed += 1
 
             conn.commit()
@@ -262,18 +285,19 @@ def update_item():
             data.get('O', ''), data.get('P', '')
         )
 
+        gep = safe_str(data.get('gep', '')) or (request.remote_addr or "")
         if existing:
             cursor.execute(f"""
                 UPDATE termekek
                 SET A=?, B=?, C=?, D=?, E=?, F=?, G=?, H=?, I=?, J=?, K=?, L=?, M=?, N=?, O=?, P=?,
-                    verzio={NEXT_VERZIO}
+                    utolso_gep=?, utolso_ido=?, verzio={NEXT_VERZIO}
                 WHERE rowid=?
-            """, (*vals, existing["rowid"]))
+            """, (*vals, gep, _now_s(), existing["rowid"]))
         else:
             cursor.execute(f"""
-                INSERT INTO termekek (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, szin, verzio)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FEHER', {NEXT_VERZIO})
-            """, vals)
+                INSERT INTO termekek (A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, szin, utolso_gep, utolso_ido, verzio)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FEHER', ?, ?, {NEXT_VERZIO})
+            """, (*vals, gep, _now_s()))
 
         conn.commit()
         conn.close()
@@ -300,8 +324,8 @@ def update_cell():
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        query = f"UPDATE termekek SET {col} = ?, verzio = {NEXT_VERZIO} WHERE A = ? OR B = ?"
-        cursor.execute(query, (val, code, code))
+        query = f"UPDATE termekek SET {col} = ?, utolso_gep = ?, utolso_ido = ?, verzio = {NEXT_VERZIO} WHERE A = ? OR B = ?"
+        cursor.execute(query, (val, safe_str(data.get('gep', '')) or (request.remote_addr or ""), _now_s(), code, code))
 
         conn.commit()
         conn.close()
@@ -372,18 +396,21 @@ def get_updates():
         current = cursor.fetchone()[0]
 
         # Elso lekeres, vagy a VPS adatbazisat visszaallitottak (a verzio visszaugrott)
+        jelenlet = _jelenlet(cursor)
         if since is None or since > current:
             conn.close()
-            return jsonify({"status": "ok", "verzio": current, "items": []}), 200
+            return jsonify({"status": "ok", "verzio": current, "items": [], "jelenlet": jelenlet}), 200
 
         cursor.execute("""
-            SELECT A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, szin, verzio
+            SELECT A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, szin, verzio, utolso_gep, utolso_ido
             FROM termekek WHERE verzio > ? ORDER BY verzio LIMIT ?
         """, (since, MAX_UPDATES_PER_POLL))
         changed = []
         for row in cursor.fetchall():
             item = {k: row[k] for k in "ABCDEFGHIJKLMNOP"}
             item["szin"] = row["szin"]
+            item["_gep"] = row["utolso_gep"] or ""
+            item["_ido"] = row["utolso_ido"] or ""
             changed.append((row["verzio"], item))
         cursor.execute("""
             SELECT kod, verzio FROM torolt_tetelek WHERE verzio > ? ORDER BY verzio LIMIT ?
@@ -398,7 +425,7 @@ def get_updates():
         # folyamatban levo (meg nem commitolt) iras sem vesz el.
         new_verzio = merged[-1][0] if merged else since
 
-        return jsonify({"status": "ok", "verzio": new_verzio, "items": items}), 200
+        return jsonify({"status": "ok", "verzio": new_verzio, "items": items, "jelenlet": jelenlet}), 200
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -407,6 +434,25 @@ def get_updates():
 # ==========================================
 # UJ: SZERVER ADATBAZIS FUL (asztali program) - CSAK OLVAS
 # ==========================================
+@app.route('/presence', methods=['POST'])
+def presence():
+    """Excel Live: ez a gep most ezen a soron dolgozik ({"gep", "A"}; A="" = mar nem). A tobbi gep a
+    /get_updates valaszaban (jelenlet) latja, nehany masodpercig."""
+    try:
+        data = request.json or {}
+        gep = safe_str(data.get('gep', ''))
+        if not gep:
+            return jsonify({"status": "error", "message": "Hianyzo gep"}), 400
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("INSERT OR REPLACE INTO jelenlet (gep, A, ido) VALUES (?, ?, ?)",
+                     (gep, clean_code(data.get('A', '')), time.time()))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route('/items', methods=['GET'])
 def list_items():
     """A VPS adatbazis OSSZES termeke (a 'Szerver adatbazis' fulnek). Csak olvas, semmit nem modosit.

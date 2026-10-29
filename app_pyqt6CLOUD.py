@@ -746,6 +746,11 @@ _INVISIBLE_CHARS.update({ord(ch): "-" for ch in "\u2010\u2011\u2012\u2013\u2014\
 _INVISIBLE_CHARS[0xa0] = " "
 
 
+# Ennek a gépnek a neve: a VPS-re mentett soroknál ez látszik a többi gépen ("ki vitte fel")
+GEP_NEV = socket.gethostname() or "gep"
+REMOTE_MARK_SEC = 2 * 3600   # ennyi ideig jelöli az Excel Live a másik gépen felvitt / módosított sorokat
+
+
 def norm_pallet(v):
     """Egységes hely: nagybetű, egy szóköz, "KISRAKTÁR80" -> "KISRAKTÁR 80"."""
     v = re.sub(r"\s+", " ", str(v or "").upper()).strip()
@@ -770,7 +775,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.16-pda6"
+APP_VERSION = "v2026.10.29-gep1"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -1262,6 +1267,7 @@ def _send_outbox_to_vps(op, row_data):
             res = vps_request("POST", f"{VPS_URL}/update_color", json={"A": code_a, "szin": row_data.get("szin", "")}, timeout=3)
         else:
             body = {k: v for k, v in row_data.items() if not k.startswith("_")}
+            body["gep"] = GEP_NEV
             if row_data.get("_force"):
                 body["force"] = True
             res = vps_request("POST", f"{VPS_URL}/update_item", json=body, timeout=3)
@@ -1292,6 +1298,7 @@ def _send_outbox_to_vps(op, row_data):
             try:
                 body = {k: v for k, v in row_data.items() if not k.startswith("_")}
                 body["force"] = True
+                body["gep"] = GEP_NEV
                 res2 = vps_request("POST", f"{VPS_URL}/update_item", json=body, timeout=3)
             except Exception:
                 return "retry"
@@ -2923,6 +2930,7 @@ class ClearWorker(QThread):
 
 class AutoVPSPollWorker(QThread):
     data_updated_signal = pyqtSignal(list)
+    presence_signal = pyqtSignal(list)     # ki melyik Excel Live soron dolgozik most (másik gépek)
 
     def run(self):
         # Az utoljára feldolgozott VPS-verzió a beallitasok.json-ban marad meg, így
@@ -2940,6 +2948,10 @@ class AutoVPSPollWorker(QThread):
                 data = res.json()
                 if data.get("items"):
                     self.data_updated_signal.emit(data["items"])
+                jel = sorted((j.get("gep", ""), j.get("A", "")) for j in (data.get("jelenlet") or []) if j.get("gep") != GEP_NEV)
+                if jel != getattr(self, "_last_jel", None):
+                    self._last_jel = jel
+                    self.presence_signal.emit([{"gep": g, "A": a} for g, a in jel])
                 new_verzio = data.get("verzio")
                 if new_verzio is not None and new_verzio != last_verzio:
                     last_verzio = new_verzio
@@ -3767,6 +3779,11 @@ class RaktarApp(QMainWindow):
         # --- 1 MP-ES AUTOMATIKUS LÁTHATATLAN VPS SZINKRON INDÍTÁSA ---
         self.auto_vps_worker = AutoVPSPollWorker()
         self.auto_vps_worker.data_updated_signal.connect(self.on_auto_vps_data_received)
+        self.auto_vps_worker.presence_signal.connect(self.on_remote_presence)
+        self._remote_edits = {}      # R18 -> {"gep", "ido", "t", "nev"}: másik gépen felvitt / módosított sorok
+        self._remote_presence = []   # [{"gep", "A"}]: másik gépen most szerkesztett sorok
+        self._remote_printed = set()
+        self._remote_marked_rows = set()
         self.auto_vps_worker.start()
 
         # --- ZEBRA PDA ELADÁSOK ÁTVÉTELE (20 mp-enként) ---
@@ -4056,6 +4073,11 @@ class RaktarApp(QMainWindow):
                 code = (safe_str(item.get("A")) or safe_str(item.get("B"))).upper()
                 if not code or code in pending_codes:
                     continue
+                gep = safe_str(item.get("_gep"))
+                if gep and gep != GEP_NEV and not item.get("_torolt") and any(safe_str(item.get(c)) for c in "CDE"):
+                    self._remote_edits[code] = {"gep": gep, "ido": safe_str(item.get("_ido"))[11:16] or datetime.datetime.now().strftime("%H:%M"),
+                                                "t": time.time(), "nev": " ".join(safe_str(item.get(c)) for c in "CD" if safe_str(item.get(c)))}
+                    self._remote_printed.discard(code)
 
                 # A másik gépen törölt (eladott) tétel
                 if item.get("_torolt"):
@@ -4108,6 +4130,9 @@ class RaktarApp(QMainWindow):
                 self.append_process_log(f"🔄 VPS élő szinkron: {changed} tétel frissítve a másik gépről")
                 # CSANAK A KÁRTYÁKAT FRISSÍTJÜK (Nem építjük újra a teljes táblázatot -> ZÉRÓ FAGYÁS!)
                 self.update_cards_only()
+                # Az Excel Live-on is azonnal látszódjon, mit vittek fel a másik gépen (csak a változott sorok íródnak át)
+                self.silent_update_excel_table()
+            self.render_remote_marks()
 
         except Exception as e:
             print(f"Auto VPS frissítési hiba: {e}")
@@ -4543,6 +4568,7 @@ class RaktarApp(QMainWindow):
             self._rebuild_excel_code_index()
         else:
             self._excel_rows_cache = new_cache
+        self.render_remote_marks()
 
     def update_print_selected_label(self, row, *_):
         if not hasattr(self, "btn_print_selected"):
@@ -4550,6 +4576,109 @@ class RaktarApp(QMainWindow):
         item = self.excel_table.item(row, 0) if row >= 0 else None
         code = item.text().strip() if item and item.text().strip() else "–"
         self.btn_print_selected.setText(f"🖨️ Nyomtatás: {code} (Ctrl+P)")
+
+    # ---- 🆕 Másik gépen felvitt sorok / ki min dolgozik most ----
+    def on_remote_presence(self, lst):
+        self._remote_presence = lst or []
+        self.render_remote_marks()
+
+    def clear_remote_marks(self):
+        self._remote_edits.clear()
+        self._remote_printed.clear()
+        self.render_remote_marks()
+
+    def _presence_tick(self):
+        if not hasattr(self, "excel_table"):
+            return
+        code = ""
+        t = self.excel_table
+        if self._tab_is_current("tab_excel_live") and self.isActiveWindow():
+            editing = t.state() == QAbstractItemView.State.EditingState
+            if editing or time.time() - self._last_excel_edit < 20:
+                r = t.currentRow()
+                it = t.item(r, 0) if r >= 0 else None
+                code = it.text().strip().upper() if it else ""
+        now = time.time()
+        if code == self._presence_sent and (not code or now - self._presence_ts < 10):
+            return
+        self._presence_sent, self._presence_ts = code, now
+
+        def _send():
+            try:
+                vps_request("POST", f"{VPS_URL}/presence", json={"gep": GEP_NEV, "A": code}, timeout=3)
+            except Exception:
+                pass
+        threading.Thread(target=_send, daemon=True).start()
+
+    def _remote_jump(self, code, print_it=False):
+        row = self._excel_code_index.get(code.upper(), -1) if hasattr(self, "_excel_code_index") else -1
+        if row < 0:
+            self.trigger_toast(f"⚠️ {code} még nincs az Excel Live-on – pár másodperc és megjelenik")
+            return
+        item = self.excel_table.item(row, 2) or self.excel_table.item(row, 0)
+        if item:
+            self.excel_table.setCurrentItem(item)
+            self.excel_table.scrollToItem(item, self.excel_table.ScrollHint.PositionAtCenter)
+        if print_it:
+            self._remote_printed.add(code.upper())
+            self.print_row_label(row)
+            self.render_remote_marks()
+
+    def render_remote_marks(self):
+        """Excel Live: a sor számánál 🆕 GÉP (másik gépen felvitt) / ✍️ GÉP (most tölti), fölötte kattintható lista."""
+        if not hasattr(self, "remote_bar"):
+            return
+        now = time.time()
+        for k in [k for k, v in self._remote_edits.items() if now - v["t"] > REMOTE_MARK_SEC]:
+            self._remote_edits.pop(k, None)
+        idx = getattr(self, "_excel_code_index", {})
+        marks = {}
+        for code, v in self._remote_edits.items():
+            r = idx.get(code, -1)
+            if r >= 0:
+                marks[r] = (f"🆕 {r + 1} · {v['gep']} {v['ido']}", "#00e676")
+        working = {}
+        for p in self._remote_presence:
+            working.setdefault(p["A"], []).append(p["gep"])
+            r = idx.get(p["A"], -1)
+            if r >= 0:
+                marks[r] = (f"✍️ {r + 1} · {', '.join(working[p['A']])} most tölti", "#ffb74d")
+        t = self.excel_table
+        for r in self._remote_marked_rows - set(marks):
+            if r < t.rowCount():
+                t.takeVerticalHeaderItem(r)
+        for r, (txt, col) in marks.items():
+            h = QTableWidgetItem(txt)
+            h.setForeground(QColor(col))
+            h.setToolTip("Másik gépen most szerkesztik" if txt.startswith("✍️") else "Másik gépen felvitt / módosított sor")
+            t.setVerticalHeaderItem(r, h)
+        self._remote_marked_rows = set(marks)
+
+        # kattintható lista
+        while self.remote_chips.count():
+            w = self.remote_chips.takeAt(0).widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+        n = 0
+        for code, geps in working.items():
+            b = QPushButton(f"✍️ {', '.join(geps)} most tölti: {code}")
+            b.setStyleSheet("background-color: #ffb74d; color: black; font-weight: bold; padding: 4px 10px; border-radius: 4px;")
+            b.setToolTip("Kattints: odaugrik a sorra")
+            b.clicked.connect(lambda _=False, c=code: self._remote_jump(c))
+            self.remote_chips.addWidget(b)
+            n += 1
+        for code, v in sorted(self._remote_edits.items(), key=lambda kv: -kv[1]["t"])[:12]:
+            done = code in self._remote_printed
+            b = QPushButton(f"{'✔' if done else '🖨️'} {code} {v['nev'][:28]} · {v['gep']} {v['ido']}")
+            b.setStyleSheet("background-color: %s; color: black; font-weight: bold; padding: 4px 10px; border-radius: 4px;"
+                            % ("#9e9e9e" if done else "#00e676"))
+            b.setToolTip("Kattints: odaugrik a sorra és nyomtatja a címkét (előtte megkérdezi a darabszámot)")
+            b.clicked.connect(lambda _=False, c=code: self._remote_jump(c, print_it=True))
+            self.remote_chips.addWidget(b)
+            n += 1
+        self.remote_chips.addStretch()
+        self.remote_bar.setVisible(n > 0)
 
     def print_current_excel_row(self):
         """Ctrl+P: a kijelölt (éppen szerkesztett) sor címkéjét nyomtatja."""
@@ -9105,7 +9234,38 @@ class RaktarApp(QMainWindow):
 
         self._excel_row_sources = {}   # sor -> ["⌨️ Billentyűzet - L: '573' felülírva → '574'", ...] (Napló)
         self.excel_table.itemChanged.connect(self.on_excel_cell_changed)
-        layout.addWidget(self.excel_table)
+
+        # 🆕 Másik gépen felvitt / most kitöltés alatt lévő sorok (kattintásra odaugrik / nyomtat)
+        self.remote_bar = QWidget()
+        rb = QHBoxLayout(self.remote_bar)
+        rb.setContentsMargins(0, 2, 0, 2)
+        lbl = QLabel("🆕 Másik gépen:")
+        lbl.setStyleSheet("color: #00e676; font-weight: bold; font-size: 14px;")
+        rb.addWidget(lbl)
+        self.remote_chips_box = QWidget()
+        self.remote_chips = QHBoxLayout(self.remote_chips_box)
+        self.remote_chips.setContentsMargins(0, 0, 0, 0)
+        chips_scroll = QScrollArea()
+        chips_scroll.setWidget(self.remote_chips_box)
+        chips_scroll.setWidgetResizable(True)
+        chips_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        chips_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        chips_scroll.setFixedHeight(46)
+        rb.addWidget(chips_scroll, stretch=1)
+        btn_clear_remote = QPushButton("✖ Lista ürítése")
+        btn_clear_remote.setToolTip("A másik gépen felvitt sorok listáját és jelölését eltünteti (az adat nem változik)")
+        btn_clear_remote.clicked.connect(self.clear_remote_marks)
+        rb.addWidget(btn_clear_remote)
+        self.remote_bar.setFixedHeight(54)
+        self.remote_bar.hide()
+        layout.addWidget(self.remote_bar)
+        layout.addWidget(self.excel_table, stretch=1)
+
+        # Jelenlét: a többi gép látja, melyik soron dolgozunk éppen (2 mp-enként, csak ha tényleg szerkesztünk)
+        self._presence_sent, self._presence_ts, self._last_excel_edit = "", 0.0, 0.0
+        self.presence_timer = QTimer()
+        self.presence_timer.timeout.connect(self._presence_tick)
+        self.presence_timer.start(2000)
 
         # 3. Módosított sorok mentési időzítője (4 mp)
         self.pending_dirty_rows = set()
@@ -9213,6 +9373,8 @@ class RaktarApp(QMainWindow):
         self.excel_table.setUpdatesEnabled(True)
         self._excel_rows_cache = list(rows)
         self._rebuild_excel_code_index()
+        self._remote_marked_rows = set()
+        self.render_remote_marks()
 
         # -----------------------------------------------------------------
         # FIX OSZLOPSZÉLESSÉGEK (Villámgyors töltés, nincs fagyás sok ezres sornál!)
@@ -9314,6 +9476,7 @@ class RaktarApp(QMainWindow):
 
             # Napló: honnan / hogyan változott (a régi érték az utoljára betöltött adatbázis-állapotból)
             if not self.excel_table.signalsBlocked():
+                self._last_excel_edit = time.time()
                 cache = getattr(self, "_excel_rows_cache", [])
                 cached = cache[row] if row < len(cache) else None
                 old = cached[col] if cached and col < len(cached) else getattr(item, '_previous_text', "")

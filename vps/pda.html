@@ -472,7 +472,7 @@
 </div>
 
 <script>
-var VERSION = "2026.10.16-k";
+var VERSION = "2026.10.29-a";
 var PLATFORMS = {
   EBAY_KIVULI: { cim: "eBay-en k\u00edv\u00fcli elad\u00e1s", gomb: "eBay-en k\u00edv\u00fcli", cls: "b-kivul" },
   EBAY:        { cim: "eBay elad\u00e1s",           gomb: "eBay",           cls: "b-ebay" },
@@ -1501,6 +1501,8 @@ var inv = null;
 try { inv = JSON.parse(localStorage.getItem("leltar") || "null"); } catch (e) { inv = null; }
 function saveInv() { try { if (inv) localStorage.setItem("leltar", JSON.stringify(inv)); else localStorage.removeItem("leltar"); } catch (e) {} }
 function normPallet(p) { return normLoc(fixScan(p)); }
+// M\u00e9g semmi nincs sz\u00e1molva (pl. a v\u00e9letlen\u00fcl ind\u00edtott lelt\u00e1r egyetlen csippant\u00e1s\u00e1t visszavont\u00e1k)
+function invEmpty() { return !inv || (!Object.keys(inv.found).length && !inv.foreign.length && !inv.unknown.length); }
 // Term\u00e9kkel ind\u00edtott lelt\u00e1r: a csippantott term\u00e9k raklapja (L) alapj\u00e1n indul, \u00e9s ez a darab m\u00e1r be is sz\u00e1m\u00edt
 function invStartFromProduct(code) {
   code = fixScan(code).toUpperCase();
@@ -1525,7 +1527,7 @@ function startInventory(p, force, after) {
   p = normPallet(p);
   invPalletInput.value = p;
   if (!p) return;
-  if (inv && !force) {
+  if (inv && !force && !invEmpty()) {
     confirmBox("\ud83d\udccb \u00daj lelt\u00e1r?", "Van egy lez\u00e1ratlan lelt\u00e1r: <b>" + esc(inv.raklap) + "</b> (" + Object.keys(inv.found).length + "/" + inv.items.length +
                " csippantva).<br><br>Elveted, \u00e9s \u00faj lelt\u00e1rt kezdesz a(z) <b>" + esc(p) + "</b> raklapra?", "\ud83d\uddd1\ufe0f Igen, elvetem \u00e9s \u00fajat kezdek", "red")
       .then(function (ok) { if (ok) startInventory(p, true, after); else focusScan(); });
@@ -1590,6 +1592,14 @@ function undoInvScan() {
     inv.foreign = inv.foreign.filter(function (x) { return x.A !== h.code; });
   }
   if (h.type === "unknown") inv.unknown = inv.unknown.filter(function (c) { return c !== h.code; });
+  if (invEmpty() && !inv.hist.length) {
+    // Az egyetlen csippant\u00e1s is visszavonva: a lelt\u00e1r nem indul el, a k\u00f6vetkez\u0151 csippant\u00e1s \u00fajat kezd
+    var rk = inv.raklap;
+    inv = null; saveInv(); invPalletInput.value = ""; renderInventory();
+    msgTo("inv-status", "\u21a9\ufe0f Visszavonva: " + esc(h.code) + " \u2013 a(z) " + esc(rk) + " raklap lelt\u00e1ra nem indult el. Csippants \u00faj term\u00e9ket vagy raklapot.", "info");
+    focusScan();
+    return;
+  }
   saveInv(); renderInventory();
   msgTo("inv-status", "\u21a9\ufe0f Visszavonva: " + esc(h.code) + " csippant\u00e1sa", "info");
   focusScan();
