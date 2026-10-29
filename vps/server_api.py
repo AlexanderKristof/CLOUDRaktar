@@ -1604,6 +1604,36 @@ def _stock(f):
     return int(m.group(0)) if m else 1
 
 
+# A leltar helye lehet raklap ("573", "KISRAKTAR 80") vagy pater / polc ("PATER 1 / POLC 12" vagy egesz pater: "PATER 1").
+# I = Pater, K = Oszlop (polc). A pateres / polcos termekeknek altalaban nincs raklapjuk (L).
+_PATER_RE = re.compile(r"^P[A\u00c1]TER\s*([^/]+?)\s*(?:/?\s*(?:POLC|OSZLOP)\s*(.+))?$")
+
+
+def _norm_ik(v):
+    """Pater / polc ertek osszehasonlitashoz: nagybetu, egy szokoz (az "A3" marad "A3")."""
+    return re.sub(r"\s+", " ", safe_str(v).upper()).strip()
+
+
+def _hely(v):
+    """-> (kanonikus nev, "raklap"|"pater", pater, polc)"""
+    m = _PATER_RE.match(_norm_ik(v))
+    if m:
+        pater, polc = m.group(1).strip(), (m.group(2) or "").strip()
+        return ("PATER " + pater + (" / POLC " + polc if polc else ""), "pater", pater, polc)
+    return (_norm_pallet(v), "raklap", "", "")
+
+
+def _on_hely(it, h):
+    kan, fajta, pater, polc = h
+    if fajta == "pater":
+        return _norm_ik(it["I"]) == pater and (not polc or _norm_ik(it["K"]) == polc)
+    return kan in _pallet_tokens(it["L"]) or _norm_pallet(it["L"]) == kan
+
+
+def _hely_txt(it):
+    return " / ".join(x for x in (it["L"], ("Pater " + it["I"]) if it["I"] else "", ("Polc " + it["K"]) if it["K"] else "") if x) or "-"
+
+
 def _leltar_rows(cur, raklap, szamlalt):
     """A leltar sorai: a rendszer szerint a raklapon levo termekek (elotte) es a megszamolt darabok (utana),
     eltereskor javasolt modositassal. tipus: egyezik / elter / hiany / tobb / idegen / ismeretlen."""
@@ -1611,15 +1641,18 @@ def _leltar_rows(cur, raklap, szamlalt):
     items = [_pda_row(r) for r in cur.fetchall()]
     by_code = {clean_code(it["A"]): it for it in items if it["A"]}
     rows, seen = [], set()
+    h = _hely(raklap)
+    raklap, pateres = h[0], h[1] == "pater"
     for it in sorted(items, key=lambda x: x["A"]):
-        toks = _pallet_tokens(it["L"])
-        if raklap not in toks and _norm_pallet(it["L"]) != raklap:
+        if not _on_hely(it, h):
             continue
+        toks = _pallet_tokens(it["L"])
         code = clean_code(it["A"])
         if code in seen:
             continue
         seen.add(code)
-        db, n, tobb = _stock(it["F"]), int(szamlalt.get(code, 0) or 0), len(toks) > 1
+        db, n = _stock(it["F"]), int(szamlalt.get(code, 0) or 0)
+        tobb = len(toks) > 1 and not pateres
         r = {"A": it["A"], "nev": " ".join(x for x in (it["C"], it["D"]) if x), "E": it["E"], "L": it["L"],
              "elotte": db, "utana": n, "tobb": tobb, "muvelet": None, "javasolt": False}
         if n == db:
@@ -1647,13 +1680,20 @@ def _leltar_rows(cur, raklap, szamlalt):
                          "tipus": "ismeretlen", "muvelet": None, "javasolt": False})
             continue
         toks = _pallet_tokens(it["L"])
-        if len(toks) > 1:
+        if pateres:
+            m = {"I": h[2]}
+            if h[3]:
+                m["K"] = h[3]
+            if n != _stock(it["F"]):
+                m["F"] = str(n)
+            toks = []
+        elif len(toks) > 1:
             m = {"L": " ".join(toks + [raklap])}
         else:
             m = {"L": raklap}
             if n != _stock(it["F"]):
                 m["F"] = str(n)
-        rows.append({"A": it["A"], "nev": " ".join(x for x in (it["C"], it["D"]) if x), "E": it["E"], "L": it["L"],
+        rows.append({"A": it["A"], "nev": " ".join(x for x in (it["C"], it["D"]) if x), "E": it["E"], "L": _hely_txt(it),
                      "elotte": 0, "rendszer_db": _stock(it["F"]), "utana": n, "tobb": len(toks) > 1,
                      "tipus": "idegen", "muvelet": m, "javasolt": True})
     return rows
@@ -1718,7 +1758,7 @@ def leltar_osszegzes():
     """Elonezet (nem ment): {"raklap", "szamlalt": {"R18-1": 3, ...}} -> sorok elotte / utana + javasolt modositas."""
     try:
         data = request.json or {}
-        raklap = _norm_pallet(data.get('raklap', ''))
+        raklap = _hely(data.get('raklap', ''))[0]
         if not raklap:
             return pda_err(400, "S-400", "Nincs megadva raklap")
         conn = sqlite3.connect(DB_PATH)
@@ -1737,7 +1777,7 @@ def leltar_save():
     A felulir listaban levo termekek modositasait az asztali program hajtja vegre (Google Sheets-be is)."""
     try:
         data = request.json or {}
-        raklap = _norm_pallet(data.get('raklap', ''))
+        raklap = _hely(data.get('raklap', ''))[0]
         if not raklap:
             return pda_err(400, "S-400", "Nincs megadva raklap")
         eszkoz = safe_str(data.get('eszkoz', '')) or "PDA"
@@ -1861,9 +1901,10 @@ def leltar_visszavon(lid):
 # ---------- Leltar: egy raklap termekei ----------
 @app.route('/pda/pallet', methods=['GET'])
 def pda_pallet():
-    """A rendszer szerint az adott raklapon (L) levo termekek."""
+    """A rendszer szerint az adott raklapon (L) / pateren-polcon (I / K: ?l=PATER 1 / POLC 12) levo termekek."""
     try:
-        pallet = _norm_pallet(request.args.get('l', ''))
+        h = _hely(request.args.get('l', ''))
+        pallet = h[0]
         if not pallet:
             return pda_err(400, "S-400", "Nincs megadva raklap")
         conn = sqlite3.connect(DB_PATH)
@@ -1873,9 +1914,34 @@ def pda_pallet():
                     "WHERE C IS NOT NULL AND TRIM(C) != ''")
         items = [_pda_row(r) for r in cur.fetchall()]
         conn.close()
-        items = [it for it in items if pallet in _pallet_tokens(it["L"]) or _norm_pallet(it["L"]) == pallet]
+        items = [it for it in items if _on_hely(it, h)]
         items.sort(key=lambda it: it["A"])
-        return jsonify({"status": "ok", "raklap": pallet, "items": items}), 200
+        return jsonify({"status": "ok", "raklap": pallet, "fajta": h[1], "items": items}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/pda/paterek', methods=['GET'])
+def pda_paterek():
+    """A paterek (I) es polcaik (K) a rajtuk levo termekek szamaval - a pater / polc leltar valasztojahoz."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT I, K FROM termekek WHERE C IS NOT NULL AND TRIM(C) != '' AND I IS NOT NULL AND TRIM(I) != ''")
+        pat = {}
+        for r in cur.fetchall():
+            p, k = _norm_ik(r["I"]), _norm_ik(r["K"])
+            d = pat.setdefault(p, {})
+            d[k] = d.get(k, 0) + 1
+        conn.close()
+
+        def key(v):
+            return (0, int(v), "") if v.isdigit() else (1, 0, v)
+        out = [{"pater": p, "db": sum(d.values()),
+                "polcok": [{"polc": k, "db": n} for k, n in sorted(d.items(), key=lambda kv: key(kv[0]))]}
+               for p, d in sorted(pat.items(), key=lambda kv: key(kv[0]))]
+        return jsonify({"status": "ok", "paterek": out}), 200
     except Exception as e:
         return pda_err(500, "S-500", str(e))
 
