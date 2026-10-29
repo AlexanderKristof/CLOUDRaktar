@@ -483,6 +483,10 @@ REQUIRED_PACKAGES = [
 
 # Változásnapló (a legújabb legfelül). A VERZIÓK fülön ebből látszik, mi változott.
 VALTOZASNAPLO = [
+    ("v2026.10.29-web3", "2026-10-29", [
+        "Excel Live: a 🖨️ Nyomtatás gomb a táblázat fölé került, mindig látható (keskeny képernyőn sem csúszik ki)",
+        "A „✍️ most tölti” jelzés kikerült",
+    ]),
     ("v2026.10.29-web2", "2026-10-29", [
         "Excel Live javítás: a másik gépen felvitt sor akkor is azonnal megjelenik, ha ezen a gépen éppen azon a soron áll a kijelölés "
         "(eddig üres maradt, és üres címkét nyomtathatott)",
@@ -908,7 +912,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.29-web2"
+APP_VERSION = "v2026.10.29-web3"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -4897,7 +4901,7 @@ class RaktarApp(QMainWindow):
             if r >= 0:
                 marks[r] = (f"🆕 {r + 1} · {v['gep']} {v['ido']}", "#00e676")
         working = {}
-        for p in self._remote_presence:
+        for p in []:            # a „most tölti” jelzés kikapcsolva
             working.setdefault(p["A"], []).append(p["gep"])
             r = idx.get(p["A"], -1)
             if r >= 0:
@@ -4936,8 +4940,11 @@ class RaktarApp(QMainWindow):
             b.clicked.connect(lambda _=False, c=code: self._remote_jump(c, print_it=True))
             self.remote_chips.addWidget(b)
             n += 1
+        if not n:
+            nincs = QLabel("nincs új felvitel")
+            nincs.setStyleSheet("color: #777;")
+            self.remote_chips.addWidget(nincs)
         self.remote_chips.addStretch()
-        self.remote_bar.setVisible(n > 0)
 
     def print_current_excel_row(self):
         """Ctrl+P: a kijelölt (éppen szerkesztett) sor címkéjét nyomtatja."""
@@ -10282,7 +10289,6 @@ class RaktarApp(QMainWindow):
         self.btn_print_selected.setStyleSheet("background-color: #ff9800; color: black; font-weight: bold; font-size: 15px; padding: 5px 14px;")
         self.btn_print_selected.setToolTip("A kijelölt sor címkéjét nyomtatja (ugyanaz, mint a Ctrl+P)")
         self.btn_print_selected.clicked.connect(self.print_current_excel_row)
-        ctrl_layout.addWidget(self.btn_print_selected)
 
         btn_clear_rows = QPushButton("🗑️ Adat törlés (R18 marad)")
         btn_clear_rows.setStyleSheet("background-color: #ff5252; color: white; font-weight: bold; font-size: 14px; padding: 5px 12px;")
@@ -10427,6 +10433,10 @@ class RaktarApp(QMainWindow):
         self.remote_bar = QWidget()
         rb = QHBoxLayout(self.remote_bar)
         rb.setContentsMargins(0, 2, 0, 2)
+        # 🖨️ a kijelölt sor nyomtatása – itt mindig látszik (a felső gombsor keskeny képernyőn oldalra kicsúszhat)
+        self.btn_print_selected.setMinimumWidth(300)
+        rb.addWidget(self.btn_print_selected)
+        rb.addSpacing(12)
         lbl = QLabel("🆕 Másik gépen:")
         lbl.setStyleSheet("color: #00e676; font-weight: bold; font-size: 14px;")
         rb.addWidget(lbl)
@@ -10445,7 +10455,6 @@ class RaktarApp(QMainWindow):
         btn_clear_remote.clicked.connect(self.clear_remote_marks)
         rb.addWidget(btn_clear_remote)
         self.remote_bar.setFixedHeight(54)
-        self.remote_bar.hide()
         layout.addWidget(self.remote_bar)
         layout.addWidget(self.excel_table, stretch=1)
 
@@ -10453,7 +10462,7 @@ class RaktarApp(QMainWindow):
         self._presence_sent, self._presence_ts, self._last_excel_edit = "", 0.0, 0.0
         self.presence_timer = QTimer()
         self.presence_timer.timeout.connect(self._presence_tick)
-        self.presence_timer.start(2000)
+        # (a „most tölti” jelzés kikapcsolva – a felhasználó kérésére)
 
         # 3. Módosított sorok mentési időzítője (4 mp)
         self.pending_dirty_rows = set()
