@@ -553,7 +553,7 @@ def send_heartbeat():
     except Exception:
         user = ""
     res = vps_request("POST", f"{VPS_URL}/clients/heartbeat", timeout=8,
-                      json={"tipus": "gep", "nev": socket.gethostname() or "asztali gep", "verzio": APP_VERSION,
+                      json={"tipus": "gep", "nev": GEP_NEV, "verzio": APP_VERSION,
                             "felhasznalo": user})
     if res.status_code == 200:
         return res.json().get("legfrissebb") or {}
@@ -578,7 +578,7 @@ def push_naplo_to_server(max_rows=300):
     sorok = [{k: safe_str(r[k]) if k != "id" else r["id"] for k in ("id", "idopont", "r18_kod", "esemeny", "reszletek", "forras")}
              for r in rows]
     res = vps_request("POST", f"{VPS_URL}/pda/history/push", timeout=15,
-                      json={"gep": socket.gethostname() or "asztali gep", "sorok": sorok})
+                      json={"gep": GEP_NEV, "sorok": sorok})
     if res.status_code == 200:
         save_config_value("naplo_push_id", rows[-1]["id"])
         return len(rows)
@@ -618,7 +618,7 @@ def serve_pda_photo_requests():
             uzenet = f"{hibak} kép nem volt olvasható"
         try:
             vps_request("POST", f"{VPS_URL}/pda/photos/upload", timeout=60, files=files or None,
-                        data={"kod": code, "uzenet": uzenet, "gep": socket.gethostname() or "asztali gep"})
+                        data={"kod": code, "uzenet": uzenet, "gep": GEP_NEV})
             done += 1
         except Exception as e:
             print(f"[PDA fotó] Feltöltési hiba ({code}): {e}")
@@ -632,7 +632,7 @@ def report_pda_result(tipus, rid, ok, uzenet, kod=""):
         try:
             vps_request("POST", f"{VPS_URL}/pda/result", timeout=8,
                         json={"tipus": tipus, "id": rid, "ok": bool(ok), "uzenet": uzenet, "kod": kod,
-                              "gep": socket.gethostname() or "asztali gep"})
+                              "gep": GEP_NEV})
         except Exception as e:
             print(f"[PDA] Eredmény visszaküldési hiba ({rid}): {e}")
     threading.Thread(target=_send, daemon=True).start()
@@ -820,8 +820,18 @@ _INVISIBLE_CHARS.update({ord(ch): "-" for ch in "\u2010\u2011\u2012\u2013\u2014\
 _INVISIBLE_CHARS[0xa0] = " "
 
 
-# Ennek a gépnek a neve: a VPS-re mentett soroknál ez látszik a többi gépen ("ki vitte fel")
-GEP_NEV = socket.gethostname() or "gep"
+def _gep_nev():
+    """Ennek a gépnek a neve: a többi gépen ("ki vitte fel"), a PDA-n, a Gépek listában és a naplóban ez látszik.
+    Ha két gépnek ugyanaz a Windows-neve, akkor is különbözzön: első indításkor a gépnév mögé egy rövid,
+    véletlen azonosító kerül (beallitasok.json: gep_nev). A VERZIÓK fülön átírható (pl. "Raktár gép")."""
+    n = load_config_value("gep_nev")
+    if not n:
+        n = f"{socket.gethostname() or 'gep'}-{os.urandom(2).hex()}"
+        save_config_value("gep_nev", n)
+    return str(n)
+
+
+GEP_NEV = _gep_nev()
 REMOTE_MARK_SEC = 2 * 3600   # ennyi ideig jelöli az Excel Live a másik gépen felvitt / módosított sorokat
 
 
@@ -884,7 +894,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.29-elad1"
+APP_VERSION = "v2026.10.29-elad2"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -6287,7 +6297,7 @@ class RaktarApp(QMainWindow):
                 if res.status_code == 200:
                     sales = res.json().get("sales", [])
                     waiting = len(sales)
-                    gep = socket.gethostname() or "asztali gep"
+                    gep = GEP_NEV
                     for sale in sales:
                         r = vps_request("POST", f"{VPS_URL}/pda/sales/claim",
                                         json={"eladas_id": sale.get("eladas_id"), "gep": gep}, timeout=8)
@@ -8040,7 +8050,7 @@ class RaktarApp(QMainWindow):
             q = f"{hely_txt(L['raklap'])} leltárának lezárása felülírás NÉLKÜL?\n(A különbség a leltár kártyáján látszik, később is felülírható.)"
         if QMessageBox.question(self, "Leltár", q) != QMessageBox.StandardButton.Yes:
             return
-        self._lel_job("mentes", "POST", "/leltar", {"raklap": L["raklap"], "szamlalt": L["cnt"], "eszkoz": socket.gethostname() or "Gép",
+        self._lel_job("mentes", "POST", "/leltar", {"raklap": L["raklap"], "szamlalt": L["cnt"], "eszkoz": GEP_NEV,
                                                      "forras": "GEP", "kezdes": L["kezdes"], "felulir": kod})
 
     # ---- Leltár-kártyák ----
@@ -8137,7 +8147,7 @@ class RaktarApp(QMainWindow):
                                 "\n".join(f"{r['A']}: {self._lel_muv(r['muvelet'])}" for cb, r in cbs if cb.isChecked()) +
                                 "\n\nBiztosan felülírod?") != QMessageBox.StandardButton.Yes:
             return
-        self._lel_job("felulir", "POST", f"/leltar/{lid}/felulir", {"felulir": kod, "eszkoz": socket.gethostname() or "Gép"})
+        self._lel_job("felulir", "POST", f"/leltar/{lid}/felulir", {"felulir": kod, "eszkoz": GEP_NEV})
 
     def leltar_undo_card(self, lid):
         l = self._lel_list.get(lid)
@@ -8149,7 +8159,7 @@ class RaktarApp(QMainWindow):
                                 (f"{n} felülírt érték visszaáll a leltár előttire." if n else "Felülírás nem volt, csak a leltár lesz érvénytelen.")
                                 ) != QMessageBox.StandardButton.Yes:
             return
-        self._lel_job("visszavon", "POST", f"/leltar/{lid}/visszavon", {"eszkoz": socket.gethostname() or "Gép"})
+        self._lel_job("visszavon", "POST", f"/leltar/{lid}/visszavon", {"eszkoz": GEP_NEV})
 
     def init_map_tab(self):
         layout = QVBoxLayout(self.tab_map)
@@ -8699,6 +8709,12 @@ class RaktarApp(QMainWindow):
         b.setStyleSheet("font-size: 15px; font-weight: bold; padding: 8px 16px;")
         b.clicked.connect(lambda: (self.ver_refresh_local(), self.check_app_update(manual=True)))
         row.addWidget(b)
+        b = QPushButton("✏️ Gép nevének átírása")
+        b.setStyleSheet("font-size: 15px; padding: 8px 16px;")
+        b.setToolTip("Ezen a néven látszik ez a gép a többi gépen, a PDA-n és a Gépek listában.\n"
+                     "Ha két gépnek ugyanaz a Windows-neve, itt adj nekik különböző nevet (pl. Raktár gép, Iroda gép).")
+        b.clicked.connect(self.ver_rename_machine)
+        row.addWidget(b)
         self.btn_do_update = QPushButton("⬆️ FRISSÍTÉS MOST")
         self.btn_do_update.setStyleSheet("QPushButton { background-color: #00e676; color: black; font-size: 20px; font-weight: bold; padding: 10px 30px; border-radius: 6px; }"
                                           "QPushButton:disabled { background-color: #555; color: #999; }")
@@ -9051,6 +9067,20 @@ class RaktarApp(QMainWindow):
                                    ("" if srv.get("drive_beallitva", True) else
                                     "<br><span style='color:#ffb74d'>A Google Drive mentés még nincs beállítva – lásd vps/TELEPITES_verziok.md (3. pont).</span>"))
 
+    def ver_rename_machine(self):
+        global GEP_NEV
+        uj, ok = QInputDialog.getText(self, "Gép neve", "Ennek a gépnek a neve (a többi gépen, a PDA-n és a Gépek listában ez látszik).\n"
+                                      "Mindegyik gépnek MÁS nevet adj, pl. Raktár gép / Iroda gép:", text=GEP_NEV)
+        uj = (uj or "").strip()
+        if not ok or not uj or uj == GEP_NEV:
+            return
+        if QMessageBox.question(self, "Gép neve", f"Átírod a gép nevét?\n\n{GEP_NEV}  →  {uj}") != QMessageBox.StandardButton.Yes:
+            return
+        GEP_NEV = uj
+        save_config_value("gep_nev", uj)
+        self.ver_render()
+        self.trigger_toast(f"✅ A gép neve mostantól: {uj}")
+
     def ver_copy_pip(self):
         if self._pip_cmd:
             QApplication.clipboard().setText(self._pip_cmd)
@@ -9196,10 +9226,10 @@ class RaktarApp(QMainWindow):
         rows = data.get("kliensek") or []
         self.adm_cli_info.setText(
             f"Legfrissebb verziók → 🖥️ gépi program: {leg.get('gep') or '-'}  ·  📱 PDA felület: {leg.get('pda') or '-'}  ·  "
-            f"📱 PDA app: {leg.get('pda_app') or '-'}     |  Ez a gép: {socket.gethostname()} – {APP_VERSION}")
+            f"📱 PDA app: {leg.get('pda_app') or '-'}     |  Ez a gép: {GEP_NEV} – {APP_VERSION}")
         t = self.adm_cli
         t.setRowCount(0)
-        hostname = socket.gethostname()
+        hostname = GEP_NEV
         for r in rows:
             i = t.rowCount(); t.insertRow(i)
             tipus = "🖥️ Gép" if r.get("tipus") == "gep" else "📱 PDA"
