@@ -483,6 +483,10 @@ REQUIRED_PACKAGES = [
 
 # Változásnapló (a legújabb legfelül). A VERZIÓK fülön ebből látszik, mi változott.
 VALTOZASNAPLO = [
+    ("v2026.10.29-elad1", "2026-10-29", [
+        "Eladottak fül: a régi és a más gépen rögzített eladások is látszanak – a program behozza őket a Google táblázat "
+        "Eladas_Ebay / Eladas_EbayKivul / Eladas_Webshop lapjairól (fül megnyitásakor, 5 percenként és gombbal)",
+    ]),
     ("v2026.10.29-upd1", "2026-10-29", [
         "Új 🆕 VERZIÓK fül: automatikus frissítés a VPS-ről, egy gombnyomással",
         "Ha új verzió van, villogó piros sáv a program tetején + felugró ablak",
@@ -880,7 +884,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.29-upd1"
+APP_VERSION = "v2026.10.29-elad1"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -1287,6 +1291,104 @@ def sync_sales_to_sheets():
         return done
     finally:
         _sales_sync_lock.release()
+
+def _norm_hdr(h):
+    return re.sub(r"[^a-z0-9áéíóöőúüű]", "", str(h or "").lower())
+
+
+def pull_sales_from_sheets():
+    """A 3 eladási munkalapon lévő eladásokat behozza a helyi adatbázisba (az Eladottak fül ebből dolgozik):
+    a régi (a program előtti) és a MÁS gépen rögzített eladások is látszanak így.
+    - új eladás a lapon -> felvesszük (fent van, nem kell feltölteni; a készlet NEM változik)
+    - meglévő, itt nem szerkesztett eladás -> a lap szerinti adatra frissítjük (pl. másik gépen javították)
+    - itt szerkesztett, még fel nem töltött eladást NEM írunk felül
+    - ha egy eladás egyik lapon sincs már (másik gépen törölték), itt is eltűnik
+    - ha a lapon egy sornak nincs Eladás ID-je (régi, kézzel beírt sor), kap egyet (az A oszlopba írjuk)
+    Visszaad: {"uj", "frissitett", "torolt", "id_potolva", "hibak"}"""
+    out = {"uj": 0, "frissitett": 0, "torolt": 0, "id_potolva": 0, "hibak": []}
+    if not SHEETS_ENABLED:
+        out["hibak"].append("A Google Sheets kapcsolat ki van kapcsolva ezen a gépen")
+        return out
+    if not _sales_sync_lock.acquire(timeout=60):
+        out["hibak"].append("Éppen fut egy eladás-feltöltés – próbáld újra pár másodperc múlva")
+        return out
+    try:
+        cache = {}
+        by_hdr = {_norm_hdr(h): k for k, h in SALES_COLUMNS}
+        lapon = {}          # eladas_id -> (platform, {mező: érték})
+        minden_lap_ok = True
+        for pf in SALES_SHEETS:
+            try:
+                ws = get_sales_worksheet(pf, cache)
+                values = ws.get_all_values()
+            except Exception as e:
+                minden_lap_ok = False
+                out["hibak"].append(f"{SALES_SHEETS[pf]['worksheet']}: {e}")
+                continue
+            if not values:
+                continue
+            hdr = values[0]
+            colmap = {}
+            for i, h in enumerate(hdr):
+                k = by_hdr.get(_norm_hdr(h))
+                if k and k not in colmap.values():
+                    colmap[i] = k
+            if "eladas_id" not in colmap.values():          # nincs felismerhető fejléc -> a szokásos sorrend
+                colmap = {i: k for i, (k, _) in enumerate(SALES_COLUMNS)}
+            id_col = [i for i, k in colmap.items() if k == "eladas_id"][0]
+            potlas = []
+            for ri, row in enumerate(values[1:], start=2):
+                rec = {k: (row[i].strip() if i < len(row) else "") for i, k in colmap.items()}
+                if not any(rec.get(k) for k in ("A", "C", "D", "E", "datum")):
+                    continue                                   # üres sor
+                eid = rec.get("eladas_id", "")
+                if not eid:
+                    base = "|".join(rec.get(k, "") for k in ("datum", "A", "C", "D", "E", "vevo", "ar"))
+                    eid = f"R{hashlib.sha1((pf + base).encode('utf-8')).hexdigest()[:12].upper()}-{rec.get('A') or 'X'}"
+                    rec["eladas_id"] = eid
+                    potlas.append((ri, eid))
+                rec["platform"] = pf
+                lapon.setdefault(eid, (pf, rec))
+            if potlas:
+                try:
+                    col = chr(ord("A") + id_col)
+                    ws.batch_update([{"range": f"{col}{ri}", "values": [[eid]]} for ri, eid in potlas], value_input_option="RAW")
+                    out["id_potolva"] += len(potlas)
+                except Exception as e:
+                    out["hibak"].append(f"{SALES_SHEETS[pf]['worksheet']}: az Eladás ID-k beírása nem sikerült ({e})")
+
+        mezok = [k for k, _ in SALES_COLUMNS if k != "eladas_id"]
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM eladasok")
+        helyi = {r["eladas_id"]: dict(r) for r in cur.fetchall()}
+        for eid, (pf, rec) in lapon.items():
+            h = helyi.get(eid)
+            if h is None:
+                cur.execute(f"INSERT INTO eladasok (eladas_id, {', '.join(mezok)}, sheets_synced, synced_platform) "
+                            f"VALUES (?, {', '.join('?' * len(mezok))}, 1, ?)",
+                            (eid, *[rec.get(k, "") for k in mezok], pf))
+                out["uj"] += 1
+            elif h["sheets_synced"] and not h["torolve"]:
+                if any(safe_str(h.get(k)) != rec.get(k, "") for k in mezok) or h.get("synced_platform") != pf:
+                    cur.execute(f"UPDATE eladasok SET {', '.join(k + '=?' for k in mezok)}, synced_platform=? "
+                                f"WHERE eladas_id=? AND sheets_synced=1",
+                                (*[rec.get(k, "") for k in mezok], pf, eid))
+                    out["frissitett"] += cur.rowcount
+        if minden_lap_ok:
+            for eid, h in helyi.items():
+                if eid not in lapon and h["sheets_synced"] and not h["torolve"] and h.get("synced_platform"):
+                    cur.execute("DELETE FROM eladasok WHERE eladas_id=? AND sheets_synced=1", (eid,))
+                    out["torolt"] += cur.rowcount
+        conn.commit()
+        conn.close()
+        return out
+    except Exception as e:
+        out["hibak"].append(str(e))
+        return out
+    finally:
+        _sales_sync_lock.release()
+
 
 def sync_sales_async():
     threading.Thread(target=sync_sales_to_sheets, daemon=True).start()
@@ -3787,6 +3889,7 @@ class RaktarApp(QMainWindow):
     version_info_signal = pyqtSignal(object)   # a szerver szerinti legfrissebb verziók -> fő szál
     clients_signal = pyqtSignal(object)        # gépek és verziók listája (Admin fül) -> fő szál
     leltar_signal = pyqtSignal(str, object)    # leltár szerver-válaszok (fajta, adat) -> fő szál
+    sold_pull_signal = pyqtSignal(object, bool)   # eladások behozása a táblázatból: (eredmény, kézi?) -> fő szál
     upd_signal = pyqtSignal(str, object)       # VERZIÓK: frissítés-ellenőrzés / letöltés / pip (fajta, adat) -> fő szál
 
     def __init__(self):
@@ -6581,6 +6684,14 @@ class RaktarApp(QMainWindow):
         btn_refresh.clicked.connect(self.refresh_sold_table)
         bar.addWidget(btn_refresh)
 
+        btn_pull = QPushButton("⬇️ Behozás a táblázatból")
+        btn_pull.setStyleSheet("background-color: #ffb74d; color: black; font-weight: bold;")
+        btn_pull.setToolTip("A Google táblázat Eladas_Ebay / Eladas_EbayKivul / Eladas_Webshop lapjairól behozza\n"
+                            "a régi és a más gépen rögzített eladásokat (magától is megteszi 5 percenként).\n"
+                            "A készlet ettől NEM változik.")
+        btn_pull.clicked.connect(lambda: self.pull_sales(manual=True))
+        bar.addWidget(btn_pull)
+
         btn_sync = QPushButton("☁️ Szinkron most")
         btn_sync.setStyleSheet("background-color: #00e676; color: black; font-weight: bold;")
         btn_sync.clicked.connect(lambda: (sync_sales_async(), self.trigger_toast("☁️ Eladások feltöltése elindítva...")))
@@ -6602,6 +6713,16 @@ class RaktarApp(QMainWindow):
         self.sold_status_lbl = QLabel("")
         self.sold_status_lbl.setStyleSheet("color: #ffb74d; font-weight: bold;")
         layout.addWidget(self.sold_status_lbl)
+        self.lbl_sold_pull = QLabel("⬇️ Eladások a táblázatból: még nem volt behozás")
+        self.lbl_sold_pull.setStyleSheet("color: #aaa; padding: 2px 4px;")
+        layout.addWidget(self.lbl_sold_pull)
+        self._sold_pull_busy = False
+        self._sold_pull_last = 0.0
+        self.sold_pull_signal.connect(self.on_sales_pulled)
+        self.sold_pull_timer = QTimer(self)
+        self.sold_pull_timer.timeout.connect(self.pull_sales)
+        self.sold_pull_timer.start(5 * 60 * 1000)
+        QTimer.singleShot(25000, self.pull_sales)
 
         # Zebra PDA: az utolsó átvételi próbálkozás eredménye (hiba esetén pirosan)
         self.lbl_pda_status = QLabel(self._pda_last_status or "📱 PDA eladások: még nem volt ellenőrzés")
@@ -6648,6 +6769,41 @@ class RaktarApp(QMainWindow):
         QApplication.instance().installEventFilter(self)
 
         self.refresh_sold_table()
+
+    def pull_sales(self, manual=False):
+        """A táblázat eladási lapjairól behozza a régi / más gépen rögzített eladásokat (háttérszálon)."""
+        if self._sold_pull_busy:
+            return
+        self._sold_pull_busy = True
+        self._sold_pull_last = time.time()
+        if manual:
+            self.lbl_sold_pull.setText("⏳ Eladások behozása a táblázatból...")
+
+        def job():
+            try:
+                res = pull_sales_from_sheets()
+            except Exception as e:
+                res = {"uj": 0, "frissitett": 0, "torolt": 0, "id_potolva": 0, "hibak": [str(e)]}
+            self.sold_pull_signal.emit(res, manual)
+        threading.Thread(target=job, daemon=True).start()
+
+    def on_sales_pulled(self, res, manual):
+        self._sold_pull_busy = False
+        valt = res["uj"] + res["frissitett"] + res["torolt"]
+        txt = (f"⬇️ Eladások a táblázatból ({datetime.datetime.now().strftime('%H:%M')}): "
+               f"{res['uj']} új, {res['frissitett']} frissítve, {res['torolt']} törölve"
+               + (f", {res['id_potolva']} régi sor Eladás ID-t kapott" if res["id_potolva"] else ""))
+        if res["hibak"]:
+            txt += "  |  ❌ " + "; ".join(res["hibak"])[:300]
+        self.lbl_sold_pull.setText(txt)
+        self.lbl_sold_pull.setStyleSheet("color: %s; padding: 2px 4px;" % ("#ff5252" if res["hibak"] else "#aaa"))
+        if valt:
+            self.append_process_log(txt)
+        if valt or manual:
+            self.refresh_sold_table()
+        if manual:
+            self.trigger_toast(("❌ " + res["hibak"][0]) if res["hibak"] and not valt else
+                               f"⬇️ {res['uj']} új eladás behozva, {res['frissitett']} frissítve", 3500)
 
     def refresh_sold_table(self, *_):
         if not hasattr(self, "sold_table"):
@@ -9595,6 +9751,8 @@ class RaktarApp(QMainWindow):
                 self.silent_update_excel_table()
             elif w is getattr(self, "tab_sold", None):
                 self.refresh_sold_table()
+                if time.time() - getattr(self, "_sold_pull_last", 0) > 60:
+                    self.pull_sales()
             elif w is getattr(self, "tab_server", None) and not getattr(self, "_server_items", None):
                 self.load_server_items()
             elif w is getattr(self, "tab_map", None):
