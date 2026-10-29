@@ -127,8 +127,8 @@
   .diff { color:var(--warn); font-weight:bold; }
   .mapwrap { overflow:auto; max-height:calc(100vh - 230px); margin-top:6px; border:1px solid var(--line); border-radius:6px; background:#fff; -webkit-overflow-scrolling:touch; }
   .maptbl { border-collapse:collapse; text-align:center; background:#fff; }
-  .maptbl td { border:1px solid #888; padding:2px 3px; min-width:24px; height:18px; color:#000; font-weight:bold; white-space:nowrap; }
-  .maptbl td.hit { background:#ff0055 !important; color:#fff !important; outline:3px solid #ffeb3b; animation:mp 1s infinite; }
+  .maptbl td { border:1px solid #888; padding:.12em .2em; min-width:1.6em; height:1.4em; color:#000; font-weight:bold; white-space:nowrap; line-height:1.1; }
+  .maptbl td.hit { background:#ff0055 !important; color:#fff !important; outline:3px solid #ffeb3b; animation:mp 1s infinite; position:relative; z-index:1; }
   .maptbl td.cur { outline:4px solid #00e5ff; }
   @keyframes mp { 50% { background:#ffeb3b; color:#000; } }
   .mapbar { display:flex; gap:4px; margin-top:6px; }
@@ -198,6 +198,7 @@
     <div class="mapbar">
       <button type="button" onclick="mapZoom(-1)">&#x2796;</button>
       <button type="button" onclick="mapZoom(1)">&#x2795;</button>
+      <button type="button" onclick="mapFit()">&#x2922; Eg&#xE9;sz</button>
       <button type="button" id="map-next" onclick="mapNext()">&#x23ED; K&#xF6;vetkez&#x151;</button>
       <button type="button" onclick="mapLoad(true)">&#x1F504;</button>
     </div>
@@ -472,7 +473,7 @@
 </div>
 
 <script>
-var VERSION = "2026.10.29-a";
+var VERSION = "2026.10.29-b";
 var PLATFORMS = {
   EBAY_KIVULI: { cim: "eBay-en k\u00edv\u00fcli elad\u00e1s", gomb: "eBay-en k\u00edv\u00fcli", cls: "b-kivul" },
   EBAY:        { cim: "eBay elad\u00e1s",           gomb: "eBay",           cls: "b-ebay" },
@@ -625,6 +626,7 @@ function showTab(t) {
   if (t === "inv") renderInventory();
   if (t === "xls" && !xlsLoaded) xlsInit();
   if (t === "map" && !mapRows) mapLoad(false);
+  if (t === "map" && mapRows) setTimeout(function () { mapFit(true); mapGo(false); }, 0);
   focusScan();
 }
 function activeInput() {
@@ -1106,8 +1108,9 @@ function photoBig(src) { $("photobig-img").src = src; $("photobig").classList.ad
 // ================= RAKT\u00c1RT\u00c9RK\u00c9P =================
 // Ugyanaz a t\u00e9rk\u00e9p-t\u00e1bl\u00e1zat, mint a g\u00e9pi programban. Csak a sz\u00e1m raklapok vannak rajta \u2013
 // a "KISRAKT\u00c1R 74", a P\u00e1ter (I) \u00e9s az Oszlop (K) nincs a t\u00e9rk\u00e9pen.
-var mapInput = $("map-in"), mapRows = null, mapHits = [], mapIdx = 0, mapFont = 11;
-try { mapFont = parseInt(localStorage.getItem("mapfont"), 10) || 11; } catch (e) {}
+// Alapb\u00f3l a TELJES t\u00e9rk\u00e9p kif\u00e9r a k\u00e9perny\u0151 sz\u00e9less\u00e9g\u00e9be (a jobb oldali N\u2013Q t\u00e1j\u00e9koz\u00f3d\u00e1si pontok is l\u00e1tszanak);
+// \u2795 / \u2796 nagy\u00edt / kicsiny\u00edt, a \u2922 Eg\u00e9sz vissza\u00e1ll\u00edtja.
+var mapInput = $("map-in"), mapRows = null, mapHits = [], mapIdx = 0, mapFont = 8;
 var mapPending = "";
 function mapNorm(v) { var t = String(v == null ? "" : v).replace(/\s+/g, " ").trim().toUpperCase(); return /^\d+\.0$/.test(t) ? t.slice(0, -2) : t; }
 function mapTokens(L) { return palletTokens(L).filter(function (t) { return /^\d+[A-Z]?$/.test(t); }); }
@@ -1132,13 +1135,34 @@ function mapRender() {
     h += "</tr>";
   });
   $("map-wrap").innerHTML = h + "</table>";
+  mapFit(true);
   mapMark();
 }
-function mapZoom(d) {
-  mapFont = Math.max(6, Math.min(22, mapFont + d * 2));
-  try { localStorage.setItem("mapfont", mapFont); } catch (e) {}
+function mapSetFont(f) {
+  mapFont = Math.max(4, Math.min(24, Math.round(f * 10) / 10));
   var t = document.querySelector(".maptbl"); if (t) t.style.fontSize = mapFont + "px";
-  mapGo(false);
+}
+// A bet\u0171m\u00e9retet \u00fagy \u00e1ll\u00edtja, hogy a t\u00e1bl\u00e1zat pont kif\u00e9rjen a sz\u00e9less\u00e9gbe
+function mapFit(quiet) {
+  var t = document.querySelector(".maptbl"), w = $("map-wrap");
+  if (!t || !w.clientWidth) return;
+  var target = w.clientWidth - 2;
+  mapSetFont(10);
+  for (var i = 0; i < 4; i++) {
+    if (!t.offsetWidth) break;
+    mapSetFont(mapFont * target / t.offsetWidth);
+  }
+  while (t.offsetWidth > target && mapFont > 4) mapSetFont(mapFont - 0.3);
+  w.scrollLeft = 0;
+  if (!quiet) mapGo(false);
+}
+function mapZoom(d) {
+  var w = $("map-wrap"), cx = (w.scrollLeft + w.clientWidth / 2) / (w.scrollWidth || 1), cy = (w.scrollTop + w.clientHeight / 2) / (w.scrollHeight || 1);
+  mapSetFont(d > 0 ? mapFont * 1.3 : mapFont / 1.3);
+  if (mapHits.length) { mapGo(false); return; }
+  // nagy\u00edt\u00e1s a l\u00e1tott r\u00e9sz k\u00f6zepe k\u00f6r\u00fcl
+  w.scrollLeft = cx * w.scrollWidth - w.clientWidth / 2;
+  w.scrollTop = cy * w.scrollHeight - w.clientHeight / 2;
 }
 function mapMark() {
   document.querySelectorAll(".maptbl td.hit").forEach(function (td) { td.classList.remove("hit", "cur"); });
