@@ -6,3 +6,6 @@ __pycache__/
 api_token.txt
 vps/api_token.txt
 vps/pda_fotok/
+vps/drive_mentes.json
+vps/kliens/
+regi_verziok/

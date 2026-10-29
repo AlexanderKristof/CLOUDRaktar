@@ -754,6 +754,160 @@ def pda_page():
     return resp
 
 
+# ---------- Gepi program automatikus frissitese (VERZIOK ful) ----------
+# Az uj app_pyqt6CLOUD.py-t ide kell feltolteni (WinSCP):  /opt/raktarapp/kliens/app_pyqt6CLOUD.py
+# Szerver-ujrainditas NEM kell. A gepek inditaskor es 30 percenkent megnezik, es ha ujabb, nagyon feltunoen jelzik.
+KLIENS_APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kliens", "app_pyqt6CLOUD.py")
+# Minden latott verzio masolata ide kerul, es (ha be van allitva) a sajat Google Drive-ra is:
+KLIENS_ARCH = os.path.join(os.path.dirname(KLIENS_APP), "archivum")
+KLIENS_ALLAPOT = os.path.join(os.path.dirname(KLIENS_APP), "drive_mentes_allapot.json")
+# A Google Drive mentes beallitasa (lasd TELEPITES_verziok.md):
+#   {"url": "<Apps Script web app URL>", "titok": "<jelszo>", "mappa_id": "<Drive mappa azonosito (nem kotelezo)>"}
+DRIVE_MENTES_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "drive_mentes.json")
+_arch_lock = threading.Lock()
+
+
+def _arch_state():
+    try:
+        with open(KLIENS_ALLAPOT, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _arch_save_state(st):
+    tmp = KLIENS_ALLAPOT + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(st, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, KLIENS_ALLAPOT)
+
+
+def _arch_add(data, forras):
+    """Egy programverzio archivalasa (ha meg nincs meg). Visszaad: sha256."""
+    import hashlib
+    sha = hashlib.sha256(data).hexdigest()
+    m = re.search(rb'^APP_VERSION\s*=\s*"([^"]+)"', data, re.M)
+    ver = m.group(1).decode("ascii", "ignore") if m else "ismeretlen"
+    with _arch_lock:
+        st = _arch_state()
+        if sha in st:
+            return sha
+        os.makedirs(KLIENS_ARCH, exist_ok=True)
+        nev = re.sub(r"[^A-Za-z0-9._-]", "_", f"app_pyqt6CLOUD_{ver}_{sha[:8]}.py")
+        with open(os.path.join(KLIENS_ARCH, nev), "wb") as f:
+            f.write(data)
+        st[sha] = {"verzio": ver, "fajl": nev, "ido": pda_now().strftime("%Y-%m-%d %H:%M"), "forras": forras,
+                   "drive": "var", "drive_url": "", "hiba": ""}
+        _arch_save_state(st)
+    return sha
+
+
+def _drive_upload_pending():
+    """A meg Drive-ra nem mentett verziok feltoltese a sajat Google Drive-ra (Apps Script web app-on at)."""
+    try:
+        with open(DRIVE_MENTES_CFG, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = None
+    import base64
+    with _arch_lock:
+        st = _arch_state()
+        valt = False
+        for sha, e in st.items():
+            if e.get("drive") == "ok":
+                continue
+            if not cfg or not cfg.get("url"):
+                if e.get("drive") != "nincs beallitva":
+                    e["drive"], e["hiba"], valt = "nincs beallitva", "Nincs drive_mentes.json a szerveren", True
+                continue
+            try:
+                with open(os.path.join(KLIENS_ARCH, e["fajl"]), "rb") as f:
+                    data = f.read()
+                res = requests.post(cfg["url"], json={
+                    "titok": cfg.get("titok", ""), "nev": e["fajl"], "mappa_id": cfg.get("mappa_id", ""),
+                    "leiras": f"Raktarprogram {e['verzio']} - archivalva {e['ido']} ({e.get('forras', '')})",
+                    "tartalom_b64": base64.b64encode(data).decode("ascii")}, timeout=60)
+                js = res.json()
+                if js.get("status") == "ok":
+                    e["drive"], e["drive_url"], e["hiba"] = "ok", js.get("url", ""), ""
+                    e["drive_ido"] = pda_now().strftime("%Y-%m-%d %H:%M")
+                else:
+                    e["drive"], e["hiba"] = "hiba", str(js.get("message", "ismeretlen hiba"))[:300]
+            except Exception as ex:
+                e["drive"], e["hiba"] = "hiba", str(ex)[:300]
+            valt = True
+        if valt:
+            _arch_save_state(st)
+
+
+def _arch_check_async():
+    """A feltoltott (legujabb) program archivalasa + Drive mentes - hatterben, a keres nem var ra."""
+    def job():
+        try:
+            if os.path.isfile(KLIENS_APP):
+                with open(KLIENS_APP, "rb") as f:
+                    _arch_add(f.read(), "VPS-re feltoltve")
+            _drive_upload_pending()
+        except Exception as e:
+            print(f"[VPS] Verzio archivalasi hiba: {e}")
+    threading.Thread(target=job, daemon=True).start()
+
+
+def _arch_list():
+    st = _arch_state()
+    out = [dict(e, sha=sha[:12]) for sha, e in st.items()]
+    out.sort(key=lambda e: e.get("ido", ""), reverse=True)
+    return out[:30]
+
+
+def _kliens_info():
+    import hashlib
+    with open(KLIENS_APP, "rb") as f:
+        data = f.read()
+    m = re.search(rb'^APP_VERSION\s*=\s*"([^"]+)"', data, re.M)
+    return {"verzio": m.group(1).decode("ascii", "ignore") if m else "", "sha256": hashlib.sha256(data).hexdigest(),
+            "meret": len(data),
+            "feltoltve": datetime.datetime.fromtimestamp(os.path.getmtime(KLIENS_APP)).strftime("%Y-%m-%d %H:%M")}
+
+
+@app.route('/app/version', methods=['GET'])
+def kliens_version():
+    """A VPS-re feltoltott legujabb gepi program verzioja (+ sha256 az ellenorzeshez)."""
+    if not os.path.isfile(KLIENS_APP):
+        return pda_err(404, "S-404", "Nincs feltoltve gepi program (/opt/raktarapp/kliens/app_pyqt6CLOUD.py)")
+    try:
+        _arch_check_async()
+        return jsonify({"status": "ok", **_kliens_info(), "archivum": _arch_list(),
+                        "drive_beallitva": os.path.isfile(DRIVE_MENTES_CFG)}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/app/archive', methods=['POST'])
+def kliens_archive():
+    """Egy gep a frissites elott felkuldi a sajat (regi) programjat, hogy az is meglegyen (archivum + Drive).
+    {"tartalom_b64", "gep"}"""
+    try:
+        import base64
+        data = base64.b64decode((request.json or {}).get("tartalom_b64", ""))
+        if not data or b"APP_VERSION" not in data or len(data) > 20 * 1024 * 1024:
+            return pda_err(400, "S-400", "Ez nem a raktarprogram")
+        sha = _arch_add(data, "gep: " + safe_str((request.json or {}).get("gep", "")))
+        _arch_check_async()
+        return jsonify({"status": "ok", "sha": sha[:12]}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/app/download', methods=['GET'])
+def kliens_download():
+    if not os.path.isfile(KLIENS_APP):
+        return pda_err(404, "S-404", "Nincs feltoltve gepi program")
+    resp = send_file(KLIENS_APP, mimetype="text/x-python", as_attachment=True, download_name="app_pyqt6CLOUD.py")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 @app.route('/pda/app.apk', methods=['GET'])
 def pda_apk():
     """A PDA app telepitoje (RaktarPDA.apk ugyanebben a mappaban) - a PDA bongeszojebol letoltheto."""

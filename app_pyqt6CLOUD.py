@@ -465,6 +465,76 @@ def vps_request(method, url, **kwargs):
     return requests.request(method, url, headers=headers, **kwargs)
 
 
+# A program által használt Python csomagok: (import név, pip csomag neve, mire kell, csak Windows-on kell-e).
+# Ha egy új verzióhoz új csomag kell, IDE kell felvenni – a VERZIÓK fül ebből tudja, mit kell telepíteni.
+REQUIRED_PACKAGES = [
+    ("PyQt6", "PyQt6", "a program felülete", False),
+    ("PyQt6.QtWebEngineWidgets", "PyQt6-WebEngine", "beágyazott oldalak (térkép, Sheets)", False),
+    ("requests", "requests", "kapcsolat a VPS szerverrel", False),
+    ("pandas", "pandas", "táblázatok kezelése", False),
+    ("openpyxl", "openpyxl", "Excel fájlok, raktártérkép", False),
+    ("barcode", "python-barcode", "vonalkód a címkén", False),
+    ("qrcode", "qrcode", "QR kód a címkén", False),
+    ("PIL", "Pillow", "képek, címke rajzolása, fotók", False),
+    ("gspread", "gspread", "Google Sheets", False),
+    ("google.oauth2", "google-auth", "Google bejelentkezés (Sheets)", False),
+    ("win32print", "pywin32", "címkenyomtató (Windows)", True),
+]
+
+# Változásnapló (a legújabb legfelül). A VERZIÓK fülön ebből látszik, mi változott.
+VALTOZASNAPLO = [
+    ("v2026.10.29-upd1", "2026-10-29", [
+        "Új 🆕 VERZIÓK fül: automatikus frissítés a VPS-ről, egy gombnyomással",
+        "Ha új verzió van, villogó piros sáv a program tetején + felugró ablak",
+        "Python csomagok ellenőrzése, hiányzó csomag telepítése lépésről lépésre vagy automatikusan",
+        "A régi verzió mentése: a gépen (regi_verziok mappa), a VPS-en és a saját Google Drive-on",
+        "Korábbi verzió visszaállítása egy gombbal",
+    ]),
+    ("v2026.10.29-gep2", "2026-10-29", ["Leltár páter / polc szerint is (I / K oszlop)"]),
+    ("v2026.10.29-gep1", "2026-10-29", ["Excel Live: a másik gépen felvitt sorok azonnal látszanak (ki, mikor), kattintható nyomtatással",
+                                        "Excel Live: látszik, ki melyik soron dolgozik éppen"]),
+    ("v2026.10.16-pda6", "2026-10-16", ["Új 📋 Leltár fül (régi: raklaponként, új: kézi / csippantós leltár, kártyák, visszavonás)"]),
+]
+
+
+def missing_packages(pkgs=None):
+    """A ezen a gépen hiányzó csomagok (ugyanabban a formában, mint a REQUIRED_PACKAGES)."""
+    import importlib.util
+    out = []
+    for imp, pip_name, mire, csak_win in (pkgs if pkgs is not None else REQUIRED_PACKAGES):
+        if csak_win and os.name != "nt":
+            continue
+        try:
+            ok = importlib.util.find_spec(imp) is not None
+        except Exception:
+            ok = False
+        if not ok:
+            out.append((imp, pip_name, mire, csak_win))
+    return out
+
+
+def _parse_module_const(text, name):
+    """Egy másik programverzió szövegéből kiolvas egy egyszerű konstanst (pl. REQUIRED_PACKAGES) – futtatás nélkül."""
+    import ast
+    try:
+        for node in ast.parse(text).body:
+            if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+                return ast.literal_eval(node.value)
+    except Exception:
+        return None
+    return None
+
+
+def python_console_exe():
+    """A pip futtatásához a python.exe (a pythonw.exe nem ír ki semmit)."""
+    exe = sys.executable or "python"
+    if os.path.basename(exe).lower() == "pythonw.exe":
+        cand = os.path.join(os.path.dirname(exe), "python.exe")
+        if os.path.isfile(cand):
+            return cand
+    return exe
+
+
 def _ver_key(v):
     """'v2026.10.16-pda2' -> összehasonlítható kulcs (a számokat számként kezeli)."""
     return [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", str(v or ""))]
@@ -810,7 +880,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.29-gep2"
+APP_VERSION = "v2026.10.29-upd1"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -3717,6 +3787,7 @@ class RaktarApp(QMainWindow):
     version_info_signal = pyqtSignal(object)   # a szerver szerinti legfrissebb verziók -> fő szál
     clients_signal = pyqtSignal(object)        # gépek és verziók listája (Admin fül) -> fő szál
     leltar_signal = pyqtSignal(str, object)    # leltár szerver-válaszok (fajta, adat) -> fő szál
+    upd_signal = pyqtSignal(str, object)       # VERZIÓK: frissítés-ellenőrzés / letöltés / pip (fajta, adat) -> fő szál
 
     def __init__(self):
         super().__init__()
@@ -3842,6 +3913,16 @@ class RaktarApp(QMainWindow):
 
         main_layout.addLayout(header_layout)
 
+        # ⬆️ ÚJ VERZIÓ – nagy, villogó sáv (kattintásra a VERZIÓK fülre visz)
+        self.update_banner = QPushButton("")
+        self.update_banner.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_banner.clicked.connect(lambda: self.tabs.setCurrentWidget(self.tab_versions))
+        self.update_banner.hide()
+        main_layout.addWidget(self.update_banner)
+        self._banner_blink = False
+        self.banner_timer = QTimer(self)
+        self.banner_timer.timeout.connect(self._blink_banner)
+
         # FÜLEK LÉTREHOZÁSA ÉS SORRENDJE (Excel Live Munkalap a legelső!)
         self.tabs = QTabWidget()
         # A fülek tartalma ne szabja az ablak legkisebb méretét a képernyőnél nagyobbra
@@ -3869,6 +3950,7 @@ class RaktarApp(QMainWindow):
         self.tab_log = QWidget()
         self.tab_process_log = QWidget()
         self.tab_admin = QWidget()
+        self.tab_versions = QWidget()
 
         # Fülek hozzáadása a kívánt sorrendben
         # FŐ FÜLEK (mindig látszanak): Excel Live, Gyorskereső, PDA / Eladás, Eladottak
@@ -3876,6 +3958,7 @@ class RaktarApp(QMainWindow):
         self.tabs.addTab(self.tab_pda, "📱 PDA / Eladás")
         self.tabs.addTab(self.tab_sold, "💰 Eladottak")
         self.tabs.addTab(self.tab_leltar, "📋 Leltár")
+        self.tabs.addTab(self.tab_versions, "🆕 VERZIÓK")
         # TOVÁBBI FÜLEK (a "☰ További fülek" menüből nyílnak)
         self.tabs.addTab(self.tab_add, "📝 Új Termék Felvitele")
         self.tabs.addTab(self.tab_local_db, "💾 Helyi Adatbázis (Élő)")
@@ -3894,6 +3977,7 @@ class RaktarApp(QMainWindow):
         self.init_pda_tab()
         self.init_sold_tab()
         self.init_leltar_tab()
+        self.init_versions_tab()
         self.init_server_tab()
         self.init_excel_tab()
         self.init_single_tab()
@@ -8422,11 +8506,504 @@ class RaktarApp(QMainWindow):
     def on_version_info(self, leg):
         """A szerver szerinti legfrissebb gépi verzió; ha ez a gép régebbi, a fejlécben figyelmeztet."""
         latest = str((leg or {}).get("gep") or "")
-        if latest and _ver_key(latest) > _ver_key(APP_VERSION):
+        if getattr(self, "_upd", None):
+            self.lbl_version_warn.hide()       # a nagy villogó sáv már jelzi
+        elif latest and _ver_key(latest) > _ver_key(APP_VERSION):
             self.lbl_version_warn.setText(f"⚠️ Van frissebb program: {latest} (ezen a gépen: {APP_VERSION})")
             self.lbl_version_warn.show()
         else:
             self.lbl_version_warn.hide()
+
+    # ==========================================================
+    # 🆕 VERZIÓK – automatikus frissítés a VPS-ről, Python csomagok, régi verziók
+    # ==========================================================
+    def init_versions_tab(self):
+        outer = QVBoxLayout(self.tab_versions)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        scroll.setWidget(box)
+        outer.addWidget(scroll)
+
+        self.ver_status = QLabel("⏳ Ellenőrzés...")
+        self.ver_status.setWordWrap(True)
+        self.ver_status.setTextFormat(Qt.TextFormat.RichText)
+        self.ver_status.setStyleSheet("font-size: 20px; font-weight: bold; padding: 14px; border-radius: 8px; background: #333;")
+        lay.addWidget(self.ver_status)
+
+        self.ver_info = QLabel("")
+        self.ver_info.setTextFormat(Qt.TextFormat.RichText)
+        self.ver_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.ver_info.setStyleSheet("font-size: 14px; padding: 6px;")
+        lay.addWidget(self.ver_info)
+
+        row = QHBoxLayout()
+        b = QPushButton("🔄 Ellenőrzés most")
+        b.setStyleSheet("font-size: 15px; font-weight: bold; padding: 8px 16px;")
+        b.clicked.connect(lambda: (self.ver_refresh_local(), self.check_app_update(manual=True)))
+        row.addWidget(b)
+        self.btn_do_update = QPushButton("⬆️ FRISSÍTÉS MOST")
+        self.btn_do_update.setStyleSheet("QPushButton { background-color: #00e676; color: black; font-size: 20px; font-weight: bold; padding: 10px 30px; border-radius: 6px; }"
+                                          "QPushButton:disabled { background-color: #555; color: #999; }")
+        self.btn_do_update.clicked.connect(self.do_app_update)
+        self.btn_do_update.setEnabled(False)
+        row.addWidget(self.btn_do_update)
+        row.addStretch()
+        lay.addLayout(row)
+
+        # Python csomagok
+        g = QGroupBox("🐍 Python csomagok (ami a programhoz kell)")
+        gl = QVBoxLayout(g)
+        self.ver_pkgs = self._admin_table(["Csomag (pip)", "Mire kell", "Ezen a gépen"], [200, 330, 160])
+        self.ver_pkgs.setMinimumHeight(260)
+        gl.addWidget(self.ver_pkgs)
+        self.ver_pip_help = QLabel("")
+        self.ver_pip_help.setWordWrap(True)
+        self.ver_pip_help.setTextFormat(Qt.TextFormat.RichText)
+        self.ver_pip_help.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.ver_pip_help.setStyleSheet("font-size: 14px; padding: 8px;")
+        gl.addWidget(self.ver_pip_help)
+        prow = QHBoxLayout()
+        self.btn_pip_copy = QPushButton("📋 Parancs másolása")
+        self.btn_pip_copy.clicked.connect(self.ver_copy_pip)
+        prow.addWidget(self.btn_pip_copy)
+        self.btn_pip_install = QPushButton("⚙️ Telepítés most (automatikusan)")
+        self.btn_pip_install.setStyleSheet("background-color: #ff9800; color: black; font-weight: bold; padding: 6px 14px;")
+        self.btn_pip_install.clicked.connect(self.ver_pip_install)
+        prow.addWidget(self.btn_pip_install)
+        prow.addStretch()
+        gl.addLayout(prow)
+        self.ver_pip_out = QPlainTextEdit()
+        self.ver_pip_out.setReadOnly(True)
+        self.ver_pip_out.setMaximumHeight(170)
+        self.ver_pip_out.setPlaceholderText("Itt látszik az automatikus telepítés kimenete.")
+        gl.addWidget(self.ver_pip_out)
+        lay.addWidget(g)
+
+        g2 = QGroupBox("📝 Mi változott")
+        g2l = QVBoxLayout(g2)
+        self.ver_changes = QLabel("")
+        self.ver_changes.setWordWrap(True)
+        self.ver_changes.setTextFormat(Qt.TextFormat.RichText)
+        self.ver_changes.setStyleSheet("font-size: 14px; padding: 6px;")
+        g2l.addWidget(self.ver_changes)
+        lay.addWidget(g2)
+
+        g3 = QGroupBox("🖥️ Melyik gépen melyik verzió fut")
+        g3l = QVBoxLayout(g3)
+        self.ver_cli = self._admin_table(["Típus", "Név", "Program verzió", "PDA app", "Állapot", "Utoljára jelentkezett",
+                                          "Felhasználó", "IP"], [80, 200, 230, 90, 110, 150, 110])
+        self.ver_cli.setMinimumHeight(200)
+        g3l.addWidget(self.ver_cli)
+        lay.addWidget(g3)
+
+        g4 = QGroupBox("💾 Régi verziók (mentések)")
+        g4l = QVBoxLayout(g4)
+        self.ver_drive = QLabel("")
+        self.ver_drive.setWordWrap(True)
+        self.ver_drive.setTextFormat(Qt.TextFormat.RichText)
+        self.ver_drive.setOpenExternalLinks(True)
+        g4l.addWidget(self.ver_drive)
+        g4l.addWidget(QLabel("Ezen a gépen (regi_verziok mappa) – kattints egy sorra, majd a Visszaállítás gombra:"))
+        self.ver_backups = QListWidget()
+        self.ver_backups.setMaximumHeight(150)
+        g4l.addWidget(self.ver_backups)
+        b = QPushButton("↩️ A kijelölt régi verzió visszaállítása")
+        b.clicked.connect(self.ver_restore_backup)
+        g4l.addWidget(b)
+        lay.addWidget(g4)
+
+        g5 = QGroupBox("ℹ️ Új verzió kiadása (rendszergazdának)")
+        g5l = QVBoxLayout(g5)
+        h = QLabel("1. Az új <b>app_pyqt6CLOUD.py</b>-t WinSCP-vel töltsd fel a VPS-en ide: <b>/opt/raktarapp/kliens/</b> (felülírás).<br>"
+                   "2. Kész – szerver-újraindítás nem kell. Minden gép legkésőbb 30 percen belül villogó piros sávval jelzi.<br>"
+                   "3. Ha az új verzióhoz új Python csomag kell, a programban a <b>REQUIRED_PACKAGES</b> listába kell felvenni – "
+                   "a gépek ebből tudják, mit kell telepíteni.<br>"
+                   "Részletes leírás (Google Drive mentés beállítása is): vps/TELEPITES_verziok.md")
+        h.setWordWrap(True)
+        h.setTextFormat(Qt.TextFormat.RichText)
+        g5l.addWidget(h)
+        lay.addWidget(g5)
+        lay.addStretch()
+
+        self._upd = None              # {"info", "data", "text", "missing", "changes", "compile_err"}
+        self._upd_check_busy = False
+        self._pip_cmd = ""
+        self.upd_signal.connect(self.on_upd_signal)
+        self.upd_timer = QTimer(self)
+        self.upd_timer.timeout.connect(self.check_app_update)
+        self.upd_timer.start(30 * 60 * 1000)
+        QTimer.singleShot(12000, self.check_app_update)
+        self.ver_refresh_local()
+
+    # ---- villogó sáv ----
+    def _blink_banner(self):
+        self._banner_blink = not self._banner_blink
+        bg, fg = ("#d50000", "#ffffff") if self._banner_blink else ("#ffea00", "#000000")
+        self.update_banner.setStyleSheet(f"background-color: {bg}; color: {fg}; font-size: 22px; font-weight: bold; "
+                                         f"padding: 12px; border: 3px solid #ffffff; border-radius: 8px;")
+
+    def _show_update_banner(self, text):
+        self.update_banner.setText(text)
+        if not self.update_banner.isVisible():
+            self.update_banner.show()
+            self._blink_banner()
+            self.banner_timer.start(700)
+        idx = self.tabs.indexOf(self.tab_versions)
+        self.tabs.setTabText(idx, "🔴 VERZIÓK – ÚJ!")
+        self.tabs.tabBar().setTabTextColor(idx, QColor("#ff1744"))
+        self.lbl_version_warn.hide()
+
+    def _hide_update_banner(self):
+        self.banner_timer.stop()
+        self.update_banner.hide()
+        idx = self.tabs.indexOf(self.tab_versions)
+        self.tabs.setTabText(idx, "🆕 VERZIÓK")
+        self.tabs.tabBar().setTabTextColor(idx, QColor("#ffffff"))
+
+    # ---- ellenőrzés ----
+    def check_app_update(self, manual=False):
+        if self._upd_check_busy:
+            return
+        self._upd_check_busy = True
+        cached = self._upd
+
+        def job():
+            try:
+                res = vps_request("GET", f"{VPS_URL}/app/version", timeout=10)
+                if res.status_code == 404:
+                    self.upd_signal.emit("nincs", {"manual": manual})
+                    return
+                if res.status_code != 200:
+                    raise RuntimeError(f"A szerver hibát adott (HTTP {res.status_code})")
+                info = res.json()
+                uj = str(info.get("verzio") or "")
+                if not uj or _ver_key(uj) <= _ver_key(APP_VERSION):
+                    self.upd_signal.emit("naprakesz", {"manual": manual, "info": info})
+                    return
+                if cached and cached["info"].get("sha256") == info.get("sha256"):
+                    cached["info"] = info
+                    self.upd_signal.emit("uj", dict(cached, manual=manual))
+                    return
+                # az új verziót előre letöltjük és ellenőrizzük (így látszik, mi változott és milyen csomag kell)
+                r2 = vps_request("GET", f"{VPS_URL}/app/download", timeout=90)
+                if r2.status_code != 200:
+                    raise RuntimeError(f"A letöltés nem sikerült (HTTP {r2.status_code})")
+                data = r2.content
+                if hashlib.sha256(data).hexdigest() != info.get("sha256"):
+                    raise RuntimeError("A letöltött fájl sérült (az ellenőrzőkód nem egyezik)")
+                text = data.decode("utf-8")
+                compile_err = ""
+                try:
+                    compile(text, "app_pyqt6CLOUD.py", "exec")
+                except SyntaxError as e:
+                    compile_err = f"szintaktikai hiba a(z) {e.lineno}. sorban"
+                pk = _parse_module_const(text, "REQUIRED_PACKAGES")
+                pk = [tuple(x) for x in pk] if isinstance(pk, list) else REQUIRED_PACKAGES
+                ch = _parse_module_const(text, "VALTOZASNAPLO") or []
+                self.upd_signal.emit("uj", {"manual": manual, "info": info, "data": data, "pkgs": pk,
+                                            "missing": missing_packages(pk), "changes": ch, "compile_err": compile_err})
+            except Exception as e:
+                self.upd_signal.emit("hiba", {"manual": manual, "message": str(e)})
+            finally:
+                self._upd_check_busy = False
+        threading.Thread(target=job, daemon=True).start()
+
+    def on_upd_signal(self, kind, d):
+        manual = (d or {}).get("manual")
+        if kind == "uj":
+            first = not self._upd or self._upd["info"].get("sha256") != d["info"].get("sha256")
+            self._upd = d
+            uj = d["info"].get("verzio")
+            self._show_update_banner(f"⬆️  ÚJ PROGRAMVERZIÓ ÉRHETŐ EL: {uj}   (ezen a gépen: {APP_VERSION})   —   KATTINTS IDE A FRISSÍTÉSHEZ!")
+            self.ver_render()
+            if first and load_config_value("frissites_jelezve") != d["info"].get("sha256"):
+                save_config_value("frissites_jelezve", d["info"].get("sha256"))
+                box = QMessageBox(self)
+                box.setWindowTitle("⬆️ Új programverzió!")
+                box.setIcon(QMessageBox.Icon.Information)
+                box.setText(f"<h2>Új programverzió érhető el: {uj}</h2>Ezen a gépen most: {APP_VERSION}"
+                            + ("<br><br><b style='color:#ff9800'>⚠️ Ehhez új Python csomag is kell – a VERZIÓK fül leírja, hogyan.</b>"
+                               if d.get("missing") else ""))
+                bnez = box.addButton("🆕 Megnézem (VERZIÓK fül)", QMessageBox.ButtonRole.AcceptRole)
+                box.addButton("Később", QMessageBox.ButtonRole.RejectRole)
+                box.exec()
+                if box.clickedButton() is bnez:
+                    self.tabs.setCurrentWidget(self.tab_versions)
+        elif kind == "naprakesz":
+            self._upd = None
+            self._hide_update_banner()
+            self._ver_server_info = d.get("info") or {}
+            self.ver_render()
+            if manual:
+                self.trigger_toast(f"✅ Ez a legfrissebb program ({APP_VERSION})")
+        elif kind == "nincs":
+            self._ver_server_info = {}
+            self.ver_render(extra="ℹ️ A VPS-en még nincs feltöltve program (/opt/raktarapp/kliens/app_pyqt6CLOUD.py).")
+            if manual:
+                self.trigger_toast("ℹ️ A VPS-en még nincs feltöltve program")
+        elif kind == "hiba":
+            self.ver_render(extra=f"❌ Az ellenőrzés nem sikerült: {d.get('message', '')}")
+            if manual:
+                self.trigger_toast(f"❌ Ellenőrzés nem sikerült: {d.get('message', '')}")
+        elif kind == "pip_sor":
+            self.ver_pip_out.appendPlainText(d["sor"])
+        elif kind == "pip_kesz":
+            self.btn_pip_install.setEnabled(True)
+            self.ver_pip_out.appendPlainText("\n✅ KÉSZ – sikerült." if d["ok"] else f"\n❌ NEM SIKERÜLT (kilépési kód: {d['kod']}) – lásd fent, vagy kövesd a kézi lépéseket.")
+            if self._upd:
+                self._upd["missing"] = missing_packages(self._upd.get("pkgs"))
+            self.ver_render()
+        elif kind == "frissitve":
+            self.append_process_log(f"⬆️ Program frissítve: {APP_VERSION} → {d['verzio']} (régi mentve: {d['mentes']})")
+            log_event("-", "PROGRAM FRISSÍTÉS", f"{APP_VERSION} → {d['verzio']} (régi: {d['mentes']})", None, None, "VPS")
+            QMessageBox.information(self, "✅ Frissítés kész", f"Az új program ({d['verzio']}) a helyére került.\n\n"
+                                    f"A program most újraindul.\n\nA régi verzió mentve: {d['mentes']}")
+            self._restart_app()
+        elif kind == "frissites_hiba":
+            self.btn_do_update.setEnabled(True)
+            self.btn_do_update.setText("⬆️ FRISSÍTÉS MOST")
+            QMessageBox.warning(self, "❌ Frissítés nem sikerült", f"{d.get('message', '')}\n\nA jelenlegi program változatlanul fut tovább.")
+
+    # ---- megjelenítés ----
+    def ver_refresh_local(self):
+        self.ver_backups.clear()
+        bdir = os.path.join(BASE_DIR, "regi_verziok")
+        try:
+            files = sorted((f for f in os.listdir(bdir) if f.endswith(".py")),
+                           key=lambda f: os.path.getmtime(os.path.join(bdir, f)), reverse=True)
+        except Exception:
+            files = []
+        for f in files:
+            ts = datetime.datetime.fromtimestamp(os.path.getmtime(os.path.join(bdir, f))).strftime("%Y-%m-%d %H:%M")
+            self.ver_backups.addItem(f"{f}   (mentve: {ts})")
+        if not files:
+            self.ver_backups.addItem("(még nincs – az első frissítéskor ide kerül a régi verzió)")
+        self.ver_render()
+
+    def ver_render(self, extra=""):
+        d = self._upd
+        srv = (d or {}).get("info") or getattr(self, "_ver_server_info", {}) or {}
+        if d:
+            uj = d["info"].get("verzio")
+            if d.get("compile_err"):
+                self.ver_status.setText(f"❌ A VPS-en lévő új verzió ({uj}) HIBÁS ({d['compile_err']}) – NE frissíts, szólj a rendszergazdának.")
+                self.ver_status.setStyleSheet("font-size: 20px; font-weight: bold; padding: 14px; border-radius: 8px; background: #b71c1c; color: white;")
+                self.btn_do_update.setEnabled(False)
+            elif d.get("missing"):
+                self.ver_status.setText(f"⚠️ ÚJ VERZIÓ: {uj} – de előbb {len(d['missing'])} Python csomagot telepíteni kell (lásd lent, lépésről lépésre)!")
+                self.ver_status.setStyleSheet("font-size: 20px; font-weight: bold; padding: 14px; border-radius: 8px; background: #ff9800; color: black;")
+                self.btn_do_update.setEnabled(False)
+            else:
+                self.ver_status.setText(f"⬆️ ÚJ VERZIÓ ÉRHETŐ EL: {uj} – nyomd meg a zöld FRISSÍTÉS MOST gombot!")
+                self.ver_status.setStyleSheet("font-size: 20px; font-weight: bold; padding: 14px; border-radius: 8px; background: #d50000; color: white;")
+                self.btn_do_update.setEnabled(True)
+        else:
+            self.ver_status.setText(extra or f"✅ A legfrissebb verzió fut ezen a gépen ({APP_VERSION}).")
+            self.ver_status.setStyleSheet("font-size: 20px; font-weight: bold; padding: 14px; border-radius: 8px; background: %s; color: %s;"
+                                          % (("#37474f", "white") if extra else ("#1b5e20", "white")))
+            self.btn_do_update.setEnabled(False)
+        self.ver_info.setText(
+            f"🖥️ Ezen a gépen: <b>{APP_VERSION}</b> &nbsp;·&nbsp; gép neve: <b>{GEP_NEV}</b><br>"
+            f"☁️ A VPS-en: <b>{srv.get('verzio') or '–'}</b>" + (f" (feltöltve: {srv.get('feltoltve')})" if srv.get("feltoltve") else "") + "<br>"
+            f"🐍 Python: {sys.version.split()[0]} – {python_console_exe()}<br>"
+            f"📁 A program helye: {os.path.abspath(__file__)}")
+
+        # csomagok: a jelenlegi + (ha van) az új verzió listája
+        pkgs = list(REQUIRED_PACKAGES)
+        if d and d.get("pkgs"):
+            names = {x[1] for x in pkgs}
+            pkgs += [x for x in d["pkgs"] if x[1] not in names]
+        missing = {x[1] for x in missing_packages(pkgs)}
+        uj_nevek = {x[1] for x in (d or {}).get("pkgs", [])} - {x[1] for x in REQUIRED_PACKAGES}
+        t = self.ver_pkgs
+        t.setRowCount(len(pkgs))
+        for i, (imp, pip_name, mire, csak_win) in enumerate(pkgs):
+            if csak_win and os.name != "nt":
+                st, col = "– (csak Windows)", "#888"
+            elif pip_name in missing:
+                st, col = "❌ HIÁNYZIK", "#ff5252"
+            else:
+                st, col = "✅ telepítve", "#00e676"
+            for c, v in enumerate([pip_name + ("  🆕 (új verzióhoz)" if pip_name in uj_nevek else ""), mire, st]):
+                it = QTableWidgetItem(v)
+                if c == 2:
+                    it.setForeground(QColor(col))
+                t.setItem(i, c, it)
+        miss = [p for p in pkgs if p[1] in missing]
+        exe = python_console_exe()
+        self._pip_cmd = f'"{exe}" -m pip install ' + " ".join(p[1] for p in miss) if miss else ""
+        self.btn_pip_copy.setVisible(bool(miss))
+        self.btn_pip_install.setVisible(bool(miss))
+        if miss:
+            self.ver_pip_help.setText(
+                f"<div style='background:#4e342e; padding:10px; border-radius:6px'>"
+                f"<b style='font-size:17px; color:#ffb74d'>⚠️ {len(miss)} csomag hiányzik: {', '.join(p[1] for p in miss)}</b><br><br>"
+                f"<b>A) Automatikusan:</b> nyomd meg lent a narancs <b>⚙️ Telepítés most</b> gombot, és várd meg, amíg kiírja: <b>✅ KÉSZ</b> (1-3 perc).<br><br>"
+                f"<b>B) Kézzel, lépésről lépésre</b> (ha az automatikus nem sikerült):<br>"
+                f"<b>1.</b> Nyomd meg a billentyűzeten a <b>Windows gomb + R</b> billentyűt. Felugrik a „Futtatás” ablak.<br>"
+                f"<b>2.</b> Írd be: <b>cmd</b> és nyomj <b>Enter</b>-t. Megnyílik egy fekete ablak.<br>"
+                f"<b>3.</b> Itt nyomd meg a <b>📋 Parancs másolása</b> gombot, majd a fekete ablakban <b>jobb egérgomb</b> (= beillesztés), és <b>Enter</b>.<br>"
+                f"&nbsp;&nbsp;&nbsp;&nbsp;A parancs: <code style='background:#000; color:#00e676'>{self._pip_cmd}</code><br>"
+                f"<b>4.</b> Várd meg, amíg a végén ezt írja: <b>Successfully installed ...</b> (1-3 perc, közben sok sor fut le – ez normális).<br>"
+                f"<b>5.</b> Ha ezt írja: <i>Access is denied / Permission denied</i> → zárd be a fekete ablakot, Start menü → írd be: <b>cmd</b> → "
+                f"jobb klikk a „Parancssor”-on → <b>Futtatás rendszergazdaként</b>, és ismételd meg a 3. lépést.<br>"
+                f"&nbsp;&nbsp;&nbsp;&nbsp;Ha ezt írja: <i>No module named pip</i> → előbb ezt futtasd: <code style='background:#000; color:#00e676'>\"{exe}\" -m ensurepip</code>, utána a 3. lépést.<br>"
+                f"<b>6.</b> Ha kész, itt nyomd meg az <b>🔄 Ellenőrzés most</b> gombot: a csomag mellett <b>✅ telepítve</b> lesz.<br>"
+                f"<b>7.</b> Utána nyomd meg a zöld <b>⬆️ FRISSÍTÉS MOST</b> gombot.</div>")
+        else:
+            self.ver_pip_help.setText("✅ Minden szükséges Python csomag telepítve van ezen a gépen.")
+
+        # változások
+        ch = (d or {}).get("changes") or VALTOZASNAPLO
+        html = []
+        for ver, datum, pontok in ch:
+            uj_e = _ver_key(ver) > _ver_key(APP_VERSION)
+            szin = "#ff1744" if uj_e else "#29b6f6"
+            jel = (" <b style='color:#ff1744'>← ÚJ, még nincs ezen a gépen</b>" if uj_e else
+                   " <b style='color:#00e676'>← ez fut most</b>" if ver == APP_VERSION else "")
+            html.append(f"<p><b style='color:{szin}; font-size:15px'>{ver}</b> "
+                        f"<span style='color:#999'>({datum})</span>{jel}<br>"
+                        + "<br>".join(f"&nbsp;&nbsp;• {x}" for x in pontok) + "</p>")
+        self.ver_changes.setText("".join(html[:12]))
+
+        # Drive / VPS mentések
+        arch = srv.get("archivum") or []
+        if srv.get("verzio") is None and not arch:
+            self.ver_drive.setText("")
+        else:
+            sor = []
+            for a in arch[:8]:
+                st = {"ok": "✅ Google Drive-on" + (f" (<a href='{a.get('drive_url')}'>megnyitás</a>)" if a.get("drive_url") else ""),
+                      "var": "⏳ Drive-ra mentés folyamatban", "nincs beallitva": "⚪ Drive mentés nincs beállítva",
+                      "hiba": f"❌ Drive hiba: {a.get('hiba', '')}"}.get(a.get("drive"), a.get("drive", ""))
+                sor.append(f"• <b>{a.get('verzio')}</b> ({a.get('ido')}, {a.get('forras', '')}) – {st}")
+            self.ver_drive.setText("☁️ <b>A VPS-en archivált verziók</b> (/opt/raktarapp/kliens/archivum/):<br>" + ("<br>".join(sor) or "–") +
+                                   ("" if srv.get("drive_beallitva", True) else
+                                    "<br><span style='color:#ffb74d'>A Google Drive mentés még nincs beállítva – lásd vps/TELEPITES_verziok.md (3. pont).</span>"))
+
+    def ver_copy_pip(self):
+        if self._pip_cmd:
+            QApplication.clipboard().setText(self._pip_cmd)
+            self.trigger_toast("📋 Parancs kimásolva – a fekete ablakban jobb egérgomb = beillesztés")
+
+    def ver_pip_install(self):
+        if not self._pip_cmd:
+            return
+        pkgs = self._pip_cmd.split(" install ", 1)[1].split()
+        if QMessageBox.question(self, "Csomagok telepítése?", f"Telepítsem ezeket a Python csomagokat?\n\n{', '.join(pkgs)}\n\n"
+                                "Internet kell hozzá, 1-3 percig tarthat. A program közben használható.") != QMessageBox.StandardButton.Yes:
+            return
+        self.btn_pip_install.setEnabled(False)
+        self.ver_pip_out.clear()
+        self.ver_pip_out.appendPlainText(f"> {self._pip_cmd}\n")
+
+        def job():
+            import subprocess
+            try:
+                flags = 0x08000000 if os.name == "nt" else 0   # CREATE_NO_WINDOW
+                pr = subprocess.Popen([python_console_exe(), "-m", "pip", "install", *pkgs], stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", creationflags=flags)
+                for line in pr.stdout:
+                    self.upd_signal.emit("pip_sor", {"sor": line.rstrip()})
+                kod = pr.wait()
+                self.upd_signal.emit("pip_kesz", {"ok": kod == 0, "kod": kod})
+            except Exception as e:
+                self.upd_signal.emit("pip_sor", {"sor": f"HIBA: {e}"})
+                self.upd_signal.emit("pip_kesz", {"ok": False, "kod": -1})
+        threading.Thread(target=job, daemon=True).start()
+
+    # ---- frissítés ----
+    def do_app_update(self):
+        d = self._upd
+        if not d or not d.get("data"):
+            return
+        if getattr(sys, "frozen", False):
+            QMessageBox.information(self, "Frissítés", "Ez a program .exe-ként fut, így nem tudja magát frissíteni.")
+            return
+        miss = missing_packages(d.get("pkgs"))
+        if miss:
+            QMessageBox.warning(self, "Előbb a csomagok!", "Az új verzióhoz előbb ezeket kell telepíteni:\n\n" +
+                                "\n".join(p[1] for p in miss) + "\n\nA VERZIÓK fülön lépésről lépésre le van írva.")
+            return
+        if QMessageBox.question(self, "Program frissítése?",
+                                f"Frissítés erre: {d['info'].get('verzio')}\n(ezen a gépen most: {APP_VERSION})\n\n"
+                                f"A program utána magától újraindul. A még nem mentett sorok előtte elmentődnek,\n"
+                                f"a régi verzió megmarad (regi_verziok mappa + VPS + Google Drive).\n\nMehet?"
+                                ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.process_auto_row_sync()
+        except Exception:
+            pass
+        self.btn_do_update.setEnabled(False)
+        self.btn_do_update.setText("⏳ Frissítés...")
+        data, uj = d["data"], d["info"].get("verzio")
+
+        def job():
+            try:
+                target = os.path.abspath(__file__)
+                with open(target, "rb") as f:
+                    regi = f.read()
+                # a régi verzió a VPS-re is felmegy (onnan a Google Drive-ra) – ha nem sikerül, attól még frissítünk
+                try:
+                    import base64
+                    vps_request("POST", f"{VPS_URL}/app/archive", json={"tartalom_b64": base64.b64encode(regi).decode("ascii"),
+                                                                        "gep": GEP_NEV}, timeout=30)
+                except Exception:
+                    pass
+                backup_dir = os.path.join(BASE_DIR, "regi_verziok")
+                os.makedirs(backup_dir, exist_ok=True)
+                mentes = os.path.join(backup_dir, f"app_pyqt6CLOUD_{APP_VERSION}.py")
+                with open(mentes, "wb") as f:
+                    f.write(regi)
+                tmp = target + ".uj"
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, target)
+                self.upd_signal.emit("frissitve", {"verzio": uj, "mentes": mentes})
+            except Exception as e:
+                self.upd_signal.emit("frissites_hiba", {"message": str(e)})
+        QTimer.singleShot(1500, lambda: threading.Thread(target=job, daemon=True).start())
+
+    def ver_restore_backup(self):
+        it = self.ver_backups.currentItem()
+        if not it or not it.text().endswith(")") or it.text().startswith("("):
+            self.trigger_toast("Előbb kattints egy régi verzióra a listában.")
+            return
+        fname = it.text().split("   (")[0]
+        src = os.path.join(BASE_DIR, "regi_verziok", fname)
+        if QMessageBox.question(self, "Régi verzió visszaállítása?",
+                                f"Visszaállítod ezt a verziót?\n\n{fname}\n\nA mostani ({APP_VERSION}) is elmentődik a regi_verziok mappába.\n"
+                                f"A program utána újraindul.\n\n(Ha a VPS-en újabb verzió van, a villogó sáv újra megjelenik – ez normális.)"
+                                ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            with open(src, "rb") as f:
+                data = f.read()
+            compile(data.decode("utf-8"), fname, "exec")
+            target = os.path.abspath(__file__)
+            shutil.copy2(target, os.path.join(BASE_DIR, "regi_verziok", f"app_pyqt6CLOUD_{APP_VERSION}.py"))
+            tmp = target + ".uj"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, target)
+        except Exception as e:
+            QMessageBox.warning(self, "Visszaállítás", f"Nem sikerült: {e}")
+            return
+        log_event("-", "PROGRAM VISSZAÁLLÍTÁS", f"{APP_VERSION} → {fname}", None, None, "Gép")
+        QMessageBox.information(self, "Visszaállítás", "Kész. A program most újraindul.")
+        self._restart_app()
+
+    def _restart_app(self):
+        """Az új program elindítása ugyanúgy, ahogy ez el lett indítva, majd ennek a bezárása."""
+        import subprocess
+        try:
+            subprocess.Popen([sys.executable] + sys.argv, cwd=os.getcwd())
+        except Exception as e:
+            QMessageBox.warning(self, "Újraindítás", f"Nem sikerült automatikusan újraindítani ({e}).\nIndítsd el kézzel a programot.")
+        QApplication.instance().quit()
 
     def admin_load_clients(self):
         if hasattr(self, "adm_cli_info"):
@@ -8482,6 +9059,14 @@ class RaktarApp(QMainWindow):
                 if c == 4 and r.get("online"):
                     it.setForeground(QColor("#00e676"))
                 t.setItem(i, c, it)
+        if hasattr(self, "ver_cli"):
+            v = self.ver_cli
+            v.setRowCount(t.rowCount())
+            for i in range(t.rowCount()):
+                for c in range(t.columnCount()):
+                    src = t.item(i, c)
+                    if src:
+                        v.setItem(i, c, src.clone())
 
     def _admin_show(self, rows, r, lbl, tbl):
         if 0 <= r < len(rows):
@@ -8954,7 +9539,7 @@ class RaktarApp(QMainWindow):
     # FÜLSOR: 4 fő fül mindig látszik, a többi a "☰ További fülek" menüből nyílik
     # -------------------------------------------------------------------
     def setup_tab_menu(self):
-        self._main_tabs = [w for w in (getattr(self, "tab_excel_live", None), self.tab_search, self.tab_pda, self.tab_sold, self.tab_leltar) if w]
+        self._main_tabs = [w for w in (getattr(self, "tab_excel_live", None), self.tab_search, self.tab_pda, self.tab_sold, self.tab_leltar, self.tab_versions) if w]
         self._extra_tabs = [self.tabs.widget(i) for i in range(self.tabs.count()) if self.tabs.widget(i) not in self._main_tabs]
 
         self.btn_more_tabs = QToolButton()
@@ -9017,6 +9602,10 @@ class RaktarApp(QMainWindow):
             elif w is getattr(self, "tab_leltar", None):
                 self.leltar_refresh_old()
                 self.leltar_load_list()
+            elif w is getattr(self, "tab_versions", None):
+                self.ver_refresh_local()
+                self.check_app_update()
+                self.admin_load_clients()
             elif w is getattr(self, "tab_admin", None):
                 self._admin_tab_changed(self.admin_tabs.currentIndex())
         QTimer.singleShot(30, later)
