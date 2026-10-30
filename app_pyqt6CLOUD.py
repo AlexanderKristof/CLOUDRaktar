@@ -426,6 +426,119 @@ except ImportError:
     WIN32_AVAILABLE = False
 
 # -------------------------------------------------------------------
+# CÍMKENYOMTATÓ: helyi vagy távoli (a nyomtató nélküli gép a nyomtatós gépre küldi a címkét a VPS-en át)
+# -------------------------------------------------------------------
+class PrintBus(QObject):
+    msg = pyqtSignal(str)     # értesítés a felületre (toast) bármelyik szálból
+
+
+print_bus = PrintBus()
+_label_printer_cache = {"t": 0.0, "nev": None}
+_print_queue_lock = threading.Lock()
+
+
+def printer_mode():
+    """'auto' (ha van Zebra nyomtató ezen a gépen, itt nyomtat, különben a nyomtatós gépre küldi),
+    'helyi' (ehhez a géphez van kötve), 'tavoli' (nincs nyomtató – mindig a nyomtatós gépre küldi)."""
+    m = str(load_config_value("nyomtato_mod", "auto") or "auto")
+    return m if m in ("auto", "helyi", "tavoli") else "auto"
+
+
+def local_label_printer(force=False):
+    """A gépre kötött címkenyomtató neve (Zebra / ZDesigner / GK420 ...), vagy None. 60 mp-ig megjegyzi."""
+    if not WIN32_AVAILABLE:
+        return None
+    if not force and time.time() - _label_printer_cache["t"] < 60:
+        return _label_printer_cache["nev"]
+    nev = None
+    try:
+        for pr in win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS):
+            n = str(pr[2])
+            if any(k in n.upper() for k in ("ZEBRA", "ZDESIGNER", "GK420", "GX420", "ZD4", "ZD2", "ZT2", "ZT4")):
+                nev = n
+                break
+    except Exception:
+        nev = None
+    _label_printer_cache.update(t=time.time(), nev=nev)
+    return nev
+
+
+def is_print_host():
+    """Ez a gép nyomtat-e címkét (és nyomtatja-e ki a többi gépről érkezőket)."""
+    m = printer_mode()
+    if m == "tavoli":
+        return False
+    if m == "helyi":
+        return WIN32_AVAILABLE
+    return local_label_printer() is not None
+
+
+def _send_zpl_remote(zpl_data):
+    """A címkét a VPS-en át a nyomtatós gépre küldi; a végeredményről (kinyomtatva / hiba) később értesítést küld."""
+    m = re.search(r"R18[-/][0-9A-Za-z]+", zpl_data or "")
+    code = m.group(0).upper() if m else ""
+    pq = re.search(r"\^PQ(\d+)", zpl_data or "")
+    try:
+        res = vps_request("POST", f"{VPS_URL}/print/jobs", timeout=8,
+                          json={"zpl": zpl_data, "A": code, "peldany": int(pq.group(1)) if pq else 1, "kuldo": GEP_NEV})
+        if res.status_code == 404:
+            return False, ("Ehhez a géphez nincs címkenyomtató kötve, és a VPS-en még a régi server_api.py fut "
+                           "(nem tud a nyomtatós gépre küldeni)")
+        if res.status_code != 200:
+            return False, f"A címkét nem sikerült a nyomtatós gépre küldeni (HTTP {res.status_code})"
+        js = res.json()
+    except Exception as e:
+        return False, f"A címkét nem sikerült a nyomtatós gépre küldeni (nincs kapcsolat a szerverrel: {e.__class__.__name__})"
+    jid, gepek = js.get("id"), js.get("nyomtato_gepek") or []
+
+    def figyel():
+        for _ in range(45):
+            time.sleep(2)
+            try:
+                r = vps_request("GET", f"{VPS_URL}/print/jobs/{jid}", timeout=8).json()
+            except Exception:
+                continue
+            if r.get("allapot") == "kesz":
+                print_bus.msg.emit(f"✅ Kinyomtatva a(z) {r.get('nyomtatta') or 'nyomtatós'} gépen: {code}")
+                return
+            if r.get("allapot") in ("hiba", "lejart"):
+                print_bus.msg.emit(f"❌ A nyomtatós gépen nem sikerült ({code}): {r.get('uzenet', '')}")
+                return
+        print_bus.msg.emit(f"⏳ {code}: a címke még vár – a nyomtatós gépen fut a program? (2 órán belül még kinyomtatja)")
+    threading.Thread(target=figyel, daemon=True).start()
+    if gepek:
+        return True, f"📨 Elküldve a nyomtatós gépre ({', '.join(gepek)}) – pár másodperc és kinyomtatja"
+    return True, "📨 Elküldve – most egyik nyomtatós gép sem online; amint ott elindul a program, kinyomtatja (2 órán belül)"
+
+
+def process_print_queue():
+    """(nyomtatós gép, háttérszál) A többi gépről küldött címkék kinyomtatása."""
+    if not is_print_host() or not _print_queue_lock.acquire(blocking=False):
+        return
+    try:
+        res = vps_request("GET", f"{VPS_URL}/print/jobs", params={"pending": 1}, timeout=8)
+        if res.status_code != 200:
+            return
+        for job in res.json().get("jobs") or []:
+            r = vps_request("POST", f"{VPS_URL}/print/jobs/{job['id']}/claim", json={"gep": GEP_NEV}, timeout=8)
+            if r.status_code != 200:
+                continue
+            ok, msg = _send_zpl_local(local_label_printer() or get_zebra_printer_name(), job.get("zpl", ""))
+            try:
+                vps_request("POST", f"{VPS_URL}/print/jobs/{job['id']}/result", json={"ok": ok, "uzenet": msg}, timeout=8)
+            except Exception:
+                pass
+            kuldo, code, db = job.get("kuldo", ""), job.get("A", ""), job.get("peldany", 1)
+            print_bus.msg.emit(f"🖨️ Címke nyomtatva a(z) {kuldo} gépről: {code} ({db} db)" if ok
+                               else f"❌ A(z) {kuldo} gépről küldött címke ({code}) nyomtatása nem sikerült: {msg}")
+            log_event(code, "CÍMKE NYOMTATÁS", f"Távoli nyomtatás a(z) {kuldo} gépről - " + (f"OK ({db} db)" if ok else f"HIBA: {msg}"))
+    except Exception as e:
+        print(f"[Távoli nyomtatás] Hiba: {e}")
+    finally:
+        _print_queue_lock.release()
+
+
+# -------------------------------------------------------------------
 # HELPERES ÉS ADATBÁZIS SEGÉDFÜGGVÉNYEK
 # -------------------------------------------------------------------
 def load_saved_zoom_factor():
@@ -478,11 +591,16 @@ REQUIRED_PACKAGES = [
     ("PIL", "Pillow", "képek, címke rajzolása, fotók", False),
     ("gspread", "gspread", "Google Sheets", False),
     ("google.oauth2", "google-auth", "Google bejelentkezés (Sheets)", False),
-    ("win32print", "pywin32", "címkenyomtató (Windows)", True),
 ]
 
 # Változásnapló (a legújabb legfelül). A VERZIÓK fülön ebből látszik, mi változott.
 VALTOZASNAPLO = [
+    ("v2026.10.30-nyomt1", "2026-10-30", [
+        "Távoli nyomtatás: azon a gépen, amelyikhez nincs címkenyomtató kötve, a Nyomtatás gomb a nyomtatós gépre küldi "
+        "a címkét, és az pár másodpercen belül kinyomtatja (visszajelzés: ✅ kinyomtatva a … gépen)",
+        "A pywin32 csomag csak a nyomtatós gépen kell – a többi gépen nem akadályozza a frissítést",
+        "VERZIÓK fül: 🖨️ Címkenyomtató beállítás (automatikus / ehhez a géphez van kötve / nincs nyomtató)",
+    ]),
     ("v2026.10.29-web5", "2026-10-29", [
         "Excel Live: a 🖨️ Nyomtatás oszlop a sorszámokkal együtt külön, rögzített sávban a bal szélen – oldalra görgetéskor is "
         "mindig látszik, és a táblázat az A oszloppal kezdődik (semmit nem takar el)",
@@ -576,7 +694,7 @@ def send_heartbeat():
         user = ""
     res = vps_request("POST", f"{VPS_URL}/clients/heartbeat", timeout=8,
                       json={"tipus": "gep", "nev": GEP_NEV, "verzio": APP_VERSION,
-                            "felhasznalo": user})
+                            "felhasznalo": user, "nyomtato": (local_label_printer() or "igen") if is_print_host() else ""})
     if res.status_code == 200:
         return res.json().get("legfrissebb") or {}
     return None
@@ -916,7 +1034,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.29-web5"
+APP_VERSION = "v2026.10.30-nyomt1"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -2757,6 +2875,13 @@ def get_zebra_printer_name():
         return None
 
 def send_zpl_to_printer(printer_name, zpl_data):
+    """Címke nyomtatása: ha ehhez a géphez van kötve címkenyomtató, itt; különben a nyomtatós gépre küldi (VPS)."""
+    if is_print_host():
+        return _send_zpl_local(printer_name or local_label_printer(), zpl_data)
+    return _send_zpl_remote(zpl_data)
+
+
+def _send_zpl_local(printer_name, zpl_data):
     if not WIN32_AVAILABLE: 
         return False, "A 'pywin32' nincs telepítve!"
     
@@ -3189,6 +3314,8 @@ class AutoVPSPollWorker(QThread):
                 data = res.json()
                 if data.get("items"):
                     self.data_updated_signal.emit(data["items"])
+                if data.get("nyomtatas_var") and is_print_host() and not _print_queue_lock.locked():
+                    threading.Thread(target=process_print_queue, daemon=True).start()
                 jel = sorted((j.get("gep", ""), j.get("A", "")) for j in (data.get("jelenlet") or []) if j.get("gep") != GEP_NEV)
                 if jel != getattr(self, "_last_jel", None):
                     self._last_jel = jel
@@ -4092,6 +4219,7 @@ class RaktarApp(QMainWindow):
         self.version_info_signal.connect(self.on_version_info)
         self.clients_signal.connect(self.fill_clients_table)
         self.leltar_signal.connect(self.on_leltar_signal)
+        print_bus.msg.connect(lambda t: (self.trigger_toast(t, 4500), self.append_process_log(t)))
         self._pda_last_status = None
         self._pda_poll_busy = False
         self.pda_poll_timer = QTimer(self)
@@ -9142,6 +9270,24 @@ class RaktarApp(QMainWindow):
         gl.addWidget(self.ver_pip_out)
         lay.addWidget(g)
 
+        gp = QGroupBox("🖨️ Címkenyomtató ezen a gépen")
+        gpl = QVBoxLayout(gp)
+        prow2 = QHBoxLayout()
+        self.ver_printer_mode = QComboBox()
+        for txt, val in (("Automatikus (ha van Zebra nyomtató, itt nyomtat, különben a nyomtatós gépre küldi)", "auto"),
+                         ("Ehhez a géphez van kötve a címkenyomtató", "helyi"),
+                         ("Nincs nyomtató – mindig a nyomtatós gépre küldje", "tavoli")):
+            self.ver_printer_mode.addItem(txt, val)
+        self.ver_printer_mode.setCurrentIndex(max(0, self.ver_printer_mode.findData(printer_mode())))
+        self.ver_printer_mode.currentIndexChanged.connect(self.ver_set_printer_mode)
+        prow2.addWidget(self.ver_printer_mode, stretch=1)
+        gpl.addLayout(prow2)
+        self.ver_printer_info = QLabel("")
+        self.ver_printer_info.setWordWrap(True)
+        self.ver_printer_info.setTextFormat(Qt.TextFormat.RichText)
+        gpl.addWidget(self.ver_printer_info)
+        lay.addWidget(gp)
+
         g2 = QGroupBox("📝 Mi változott")
         g2l = QVBoxLayout(g2)
         self.ver_changes = QLabel("")
@@ -9383,6 +9529,20 @@ class RaktarApp(QMainWindow):
             f"🐍 Python: {sys.version.split()[0]} – {python_console_exe()}<br>"
             f"📁 A program helye: {os.path.abspath(__file__)}")
 
+        # címkenyomtató
+        if hasattr(self, "ver_printer_info"):
+            lp = local_label_printer()
+            if is_print_host():
+                self.ver_printer_info.setText(f"✅ <b>Ez a nyomtatós gép</b> – itt nyomtat: <b>{lp or get_zebra_printer_name() or '?'}</b>. "
+                                              f"A többi gépről küldött címkéket is ez nyomtatja ki (pár másodpercen belül).")
+            elif printer_mode() == "helyi":
+                self.ver_printer_info.setText("❌ „Ehhez a géphez van kötve” van beállítva, de a <b>pywin32</b> csomag nincs telepítve, "
+                                              "így nem tud nyomtatni. Telepítsd (fekete ablakban): <code>"
+                                              f"\"{python_console_exe()}\" -m pip install pywin32</code>, majd indítsd újra a programot.")
+            else:
+                self.ver_printer_info.setText("📨 <b>Ehhez a géphez nincs címkenyomtató kötve</b> – a Nyomtatás gomb a nyomtatós gépre "
+                                              "küldi a címkét, és az kinyomtatja (a nyomtatós gépen futnia kell a programnak).")
+
         # csomagok: a jelenlegi + (ha van) az új verzió listája
         pkgs = list(REQUIRED_PACKAGES)
         if d and d.get("pkgs"):
@@ -9469,6 +9629,13 @@ class RaktarApp(QMainWindow):
         save_config_value("gep_nev", uj)
         self.ver_render()
         self.trigger_toast(f"✅ A gép neve mostantól: {uj}")
+
+    def ver_set_printer_mode(self, *_):
+        m = self.ver_printer_mode.currentData()
+        save_config_value("nyomtato_mod", m)
+        local_label_printer(force=True)
+        self.ver_render()
+        self.trigger_toast("🖨️ Címkenyomtató beállítás mentve")
 
     def ver_copy_pip(self):
         if self._pip_cmd:
@@ -10840,8 +11007,10 @@ class RaktarApp(QMainWindow):
                     ok, msg = send_zpl_to_printer(get_zebra_printer_name(), zpl)
                 except Exception as e:
                     ok, msg = False, str(e)
-                self.print_result_signal.emit(f"🖨️ Címke kinyomtatva [{code_u}] - {copies} db" if ok else f"❌ Nyomtatási hiba [{code_u}]: {msg}")
-                log_event(code_u, "CÍMKE NYOMTATÁS", f"Excel Live gomb - OK ({copies} db)" if ok else f"HIBA: {msg}")
+                self.print_result_signal.emit((f"{msg} [{code_u}]" if str(msg).startswith("📨") else f"🖨️ Címke kinyomtatva [{code_u}] - {copies} db")
+                                              if ok else f"❌ Nyomtatási hiba [{code_u}]: {msg}")
+                log_event(code_u, "CÍMKE NYOMTATÁS", (f"Excel Live gomb - elküldve a nyomtatós gépre ({copies} db)" if str(msg).startswith("📨")
+                                                      else f"Excel Live gomb - OK ({copies} db)") if ok else f"HIBA: {msg}")
 
             threading.Thread(target=_job, daemon=True).start()
 

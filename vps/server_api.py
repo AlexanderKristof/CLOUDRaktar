@@ -397,9 +397,14 @@ def get_updates():
 
         # Elso lekeres, vagy a VPS adatbazisat visszaallitottak (a verzio visszaugrott)
         jelenlet = _jelenlet(cursor)
+        try:
+            cursor.execute("SELECT COUNT(*) FROM nyomtatasi_sor WHERE allapot='var' AND ido_ts > ?", (time.time() - PRINT_MAX_AGE_SEC,))
+            nyomtatas_var = cursor.fetchone()[0]
+        except Exception:
+            nyomtatas_var = 0
         if since is None or since > current:
             conn.close()
-            return jsonify({"status": "ok", "verzio": current, "items": [], "jelenlet": jelenlet}), 200
+            return jsonify({"status": "ok", "verzio": current, "items": [], "jelenlet": jelenlet, "nyomtatas_var": nyomtatas_var}), 200
 
         cursor.execute("""
             SELECT A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, szin, verzio, utolso_gep, utolso_ido
@@ -425,7 +430,8 @@ def get_updates():
         # folyamatban levo (meg nem commitolt) iras sem vesz el.
         new_verzio = merged[-1][0] if merged else since
 
-        return jsonify({"status": "ok", "verzio": new_verzio, "items": items, "jelenlet": jelenlet}), 200
+        return jsonify({"status": "ok", "verzio": new_verzio, "items": items, "jelenlet": jelenlet,
+                        "nyomtatas_var": nyomtatas_var}), 200
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -640,6 +646,30 @@ init_kliens_db()
 ONLINE_SEC = 120
 
 
+def init_nyomtatas_db():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(kliensek)").fetchall()]
+        if "nyomtato" not in cols:
+            conn.execute("ALTER TABLE kliensek ADD COLUMN nyomtato TEXT")
+        # Tavoli nyomtatas: a nyomtato nelkuli gep ide teszi a cimket (ZPL), a nyomtatos gep kinyomtatja
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS nyomtatasi_sor (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ido TEXT, ido_ts REAL, kuldo TEXT, A TEXT, peldany INTEGER, zpl TEXT,
+                allapot TEXT DEFAULT 'var', nyomtatta TEXT, nyomtatas_ido TEXT, uzenet TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[VPS] Nyomtatasi sor inicializalasi hiba: {e}")
+
+
+init_nyomtatas_db()
+PRINT_MAX_AGE_SEC = 2 * 3600    # ennel regebbi, ki nem nyomtatott cimket mar nem nyomtatunk ki (lejart)
+
+
 # ==========================================
 # LELTAR: a PDA-n es a gepen vegzett raklap-leltarak (kozos lista, felulirassal es visszavonassal)
 # ==========================================
@@ -689,12 +719,13 @@ def clients_heartbeat():
         now = pda_now().strftime("%Y-%m-%d %H:%M:%S")
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        cur.execute("""INSERT INTO kliensek (azon, tipus, nev, verzio, app_verzio, felhasznalo, ip, elso, utolso)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        cur.execute("""INSERT INTO kliensek (azon, tipus, nev, verzio, app_verzio, felhasznalo, ip, elso, utolso, nyomtato)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(azon) DO UPDATE SET verzio=excluded.verzio, app_verzio=excluded.app_verzio,
-                           felhasznalo=excluded.felhasznalo, ip=excluded.ip, utolso=excluded.utolso""",
+                           felhasznalo=excluded.felhasznalo, ip=excluded.ip, utolso=excluded.utolso, nyomtato=excluded.nyomtato""",
                     (f"{tipus}|{nev}", tipus, nev, safe_str(data.get('verzio', '')), safe_str(data.get('app_verzio', '')),
-                     safe_str(data.get('felhasznalo', '')), request.remote_addr or "", now, now))
+                     safe_str(data.get('felhasznalo', '')), request.remote_addr or "", now, now,
+                     safe_str(data.get('nyomtato', ''))))
         conn.commit()
         leg = _legfrissebb(cur)
         conn.close()
@@ -752,6 +783,106 @@ def pda_page():
     resp = send_file(PDA_HTML, mimetype="text/html")
     resp.headers["Cache-Control"] = "no-cache"
     return resp
+
+
+# ---------- Tavoli cimkenyomtatas ----------
+# Ha egy gephez nincs kotve cimkenyomtato, a Nyomtatas gomb ide kuldi a cimket (ZPL), es a nyomtatos gep
+# (amelyiken a program fut es Zebra nyomtato van rakotve) par masodpercen belul kinyomtatja.
+def _nyomtato_gepek(cur):
+    hatar = (pda_now() - datetime.timedelta(seconds=ONLINE_SEC)).strftime("%Y-%m-%d %H:%M:%S")
+    cur.execute("SELECT nev FROM kliensek WHERE tipus='gep' AND nyomtato IS NOT NULL AND nyomtato != '' AND utolso >= ?", (hatar,))
+    return [r[0] for r in cur.fetchall()]
+
+
+@app.route('/print/jobs', methods=['POST'])
+def print_job_add():
+    """{"zpl", "A", "peldany", "kuldo"} -> {"id", "nyomtato_gepek": [online nyomtatos gepek]}"""
+    try:
+        d = request.json or {}
+        zpl = str(d.get("zpl", ""))
+        if not zpl.strip() or len(zpl) > 200000:
+            return pda_err(400, "S-400", "Ures vagy tul nagy cimke")
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("INSERT INTO nyomtatasi_sor (ido, ido_ts, kuldo, A, peldany, zpl) VALUES (?, ?, ?, ?, ?, ?)",
+                    (pda_now().strftime("%Y-%m-%d %H:%M:%S"), time.time(), safe_str(d.get("kuldo", "")),
+                     clean_code(d.get("A", "")), int(d.get("peldany") or 1), zpl))
+        jid = cur.lastrowid
+        conn.commit()
+        gepek = _nyomtato_gepek(cur)
+        conn.close()
+        return jsonify({"status": "ok", "id": jid, "nyomtato_gepek": gepek}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/print/jobs', methods=['GET'])
+def print_jobs():
+    """?pending=1: a kinyomtatasra varo cimkek (a nyomtatos gepnek). A 2 oranal regebbiek lejartnak szamitanak."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("UPDATE nyomtatasi_sor SET allapot='lejart', uzenet='2 oran belul egyik nyomtatos gep sem nyomtatta ki' "
+                    "WHERE allapot='var' AND ido_ts <= ?", (time.time() - PRINT_MAX_AGE_SEC,))
+        conn.commit()
+        if request.args.get("pending"):
+            cur.execute("SELECT id, ido, kuldo, A, peldany, zpl FROM nyomtatasi_sor WHERE allapot='var' ORDER BY id LIMIT 20")
+        else:
+            cur.execute("SELECT id, ido, kuldo, A, peldany, allapot, nyomtatta, nyomtatas_ido, uzenet FROM nyomtatasi_sor "
+                        "ORDER BY id DESC LIMIT ?", (min(request.args.get("limit", default=50, type=int), 500),))
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return jsonify({"status": "ok", "jobs": rows}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/print/jobs/<int:jid>', methods=['GET'])
+def print_job_status(jid):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT id, A, allapot, nyomtatta, nyomtatas_ido, uzenet FROM nyomtatasi_sor WHERE id=?", (jid,))
+        r = cur.fetchone()
+        conn.close()
+        if not r:
+            return pda_err(404, "S-404", "Nincs ilyen nyomtatas")
+        return jsonify({"status": "ok", **dict(r)}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/print/jobs/<int:jid>/claim', methods=['POST'])
+def print_job_claim(jid):
+    """Egy cimket csak egy nyomtatos gep nyomtathat ki."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("UPDATE nyomtatasi_sor SET allapot='nyomtatas', nyomtatta=? WHERE id=? AND allapot='var'",
+                    (safe_str((request.json or {}).get("gep", "")), jid))
+        ok = cur.rowcount == 1
+        conn.commit()
+        conn.close()
+        return (jsonify({"status": "ok"}), 200) if ok else (jsonify({"status": "taken", "kod": "S-409"}), 409)
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
+
+
+@app.route('/print/jobs/<int:jid>/result', methods=['POST'])
+def print_job_result(jid):
+    """{"ok": true|false, "uzenet"}"""
+    try:
+        d = request.json or {}
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE nyomtatasi_sor SET allapot=?, nyomtatas_ido=?, uzenet=? WHERE id=?",
+                     ("kesz" if d.get("ok") else "hiba", pda_now().strftime("%Y-%m-%d %H:%M:%S"), safe_str(d.get("uzenet", ""))[:500], jid))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return pda_err(500, "S-500", str(e))
 
 
 # ---------- Gepi program automatikus frissitese (VERZIOK ful) ----------
