@@ -504,11 +504,11 @@ def _send_zpl_remote(zpl_data):
             if r.get("allapot") in ("hiba", "lejart"):
                 print_bus.msg.emit(f"❌ A nyomtatós gépen nem sikerült ({code}): {r.get('uzenet', '')}")
                 return
-        print_bus.msg.emit(f"⏳ {code}: a címke még vár – a nyomtatós gépen fut a program? (2 órán belül még kinyomtatja)")
+        print_bus.msg.emit(f"⚠️ {code}: a nyomtatós gép még nem nyomtatta ki – fut rajta a program? Amint elindítják, azonnal kinyomtatja.")
     threading.Thread(target=figyel, daemon=True).start()
     if gepek:
-        return True, f"📨 Elküldve a nyomtatós gépre ({', '.join(gepek)}) – pár másodperc és kinyomtatja"
-    return True, "📨 Elküldve – most egyik nyomtatós gép sem online; amint ott elindul a program, kinyomtatja (2 órán belül)"
+        return True, f"📨 Elküldve a nyomtatós gépre ({', '.join(gepek)}) – azonnal kinyomtatja"
+    return True, "⚠️ Elküldve, de a nyomtatós gépen most NEM fut a program – amint elindítják, azonnal kinyomtatja"
 
 
 def process_print_queue():
@@ -595,6 +595,7 @@ REQUIRED_PACKAGES = [
 
 # Változásnapló (a legújabb legfelül). A VERZIÓK fülön ebből látszik, mi változott.
 VALTOZASNAPLO = [
+    ("v2026.10.30-nyomt2", "2026-10-30", ["Távoli nyomtatás: érthetőbb üzenetek (a nyomtatós gép azonnal, 1-2 mp-en belül nyomtat)"]),
     ("v2026.10.30-nyomt1", "2026-10-30", [
         "Távoli nyomtatás: azon a gépen, amelyikhez nincs címkenyomtató kötve, a Nyomtatás gomb a nyomtatós gépre küldi "
         "a címkét, és az pár másodpercen belül kinyomtatja (visszajelzés: ✅ kinyomtatva a … gépen)",
@@ -1034,7 +1035,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.30-nyomt1"
+APP_VERSION = "v2026.10.30-nyomt2"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
