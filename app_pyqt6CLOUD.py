@@ -600,6 +600,12 @@ REQUIRED_PACKAGES = [
 
 # Változásnapló (a legújabb legfelül). A VERZIÓK fülön ebből látszik, mi változott.
 VALTOZASNAPLO = [
+    ("v2026.11.09-foto2", "2026-11-09", [
+        "Főfotó: a DR Industrie sablon és a termék elhelyezése a saját főfotóitokhoz igazítva (méret, hely)",
+        "Háttér eltávolítás: fehér, árnyékos fotóháttérhez; a fehér címke és a fényes acél részek megmaradnak",
+        "Excel Live: a bal oldali sávban nincs sorszám, a gombokon csak ikon (🖨️ / 📷) – kevesebb helyet foglal; "
+        "a másik gépen felvitt sor 🖨️ gombja zöld",
+    ]),
     ("v2026.11.09-foto1", "2026-11-09", [
         "Excel Live: 📷 Fotó gomb a Nyomtatás mellett – a fényképezőgépről a Képek mappába (napi mappákba) került "
         "friss fotókat egy kattintással átnevezi: R18-xxxxx (1), (2)... (ugyanabban a mappában maradnak)",
@@ -1046,7 +1052,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.11.09-foto1"
+APP_VERSION = "v2026.11.09-foto2"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -3686,7 +3692,7 @@ class PrintButtonDelegate(QStyledItemDelegate):
     valódi QPushButton-t, ami fülváltáskor / görgetéskor / frissítéskor nagyon lassított régebbi gépen.
     Kattintás: on_click(sor) - pontosan az a sor, amelyikre kattintottak."""
 
-    LABEL = "🖨️ Nyomtatás"
+    LABEL = "🖨️"
     COLOR, HOVER = "#0288d1", "#039be5"
 
     def __init__(self, on_click, parent=None):
@@ -3699,10 +3705,17 @@ class PrintButtonDelegate(QStyledItemDelegate):
         rect = option.rect.adjusted(3, 3, -3, -3)
         hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(self.HOVER if hover else self.COLOR))
+        uj = False
+        try:
+            h = index.model().headerData(index.row(), Qt.Orientation.Vertical)
+            uj = isinstance(h, str) and h.startswith("🆕") and self.LABEL == "🖨️"
+        except Exception:
+            pass
+        painter.setBrush(QColor("#00c853" if uj else (self.HOVER if hover else self.COLOR)))
         painter.drawRoundedRect(QRectF(rect), 3, 3)
         font = QFont(option.font)
         font.setBold(True)
+        font.setPointSizeF(font.pointSizeF() * 1.6)
         painter.setFont(font)
         painter.setPen(QColor("#ffffff"))
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.LABEL)
@@ -3763,8 +3776,9 @@ class FrozenColumn(QObject):
         for c in range(table.columnCount()):
             v.setColumnHidden(c, c not in self.cols)
         for col in self.cols:
-            v.setColumnWidth(col, max(table.columnWidth(col), 120))
+            v.setColumnWidth(col, 58)
         vh, tvh = v.verticalHeader(), table.verticalHeader()
+        vh.hide()          # sorszám nem kell (csak a helyet foglalja)
         vh.setMinimumSectionSize(tvh.minimumSectionSize())
         vh.setDefaultSectionSize(tvh.defaultSectionSize())
         for r in range(table.rowCount()):
@@ -3782,12 +3796,13 @@ class FrozenColumn(QObject):
 
     def update_width(self):
         v = self.v
-        v.setFixedWidth(v.verticalHeader().width() + sum(v.columnWidth(c) for c in self.cols) + 2 * v.frameWidth())
+        vh = v.verticalHeader()
+        v.setFixedWidth((vh.width() if not vh.isHidden() else 0) + sum(v.columnWidth(c) for c in self.cols) + 2 * v.frameWidth())
 
 
 class CameraButtonDelegate(PrintButtonDelegate):
     """Excel Live 📷 oszlop: a sor termékének fotói (átnevezés, szerkesztés, főfotó)."""
-    LABEL = "📷 Fotó"
+    LABEL = "📷"
     COLOR, HOVER = "#6a1b9a", "#8e24aa"
 
     def helpEvent(self, event, view, option, index):
@@ -3802,7 +3817,7 @@ class CameraButtonDelegate(PrintButtonDelegate):
 # teszi: 2026_09_14 ...). A Fotó ablak ezekből az el nem nevezett friss képeket R18-xxxxx (n) névre nevezi át,
 # UGYANABBAN a mappában. A sablon (főfotó keret) a program mellett: sablon.png (vagy a szerkesztőben kiválasztva).
 # -------------------------------------------------------------------
-FOTO_SABLON_BOX = (0.06, 0.14, 0.94, 0.85)   # a sablonon a termék helye (arányokban): bal, fent, jobb, lent
+FOTO_SABLON_BOX = (0.05, 0.115, 0.955, 0.84)   # a sablonon a termék helye (arányokban): bal, fent, jobb, lent – a saját főfotókhoz mérve
 
 
 def foto_forras_mappa():
@@ -3901,6 +3916,33 @@ def foto_megnyit(path, max_side=None):
     if max_side:
         im.thumbnail((max_side, max_side))
     return im
+
+
+def hatter_maszk(im, tol=28):
+    """Háttér eltávolítás fehér / világos, árnyékos fotóháttérhez. A háttér egy sima, világos felület (helyi maximum,
+    elmosva); ami ennél 'tol'-nál sötétebb vagy színesebb, az termék. A termék körvonalán lévő kis réseket bezárja,
+    és a belső lyukakat kitölti, így a fehér címke és a fényes acél részek megmaradnak. Visszaad: alfa maszk (L)."""
+    W, H = im.size
+    sc = 900 / max(W, H)
+    sm = im.resize((max(1, int(W * sc)), max(1, int(H * sc))), Image.Resampling.BILINEAR)
+    from PIL import ImageChops, ImageFilter
+    g = sm.convert("L")
+    bgm = g.filter(ImageFilter.MaxFilter(15)).filter(ImageFilter.GaussianBlur(25))
+    sotet = ImageChops.subtract(bgm, g)                       # mennyivel sötétebb a háttérnél
+    szines = sm.convert("HSV").split()[1].point(lambda v: max(0, v - 25))
+    d = ImageChops.lighter(sotet, szines)
+    m = d.point(lambda v: 255 if v > tol else 0).filter(ImageFilter.MedianFilter(5))
+    zart = m.filter(ImageFilter.MaxFilter(25)).filter(ImageFilter.MinFilter(25))
+    ff = zart.copy()
+    w2, h2 = ff.size
+    seeds = [(x, 0) for x in range(0, w2, 25)] + [(x, h2 - 1) for x in range(0, w2, 25)] + \
+            [(0, y) for y in range(0, h2, 25)] + [(w2 - 1, y) for y in range(0, h2, 25)] + [(w2 - 1, h2 - 1)]
+    for seed in seeds:
+        if ff.getpixel(seed) == 0:
+            ImageDraw.floodfill(ff, seed, 128)
+    m = ff.point(lambda v: 0 if v == 128 else 255)
+    m = m.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(1.2))
+    return m.resize((W, H), Image.Resampling.BILINEAR)
 
 
 def pil_to_qimage(im):
@@ -4241,7 +4283,7 @@ class KepSzerkeszto(QDialog):
         self.proxy = self.orig.copy()
         self.proxy.thumbnail((1400, 1400))
         self.st = {"rot90": 0, "fok": 0.0, "vagas": None, "fenyero": 100, "kontraszt": 100, "feher": 255,
-                   "hatter": bool(sablon), "tol": 28, "sablon": bool(sablon), "meret": 92}
+                   "hatter": bool(sablon), "tol": 28, "sablon": bool(sablon), "meret": 100}
         self._sablon_img = None
         root = QHBoxLayout(self)
         self.view = _VagoLabel()
@@ -4367,12 +4409,12 @@ class KepSzerkeszto(QDialog):
 
     def _reset(self):
         sablon = self.st["sablon"]
-        self.st.update({"rot90": 0, "fok": 0.0, "vagas": None, "fenyero": 100, "kontraszt": 100, "feher": 255, "tol": 28, "meret": 92})
+        self.st.update({"rot90": 0, "fok": 0.0, "vagas": None, "fenyero": 100, "kontraszt": 100, "feher": 255, "tol": 28, "meret": 100})
         self.spin_fok.setValue(0.0)
         for k, sl in self.sl.items():
             sl.setValue(self.st[k])
         self.sl_tol.setValue(28)
-        self.sl_meret.setValue(92)
+        self.sl_meret.setValue(100)
         self.st["sablon"] = sablon
         self._deb.start(10)
 
@@ -4441,10 +4483,7 @@ class KepSzerkeszto(QDialog):
             im = im.point(lambda v: min(255, int(v * k)))
         alpha = None
         if st["hatter"]:
-            bg = Image.new("RGB", im.size, self._hatter_szin(im))
-            diff = ImageChops.difference(im, bg).convert("L")
-            alpha = diff.point(lambda v: 255 if v > st["tol"] else 0).filter(ImageFilter.MedianFilter(5)) \
-                        .filter(ImageFilter.GaussianBlur(max(1, im.width // 900)))
+            alpha = hatter_maszk(im, st["tol"])
         if st["sablon"] and foto_sablon_path():
             sab = self._sablon().copy()
             W, H = sab.size
@@ -11289,7 +11328,7 @@ class RaktarApp(QMainWindow):
         self.excel_table.setColumnCount(18)
         headers = ["A: F-Kód", "B: Vonalkód", "C: Márka", "D: Típus", "E: Cikkszám", "F: DB",
                    "G: Állapot", "H: Ár", "I: Páter", "J: Szabad", "K: Polc", "L: Raklap",
-                   "M: Súly", "N: eBay ID", "O: Megjegyzés", "P: Állapot részlet", "🖨️ Nyomtatás", "📷 Fotó"]
+                   "M: Súly", "N: eBay ID", "O: Megjegyzés", "P: Állapot részlet", "🖨️", "📷"]
         self.excel_table.setHorizontalHeaderLabels(headers)
         # KÉPERNYŐS oszlopsorrend: 🖨️, A-G, majd a leggyakrabban írt L (Raklap) és M (Súly), utána I, J, K, H, N, O, P.
         # Csak a megjelenítés változik (moveSection): a program és a mentés továbbra is a logikai
