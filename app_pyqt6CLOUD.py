@@ -98,9 +98,14 @@ class PhotoIndex:
         if not PHOTOS_ENABLED:
             return []
         saved = load_config_value("foto_mappak")
-        if isinstance(saved, list) and saved:
-            return [d for d in saved if d]
-        return self.default_dirs()
+        out = [d for d in saved if d] if isinstance(saved, list) and saved else self.default_dirs()
+        try:
+            src = foto_forras_mappa()       # a fényképezőgép képei (Képek mappa, napi mappák)
+            if os.path.isdir(src) and src not in out:
+                out.append(src)
+        except Exception:
+            pass
+        return out
 
     def build(self):
         if self.building:
@@ -595,6 +600,12 @@ REQUIRED_PACKAGES = [
 
 # Változásnapló (a legújabb legfelül). A VERZIÓK fülön ebből látszik, mi változott.
 VALTOZASNAPLO = [
+    ("v2026.11.09-foto1", "2026-11-09", [
+        "Excel Live: 📷 Fotó gomb a Nyomtatás mellett – a fényképezőgépről a Képek mappába (napi mappákba) került "
+        "friss fotókat egy kattintással átnevezi: R18-xxxxx (1), (2)... (ugyanabban a mappában maradnak)",
+        "Képszerkesztő: forgatás 90°-kal és 0,1°-onként, vágás egérrel, világosítás / kontraszt / fehér háttér, "
+        "háttér eltávolítás, sablonra tétel (főfotó), mentés a következő sorszámmal",
+    ]),
     ("v2026.10.30-nyomt2", "2026-10-30", ["Távoli nyomtatás: érthetőbb üzenetek (a nyomtatós gép azonnal, 1-2 mp-en belül nyomtat)"]),
     ("v2026.10.30-nyomt1", "2026-10-30", [
         "Távoli nyomtatás: azon a gépen, amelyikhez nincs címkenyomtató kötve, a Nyomtatás gomb a nyomtatós gépre küldi "
@@ -1035,7 +1046,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.10.30-nyomt2"
+APP_VERSION = "v2026.11.09-foto1"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -3663,7 +3674,7 @@ class SummaryDialog(QDialog):
 # -------------------------------------------------------------------
 # Excel Live munkalap KÉPERNYŐS oszlopsorrendje (logikai indexek: 0-15 = A-P, 16 = 🖨️ gomb).
 # G (Állapot) után jön L (Raklap) és M (Súly), mert ezeket írjuk a leggyakrabban.
-EXCEL_LIVE_VISUAL_ORDER = [16, 0, 1, 2, 3, 4, 5, 6, 11, 12, 8, 9, 10, 7, 13, 14, 15]
+EXCEL_LIVE_VISUAL_ORDER = [16, 17, 0, 1, 2, 3, 4, 5, 6, 11, 12, 8, 9, 10, 7, 13, 14, 15]
 # A J (Szabad, logikai index 9) oszlop nincs használatban - az Excel Live munkalapon rejtve van
 EXCEL_LIVE_HIDDEN_COL_J = 9
 # Excel Live munkalap sormagassága (px) - a C/D/E hosszú szövege így két sorban kifér
@@ -3676,6 +3687,7 @@ class PrintButtonDelegate(QStyledItemDelegate):
     Kattintás: on_click(sor) - pontosan az a sor, amelyikre kattintottak."""
 
     LABEL = "🖨️ Nyomtatás"
+    COLOR, HOVER = "#0288d1", "#039be5"
 
     def __init__(self, on_click, parent=None):
         super().__init__(parent)
@@ -3687,7 +3699,7 @@ class PrintButtonDelegate(QStyledItemDelegate):
         rect = option.rect.adjusted(3, 3, -3, -3)
         hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#039be5" if hover else "#0288d1"))
+        painter.setBrush(QColor(self.HOVER if hover else self.COLOR))
         painter.drawRoundedRect(QRectF(rect), 3, 3)
         font = QFont(option.font)
         font.setBold(True)
@@ -3719,15 +3731,16 @@ class PrintButtonDelegate(QStyledItemDelegate):
 
 
 class FrozenColumn(QObject):
-    """Rögzített (mindig látható) oszlop a táblázat BAL OLDALÁN, külön sávban – mint az Excelben az „ablaktábla rögzítése”.
-    A sáv (self.v) a sorszámokat és a rögzített oszlopot mutatja, ugyanazzal az adattal és kijelöléssel; fel-le együtt
-    görög a táblázattal, oldalra nem. A táblázatban az oszlop és a sorszám el van rejtve, így az az A oszloppal kezdődik
-    és semmit nem takar el. A sávot a hívó teszi a táblázat elé a layoutban."""
+    """Rögzített (mindig látható) oszlop(ok) a táblázat BAL OLDALÁN, külön sávban – mint az Excelben az „ablaktábla
+    rögzítése”. A sáv (self.v) a sorszámokat és a rögzített oszlopokat mutatja, ugyanazzal az adattal és kijelöléssel;
+    fel-le együtt görög a táblázattal, oldalra nem. A táblázatban ezek az oszlopok és a sorszám el vannak rejtve, így az
+    az A oszloppal kezdődik és semmit nem takar el. A sávot a hívó teszi a táblázat elé a layoutban."""
 
-    def __init__(self, table, col, delegate):
+    def __init__(self, table, cols, delegates):
         super().__init__(table)
         from PyQt6.QtWidgets import QTableView
-        self.t, self.col = table, col
+        self.t = table
+        self.cols = list(cols) if isinstance(cols, (list, tuple)) else [cols]
         v = QTableView()
         self.v = v
         v.setModel(table.model())
@@ -3743,34 +3756,754 @@ class FrozenColumn(QObject):
         v.setSelectionMode(table.selectionMode())
         v.setMouseTracking(True)
         v.setStyleSheet(table.styleSheet().replace("QTableWidget", "QTableView"))
-        v.setItemDelegateForColumn(col, delegate)
+        hdr = v.horizontalHeader()
+        for i, col in enumerate(self.cols):
+            v.setItemDelegateForColumn(col, delegates[col])
+            hdr.moveSection(hdr.visualIndex(col), i)
         for c in range(table.columnCount()):
-            v.setColumnHidden(c, c != col)
-        v.setColumnWidth(col, max(table.columnWidth(col), 140))
+            v.setColumnHidden(c, c not in self.cols)
+        for col in self.cols:
+            v.setColumnWidth(col, max(table.columnWidth(col), 120))
         vh, tvh = v.verticalHeader(), table.verticalHeader()
         vh.setMinimumSectionSize(tvh.minimumSectionSize())
         vh.setDefaultSectionSize(tvh.defaultSectionSize())
         for r in range(table.rowCount()):
             v.setRowHeight(r, table.rowHeight(r))
-        # a táblázatban: a rögzített oszlop és a sorszám rejtve (a sávban látszanak)
-        table.setColumnHidden(col, True)
+        # a táblázatban: a rögzített oszlopok és a sorszám rejtve (a sávban látszanak)
+        for col in self.cols:
+            table.setColumnHidden(col, True)
         tvh.hide()
         table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        table.horizontalHeader().sectionResized.connect(self._col_resized)
         tvh.sectionResized.connect(lambda i, o, n: v.setRowHeight(i, n))
         vh.geometriesChanged.connect(self.update_width)
         v.verticalScrollBar().valueChanged.connect(table.verticalScrollBar().setValue)
         table.verticalScrollBar().valueChanged.connect(v.verticalScrollBar().setValue)
         self.update_width()
 
-    def _col_resized(self, idx, old, new):
-        if idx == self.col and new > 0:
-            self.v.setColumnWidth(self.col, new)
-            self.update_width()
-
     def update_width(self):
         v = self.v
-        v.setFixedWidth(v.verticalHeader().width() + v.columnWidth(self.col) + 2 * v.frameWidth())
+        v.setFixedWidth(v.verticalHeader().width() + sum(v.columnWidth(c) for c in self.cols) + 2 * v.frameWidth())
+
+
+class CameraButtonDelegate(PrintButtonDelegate):
+    """Excel Live 📷 oszlop: a sor termékének fotói (átnevezés, szerkesztés, főfotó)."""
+    LABEL = "📷 Fotó"
+    COLOR, HOVER = "#6a1b9a", "#8e24aa"
+
+    def helpEvent(self, event, view, option, index):
+        from PyQt6.QtWidgets import QToolTip
+        QToolTip.showText(event.globalPos(), "Kattintás: a termék fotói – a friss (még névtelen) fotók átnevezése "
+                                             "R18-xxxxx (1), (2)... névre, szerkesztés, főfotó sablonra", view)
+        return True
+
+
+# -------------------------------------------------------------------
+# 📷 TERMÉKFOTÓZÁS: a fényképezőgép képei a Windows Képek mappájába kerülnek (egy rendező program napi mappákba
+# teszi: 2026_09_14 ...). A Fotó ablak ezekből az el nem nevezett friss képeket R18-xxxxx (n) névre nevezi át,
+# UGYANABBAN a mappában. A sablon (főfotó keret) a program mellett: sablon.png (vagy a szerkesztőben kiválasztva).
+# -------------------------------------------------------------------
+FOTO_SABLON_BOX = (0.06, 0.14, 0.94, 0.85)   # a sablonon a termék helye (arányokban): bal, fent, jobb, lent
+
+
+def foto_forras_mappa():
+    p = load_config_value("foto_forras_mappa")
+    if p and os.path.isdir(p):
+        return p
+    home = os.path.expanduser("~")
+    for c in (os.path.join(home, "Pictures"), os.path.join(home, "Képek"),
+              os.path.join(home, "OneDrive", "Pictures"), os.path.join(home, "OneDrive", "Képek")):
+        if os.path.isdir(c):
+            return c
+    return os.path.join(home, "Pictures")
+
+
+def foto_sablon_path():
+    p = load_config_value("foto_sablon")
+    if p and os.path.isfile(p):
+        return p
+    c = os.path.join(BASE_DIR, "sablon.png")
+    return c if os.path.isfile(c) else ""
+
+
+def _foto_kod(code):
+    m = _PHOTO_CODE_RE.search(str(code or ""))
+    return f"R18-{int(m.group(1))}" if m else norm_code(code)
+
+
+def fotok_kodhoz(code):
+    """A termék elnevezett fotói: a fotóindexből + a Képek mappából (friss, még nem indexelt is)."""
+    key = _foto_kod(code)
+    out = set(photo_index.photos(key))
+    root = foto_forras_mappa()
+    if os.path.isdir(root):
+        for dirpath, dirnames, filenames in os.walk(root):
+            if dirpath[len(root):].count(os.sep) >= 2:
+                dirnames[:] = []
+            for fn in filenames:
+                if fn.lower().endswith(PHOTO_EXTENSIONS):
+                    m = _PHOTO_CODE_RE.search(fn)
+                    if m and f"R18-{int(m.group(1))}" == key:
+                        out.add(os.path.join(dirpath, fn))
+    return sorted(out, key=lambda f: (_foto_sorszam(f), f))
+
+
+def _foto_sorszam(path):
+    m = re.search(r"\((\d+)\)\s*\.[A-Za-z]+$", os.path.basename(path))
+    return int(m.group(1)) if m else 0
+
+
+def kovetkezo_foto_sorszam(code):
+    return max([_foto_sorszam(f) for f in fotok_kodhoz(code)] + [0]) + 1
+
+
+def foto_cel_nev(folder, code, n, ext):
+    """Szabad fájlnév: R18-xxxxx (n).jpg – ha foglalt, a következő sorszám."""
+    key = _foto_kod(code)
+    while True:
+        cel = os.path.join(folder, f"{key} ({n}){ext}")
+        if not os.path.exists(cel):
+            return cel, n
+        n += 1
+
+
+def friss_nevtelen_fotok(napok=4, limit=120):
+    """A Képek mappa (és napi almappái) el nem nevezett friss fotói, a legújabb elöl."""
+    root = foto_forras_mappa()
+    hatar = time.time() - napok * 86400
+    out = []
+    if not os.path.isdir(root):
+        return out
+    for dirpath, dirnames, filenames in os.walk(root):
+        if dirpath[len(root):].count(os.sep) >= 2:
+            dirnames[:] = []
+        for fn in filenames:
+            if not fn.lower().endswith(PHOTO_EXTENSIONS) or _PHOTO_CODE_RE.search(fn):
+                continue
+            fp = os.path.join(dirpath, fn)
+            try:
+                mt = os.path.getmtime(fp)
+            except OSError:
+                continue
+            if mt >= hatar:
+                out.append((mt, fp))
+    out.sort(reverse=True)
+    return [fp for _, fp in out[:limit]]
+
+
+def foto_megnyit(path, max_side=None):
+    """Kép betöltése PIL-lel, az EXIF elforgatással; max_side: gyors, kicsinyített betöltés (JPEG draft)."""
+    from PIL import ImageOps
+    im = Image.open(path)
+    if max_side and im.format == "JPEG":
+        im.draft("RGB", (max_side, max_side))
+    im = ImageOps.exif_transpose(im)
+    im = im.convert("RGB")
+    if max_side:
+        im.thumbnail((max_side, max_side))
+    return im
+
+
+def pil_to_qimage(im):
+    im = im.convert("RGB")
+    data = im.tobytes("raw", "RGB")
+    return QImage(data, im.width, im.height, im.width * 3, QImage.Format.Format_RGB888).copy()
+
+
+class _FotoBus(QObject):
+    thumb = pyqtSignal(str, object)     # (útvonal, QImage)
+
+
+class FotoDialog(QDialog):
+    """📷 Egy termék fotói: friss (névtelen) fotók átnevezése R18-xxxxx (n) névre, szerkesztés, főfotó sablonra."""
+
+    THUMB = 170
+
+    def __init__(self, code, nev="", parent=None):
+        super().__init__(parent)
+        self.code = _foto_kod(code)
+        self.setWindowTitle(f"📷 Fotók – {self.code} {nev}")
+        self.resize(1150, 820)
+        self.bus = _FotoBus()
+        self.bus.thumb.connect(self._thumb_ready)
+        self._thumbs = {}
+        self._labels = {}
+        self._checks = {}
+        self._last_names = None
+        self._undo = []
+        self._sem = threading.Semaphore(3)
+        lay = QVBoxLayout(self)
+        head = QLabel(f"<span style='font-size:20px;font-weight:bold;color:#ce93d8'>📷 {self.code}</span> "
+                      f"<span style='font-size:15px'>{nev}</span>")
+        head.setTextFormat(Qt.TextFormat.RichText)
+        lay.addWidget(head)
+        row = QHBoxLayout()
+        self.lbl_src = QLabel("")
+        self.lbl_src.setStyleSheet("color:#aaa")
+        row.addWidget(self.lbl_src, stretch=1)
+        b = QPushButton("📁 Fotók mappája…")
+        b.clicked.connect(self.valassz_mappat)
+        row.addWidget(b)
+        b = QPushButton("🔄 Frissítés")
+        b.clicked.connect(self.frissit)
+        row.addWidget(b)
+        lay.addLayout(row)
+
+        lay.addWidget(self._cim("🆕 Friss, még el nem nevezett fotók (a legújabb elöl) – pipáld ki, melyik ehhez a termékhez tartozik"))
+        self.new_box = QWidget()
+        self.new_grid = QGridLayout(self.new_box)
+        self.new_grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        sc = QScrollArea()
+        sc.setWidgetResizable(True)
+        sc.setWidget(self.new_box)
+        lay.addWidget(sc, stretch=3)
+        brow = QHBoxLayout()
+        self.btn_rename = QPushButton("✅ Kijelöltek elnevezése")
+        self.btn_rename.setStyleSheet("background-color:#00e676;color:black;font-weight:bold;font-size:15px;padding:8px 16px;")
+        self.btn_rename.clicked.connect(self.atnevez)
+        brow.addWidget(self.btn_rename)
+        self.btn_undo = QPushButton("↩️ Utolsó elnevezés visszavonása")
+        self.btn_undo.clicked.connect(self.visszavon)
+        self.btn_undo.setEnabled(False)
+        brow.addWidget(self.btn_undo)
+        brow.addStretch()
+        lay.addLayout(brow)
+
+        lay.addWidget(self._cim(f"🖼️ {self.code} elnevezett fotói – ✏️ szerkesztés, ⭐ főfotó (sablonra tétel)"))
+        self.named_box = QWidget()
+        self.named_grid = QGridLayout(self.named_box)
+        self.named_grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        sc2 = QScrollArea()
+        sc2.setWidgetResizable(True)
+        sc2.setWidget(self.named_box)
+        lay.addWidget(sc2, stretch=2)
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._figyel)
+        self.timer.start(3000)
+        self.frissit()
+
+    @staticmethod
+    def _cim(t):
+        l = QLabel(t)
+        l.setStyleSheet("font-weight:bold;color:#29b6f6;margin-top:6px")
+        return l
+
+    def valassz_mappat(self):
+        d = QFileDialog.getExistingDirectory(self, "Hova kerülnek a fényképezőgép fotói? (pl. Képek)", foto_forras_mappa())
+        if d:
+            save_config_value("foto_forras_mappa", d)
+            self.frissit()
+
+    def _figyel(self):
+        """Új fotó érkezett? (a fényképezőgépről / rendező programból) -> frissítés."""
+        try:
+            nevek = friss_nevtelen_fotok()
+        except Exception:
+            return
+        if nevek != self._last_names:
+            self.frissit()
+
+    def _clear(self, grid):
+        while grid.count():
+            w = grid.takeAt(0).widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+
+    def _kartya(self, path, checkable, checked=False):
+        fr = QFrame()
+        fr.setStyleSheet("QFrame{background:#2b2b2b;border-radius:6px}")
+        v = QVBoxLayout(fr)
+        v.setContentsMargins(4, 4, 4, 4)
+        img = QLabel("⏳")
+        img.setFixedSize(self.THUMB, int(self.THUMB * 0.75))
+        img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        img.setStyleSheet("background:#111")
+        v.addWidget(img)
+        self._labels.setdefault(path, []).append(img)
+        nev = QLabel(os.path.basename(path))
+        nev.setStyleSheet("font-size:11px;color:#ccc")
+        nev.setMaximumWidth(self.THUMB)
+        v.addWidget(nev)
+        if checkable:
+            cb = QCheckBox("ehhez a termékhez")
+            cb.setChecked(checked)
+            self._checks[path] = cb
+            v.addWidget(cb)
+            img.mousePressEvent = lambda e, c=cb: c.setChecked(not c.isChecked())
+        else:
+            h = QHBoxLayout()
+            b1 = QPushButton("✏️")
+            b1.setToolTip("Szerkesztés (forgatás, vágás, világosítás, háttér) – új képként menti")
+            b1.clicked.connect(lambda _=False, p=path: self.szerkeszt(p, sablon=False))
+            b2 = QPushButton("⭐ Főfotó")
+            b2.setToolTip("Sablonra tétel (DR Industrie keret) – a következő sorszámmal menti")
+            b2.clicked.connect(lambda _=False, p=path: self.szerkeszt(p, sablon=True))
+            h.addWidget(b1)
+            h.addWidget(b2)
+            v.addLayout(h)
+        self._toltes(path)
+        return fr
+
+    def _toltes(self, path):
+        if path in self._thumbs:
+            QTimer.singleShot(0, lambda: self._thumb_ready(path, self._thumbs[path]))
+            return
+
+        def job():
+            with self._sem:
+                try:
+                    qi = pil_to_qimage(foto_megnyit(path, max_side=self.THUMB * 2))
+                except Exception:
+                    qi = None
+            self.bus.thumb.emit(path, qi)
+        threading.Thread(target=job, daemon=True).start()
+
+    def _thumb_ready(self, path, qi):
+        self._thumbs[path] = qi
+        for lbl in self._labels.get(path, []):
+            try:
+                if qi is None:
+                    lbl.setText("❌ nem olvasható")
+                else:
+                    lbl.setPixmap(QPixmap.fromImage(qi).scaled(lbl.width(), lbl.height(), Qt.AspectRatioMode.KeepAspectRatio,
+                                                                Qt.TransformationMode.SmoothTransformation))
+            except RuntimeError:
+                pass
+
+    def frissit(self):
+        self._labels, self._checks = {}, {}
+        self._clear(self.new_grid)
+        self._clear(self.named_grid)
+        nevtelen = friss_nevtelen_fotok()
+        self._last_names = nevtelen
+        nevesitett = fotok_kodhoz(self.code)
+        self.lbl_src.setText(f"Fotók mappája: {foto_forras_mappa()}  ·  {len(nevtelen)} friss, névtelen fotó")
+        # előre kijelölve: az utolsó elnevezett fotó (bármelyik termék) óta készült képek
+        utolso = 0.0
+        root = foto_forras_mappa()
+        try:
+            for dirpath, dirnames, filenames in os.walk(root):
+                if dirpath[len(root):].count(os.sep) >= 2:
+                    dirnames[:] = []
+                for fn in filenames:
+                    if fn.lower().endswith(PHOTO_EXTENSIONS) and _PHOTO_CODE_RE.search(fn):
+                        utolso = max(utolso, os.path.getmtime(os.path.join(dirpath, fn)))
+        except Exception:
+            pass
+        cols = max(1, (self.width() - 40) // (self.THUMB + 20))
+        for i, fp in enumerate(nevtelen):
+            try:
+                friss = os.path.getmtime(fp) > utolso
+            except OSError:
+                friss = False
+            self.new_grid.addWidget(self._kartya(fp, True, checked=friss), i // cols, i % cols)
+        if not nevtelen:
+            self.new_grid.addWidget(QLabel("Nincs friss, névtelen fotó. Fotózz, és a kép pár másodpercen belül itt lesz."), 0, 0)
+        for i, fp in enumerate(nevesitett):
+            self.named_grid.addWidget(self._kartya(fp, False), i // cols, i % cols)
+        if not nevesitett:
+            self.named_grid.addWidget(QLabel("Még nincs elnevezett fotója."), 0, 0)
+        self._frissit_gomb()
+
+    def _frissit_gomb(self):
+        n = kovetkezo_foto_sorszam(self.code)
+        self.btn_rename.setText(f"✅ Kijelöltek elnevezése: {self.code} ({n}), ({n + 1})…")
+
+    def atnevez(self):
+        valasztott = [p for p, cb in self._checks.items() if cb.isChecked()]
+        if not valasztott:
+            QMessageBox.information(self, "Elnevezés", "Előbb pipáld ki, melyik fotók tartoznak ehhez a termékhez.")
+            return
+        valasztott.sort(key=lambda f: os.path.getmtime(f))     # a fotózás sorrendjében
+        n = kovetkezo_foto_sorszam(self.code)
+        terv, foglalt = [], set()
+        for fp in valasztott:
+            folder, ext = os.path.dirname(fp), os.path.splitext(fp)[1]
+            while True:
+                cel, n = foto_cel_nev(folder, self.code, n, ext)
+                if cel not in foglalt:
+                    break
+                n += 1
+            foglalt.add(cel)
+            terv.append((fp, cel))
+            n += 1
+        if QMessageBox.question(self, "Elnevezés", f"{len(terv)} fotó átnevezése (ugyanabban a mappában marad):\n\n" +
+                                "\n".join(f"{os.path.basename(a)}  →  {os.path.basename(b)}" for a, b in terv[:15]) +
+                                ("\n…" if len(terv) > 15 else "") + "\n\nMehet?") != QMessageBox.StandardButton.Yes:
+            return
+        kesz, hiba = [], []
+        for a, b in terv:
+            try:
+                os.rename(a, b)
+                kesz.append((a, b))
+            except Exception as e:
+                hiba.append(f"{os.path.basename(a)}: {e}")
+        self._undo = kesz
+        self.btn_undo.setEnabled(bool(kesz))
+        if kesz:
+            log_event(self.code, "FOTÓ ELNEVEZÉS", ", ".join(f"{os.path.basename(a)} → {os.path.basename(b)}" for a, b in kesz)[:900])
+        photo_index.build_async(force=True)
+        if hiba:
+            QMessageBox.warning(self, "Elnevezés", "Nem sikerült:\n" + "\n".join(hiba))
+        self.frissit()
+
+    def visszavon(self):
+        if not self._undo:
+            return
+        if QMessageBox.question(self, "Visszavonás", f"Az utolsó elnevezés visszavonása ({len(self._undo)} fotó visszakapja az eredeti nevét)?"
+                                ) != QMessageBox.StandardButton.Yes:
+            return
+        for a, b in reversed(self._undo):
+            try:
+                if os.path.exists(b) and not os.path.exists(a):
+                    os.rename(b, a)
+            except Exception:
+                pass
+        self._undo = []
+        self.btn_undo.setEnabled(False)
+        photo_index.build_async(force=True)
+        self.frissit()
+
+    def szerkeszt(self, path, sablon):
+        dlg = KepSzerkeszto(path, self.code, sablon=sablon, parent=self)
+        if dlg.exec():
+            photo_index.build_async(force=True)
+            self.frissit()
+
+    def closeEvent(self, ev):
+        self.timer.stop()
+        super().closeEvent(ev)
+
+
+class _VagoLabel(QLabel):
+    """Előnézet; vágás módban egérrel kijelölhető a téglalap (a kép arányaiban adja vissza)."""
+    kijelolve = pyqtSignal(float, float, float, float)
+
+    def __init__(self):
+        super().__init__()
+        self.vagas_mod = False
+        self._p0 = None
+        from PyQt6.QtWidgets import QRubberBand
+        self.band = QRubberBand(QRubberBand.Shape.Rectangle, self)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMinimumSize(500, 500)
+        self.setStyleSheet("background:#111")
+
+    def _kep_rect(self):
+        pm = self.pixmap()
+        if pm is None or pm.isNull():
+            return None
+        x = (self.width() - pm.width()) / 2
+        y = (self.height() - pm.height()) / 2
+        return x, y, pm.width(), pm.height()
+
+    def mousePressEvent(self, e):
+        if self.vagas_mod:
+            self._p0 = e.position().toPoint()
+            from PyQt6.QtCore import QRect, QSize
+            self.band.setGeometry(QRect(self._p0, QSize()))
+            self.band.show()
+
+    def mouseMoveEvent(self, e):
+        if self.vagas_mod and self._p0 is not None:
+            from PyQt6.QtCore import QRect
+            self.band.setGeometry(QRect(self._p0, e.position().toPoint()).normalized())
+
+    def mouseReleaseEvent(self, e):
+        if not (self.vagas_mod and self._p0 is not None):
+            return
+        r = self.band.geometry()
+        self.band.hide()
+        self._p0 = None
+        kr = self._kep_rect()
+        if not kr or r.width() < 8 or r.height() < 8:
+            return
+        x, y, w, h = kr
+        x0 = min(max((r.left() - x) / w, 0), 1)
+        y0 = min(max((r.top() - y) / h, 0), 1)
+        x1 = min(max((r.right() - x) / w, 0), 1)
+        y1 = min(max((r.bottom() - y) / h, 0), 1)
+        if x1 - x0 > 0.02 and y1 - y0 > 0.02:
+            self.kijelolve.emit(x0, y0, x1, y1)
+
+
+class KepSzerkeszto(QDialog):
+    """✏️ Képszerkesztő: forgatás (90° és 0,1°), vágás, világosság / kontraszt / fehér pont, háttér eltávolítás,
+    sablonra tétel. Mindig ÚJ képként ment (az eredeti megmarad), a következő sorszámmal: R18-xxxxx (n)."""
+
+    def __init__(self, path, code, sablon=False, parent=None):
+        super().__init__(parent)
+        self.path, self.code = path, _foto_kod(code)
+        self.setWindowTitle(f"✏️ Képszerkesztő – {os.path.basename(path)}")
+        self.resize(1250, 860)
+        self.orig = foto_megnyit(path)
+        self.proxy = self.orig.copy()
+        self.proxy.thumbnail((1400, 1400))
+        self.st = {"rot90": 0, "fok": 0.0, "vagas": None, "fenyero": 100, "kontraszt": 100, "feher": 255,
+                   "hatter": bool(sablon), "tol": 28, "sablon": bool(sablon), "meret": 92}
+        self._sablon_img = None
+        root = QHBoxLayout(self)
+        self.view = _VagoLabel()
+        self.view.kijelolve.connect(self._vagas_kesz)
+        root.addWidget(self.view, stretch=1)
+        panel = QVBoxLayout()
+        root.addLayout(panel)
+
+        def cim(t):
+            l = QLabel(t)
+            l.setStyleSheet("font-weight:bold;color:#29b6f6;margin-top:8px")
+            panel.addWidget(l)
+
+        cim("🔄 Forgatás")
+        r = QHBoxLayout()
+        for txt, d in (("⟲ 90°", -1), ("⟳ 90°", 1)):
+            b = QPushButton(txt)
+            b.clicked.connect(lambda _=False, d=d: self._rot90(d))
+            r.addWidget(b)
+        panel.addLayout(r)
+        r = QHBoxLayout()
+        b = QPushButton("−0,1°")
+        b.setAutoRepeat(True)
+        b.clicked.connect(lambda: self.spin_fok.setValue(self.spin_fok.value() - 0.1))
+        r.addWidget(b)
+        from PyQt6.QtWidgets import QDoubleSpinBox
+        self.spin_fok = QDoubleSpinBox()
+        self.spin_fok.setRange(-45.0, 45.0)
+        self.spin_fok.setDecimals(1)
+        self.spin_fok.setSingleStep(0.1)
+        self.spin_fok.setSuffix(" °")
+        self.spin_fok.valueChanged.connect(lambda v: self._set("fok", round(v, 1)))
+        r.addWidget(self.spin_fok)
+        b = QPushButton("+0,1°")
+        b.setAutoRepeat(True)
+        b.clicked.connect(lambda: self.spin_fok.setValue(self.spin_fok.value() + 0.1))
+        r.addWidget(b)
+        panel.addLayout(r)
+
+        cim("✂️ Vágás")
+        r = QHBoxLayout()
+        self.btn_vag = QPushButton("✂️ Kijelölés egérrel")
+        self.btn_vag.setCheckable(True)
+        self.btn_vag.toggled.connect(self._vagas_mod)
+        r.addWidget(self.btn_vag)
+        b = QPushButton("Vágás törlése")
+        b.clicked.connect(lambda: self._set("vagas", None))
+        r.addWidget(b)
+        panel.addLayout(r)
+
+        cim("☀️ Világosítás")
+        self.sl = {}
+        for key, txt, lo, hi in (("fenyero", "Fényerő", 50, 200), ("kontraszt", "Kontraszt", 50, 200),
+                                 ("feher", "Fehér pont (háttér fehérítés)", 150, 255)):
+            panel.addWidget(QLabel(txt))
+            from PyQt6.QtWidgets import QSlider
+            sl = QSlider(Qt.Orientation.Horizontal)
+            sl.setRange(lo, hi)
+            sl.setValue(self.st[key])
+            sl.valueChanged.connect(lambda v, k=key: self._set(k, v))
+            panel.addWidget(sl)
+            self.sl[key] = sl
+
+        cim("🧽 Háttér")
+        self.cb_hatter = QCheckBox("Háttér eltávolítása (egyszínű háttér)")
+        self.cb_hatter.setChecked(self.st["hatter"])
+        self.cb_hatter.toggled.connect(lambda v: self._set("hatter", v))
+        panel.addWidget(self.cb_hatter)
+        panel.addWidget(QLabel("Érzékenység"))
+        from PyQt6.QtWidgets import QSlider
+        self.sl_tol = QSlider(Qt.Orientation.Horizontal)
+        self.sl_tol.setRange(5, 90)
+        self.sl_tol.setValue(self.st["tol"])
+        self.sl_tol.valueChanged.connect(lambda v: self._set("tol", v))
+        panel.addWidget(self.sl_tol)
+
+        cim("⭐ Sablon (főfotó)")
+        self.cb_sablon = QCheckBox("Sablonra tétel")
+        self.cb_sablon.setChecked(self.st["sablon"])
+        self.cb_sablon.toggled.connect(lambda v: self._set("sablon", v))
+        panel.addWidget(self.cb_sablon)
+        panel.addWidget(QLabel("Termék mérete a sablonon"))
+        self.sl_meret = QSlider(Qt.Orientation.Horizontal)
+        self.sl_meret.setRange(40, 100)
+        self.sl_meret.setValue(self.st["meret"])
+        self.sl_meret.valueChanged.connect(lambda v: self._set("meret", v))
+        panel.addWidget(self.sl_meret)
+        self.lbl_sablon = QLabel("")
+        self.lbl_sablon.setWordWrap(True)
+        self.lbl_sablon.setStyleSheet("color:#aaa;font-size:11px")
+        panel.addWidget(self.lbl_sablon)
+        b = QPushButton("📁 Sablon kép kiválasztása…")
+        b.clicked.connect(self._sablon_valaszt)
+        panel.addWidget(b)
+
+        panel.addStretch()
+        b = QPushButton("↺ Minden alaphelyzetbe")
+        b.clicked.connect(self._reset)
+        panel.addWidget(b)
+        self.btn_ment = QPushButton("💾 Mentés új képként")
+        self.btn_ment.setStyleSheet("background-color:#00e676;color:black;font-weight:bold;font-size:15px;padding:10px;")
+        self.btn_ment.clicked.connect(self.mentes)
+        panel.addWidget(self.btn_ment)
+        b = QPushButton("Mégse")
+        b.clicked.connect(self.reject)
+        panel.addWidget(b)
+
+        self._deb = QTimer(self)
+        self._deb.setSingleShot(True)
+        self._deb.timeout.connect(self._render_preview)
+        self._sablon_info()
+        QTimer.singleShot(50, self._render_preview)
+
+    # ---- állapot ----
+    def _set(self, k, v):
+        self.st[k] = v
+        self._deb.start(120)
+
+    def _rot90(self, d):
+        self.st["rot90"] = (self.st["rot90"] + d) % 4
+        self.st["vagas"] = None
+        self._deb.start(10)
+
+    def _reset(self):
+        sablon = self.st["sablon"]
+        self.st.update({"rot90": 0, "fok": 0.0, "vagas": None, "fenyero": 100, "kontraszt": 100, "feher": 255, "tol": 28, "meret": 92})
+        self.spin_fok.setValue(0.0)
+        for k, sl in self.sl.items():
+            sl.setValue(self.st[k])
+        self.sl_tol.setValue(28)
+        self.sl_meret.setValue(92)
+        self.st["sablon"] = sablon
+        self._deb.start(10)
+
+    def _vagas_mod(self, on):
+        self.view.vagas_mod = on
+        self.view.setCursor(Qt.CursorShape.CrossCursor if on else Qt.CursorShape.ArrowCursor)
+        self._render_preview()
+
+    def _vagas_kesz(self, x0, y0, x1, y1):
+        self.st["vagas"] = (x0, y0, x1, y1)
+        self.btn_vag.setChecked(False)
+
+    def _sablon_valaszt(self):
+        f, _ = QFileDialog.getOpenFileName(self, "Sablon kép (PNG)", BASE_DIR, "Képek (*.png *.jpg *.jpeg)")
+        if f:
+            save_config_value("foto_sablon", f)
+            self._sablon_img = None
+            self._sablon_info()
+            self._deb.start(10)
+
+    def _sablon_info(self):
+        sp = foto_sablon_path()
+        self.cb_sablon.setEnabled(bool(sp))
+        if not sp:
+            self.cb_sablon.setChecked(False)
+            self.st["sablon"] = False
+        self.lbl_sablon.setText(f"Sablon: {sp}" if sp else "⚠️ Nincs sablon kép: tedd a program mellé sablon.png néven, "
+                                                           "vagy válaszd ki lent.")
+
+    def _sablon(self):
+        if self._sablon_img is None:
+            self._sablon_img = Image.open(foto_sablon_path()).convert("RGBA")
+        return self._sablon_img
+
+    # ---- feldolgozás (előnézeten kicsiben, mentéskor teljes méretben) ----
+    def _forgatott(self, im):
+        st = self.st
+        if st["rot90"]:
+            im = im.rotate(-90 * st["rot90"], expand=True)
+        if st["fok"]:
+            bg = self._hatter_szin(im)
+            im = im.rotate(-st["fok"], resample=Image.Resampling.BICUBIC, expand=True, fillcolor=bg)
+        return im
+
+    @staticmethod
+    def _hatter_szin(im):
+        w, h = im.size
+        pts = [im.getpixel((x, y)) for x, y in ((2, 2), (w - 3, 2), (2, h - 3), (w - 3, h - 3), (w // 2, 2), (w // 2, h - 3),
+                                                  (2, h // 2), (w - 3, h // 2))]
+        return tuple(sorted(p[i] for p in pts)[len(pts) // 2] for i in range(3))
+
+    def feldolgoz(self, im, vagas_nelkul=False):
+        from PIL import ImageEnhance, ImageChops, ImageFilter
+        st = self.st
+        im = self._forgatott(im)
+        if st["vagas"] and not vagas_nelkul:
+            x0, y0, x1, y1 = st["vagas"]
+            w, h = im.size
+            im = im.crop((int(x0 * w), int(y0 * h), int(x1 * w), int(y1 * h)))
+        if st["fenyero"] != 100:
+            im = ImageEnhance.Brightness(im).enhance(st["fenyero"] / 100)
+        if st["kontraszt"] != 100:
+            im = ImageEnhance.Contrast(im).enhance(st["kontraszt"] / 100)
+        if st["feher"] < 255:
+            k = 255.0 / st["feher"]
+            im = im.point(lambda v: min(255, int(v * k)))
+        alpha = None
+        if st["hatter"]:
+            bg = Image.new("RGB", im.size, self._hatter_szin(im))
+            diff = ImageChops.difference(im, bg).convert("L")
+            alpha = diff.point(lambda v: 255 if v > st["tol"] else 0).filter(ImageFilter.MedianFilter(5)) \
+                        .filter(ImageFilter.GaussianBlur(max(1, im.width // 900)))
+        if st["sablon"] and foto_sablon_path():
+            sab = self._sablon().copy()
+            W, H = sab.size
+            bx0, by0, bx1, by1 = (int(FOTO_SABLON_BOX[0] * W), int(FOTO_SABLON_BOX[1] * H),
+                                  int(FOTO_SABLON_BOX[2] * W), int(FOTO_SABLON_BOX[3] * H))
+            prod = im.convert("RGBA")
+            if alpha is not None:
+                prod.putalpha(alpha)
+                bbox = alpha.point(lambda v: 255 if v > 40 else 0).getbbox()
+                if bbox:
+                    prod = prod.crop(bbox)
+            bw, bh = (bx1 - bx0) * st["meret"] / 100, (by1 - by0) * st["meret"] / 100
+            sc = min(bw / prod.width, bh / prod.height)
+            prod = prod.resize((max(1, int(prod.width * sc)), max(1, int(prod.height * sc))), Image.Resampling.LANCZOS)
+            px = bx0 + ((bx1 - bx0) - prod.width) // 2
+            py = by0 + ((by1 - by0) - prod.height) // 2
+            sab.alpha_composite(prod, (px, py))
+            return sab.convert("RGB")
+        if alpha is not None:
+            white = Image.new("RGB", im.size, (255, 255, 255))
+            white.paste(im, (0, 0), alpha)
+            return white
+        return im
+
+    def _render_preview(self):
+        try:
+            if self.view.vagas_mod:
+                im = self._forgatott(self.proxy)          # vágás kijelölése a forgatott, vágatlan képen
+            else:
+                im = self.feldolgoz(self.proxy)
+            qi = pil_to_qimage(im)
+            self.view.setPixmap(QPixmap.fromImage(qi).scaled(self.view.width() - 4, self.view.height() - 4,
+                                                             Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        except Exception as e:
+            self.view.setText(f"❌ {e}")
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._deb.start(80)
+
+    def mentes(self):
+        folder, ext = os.path.dirname(self.path), ".jpg"
+        n = kovetkezo_foto_sorszam(self.code)
+        cel, n = foto_cel_nev(folder, self.code, n, ext)
+        mit = "főfotó (sablonra téve)" if self.st["sablon"] else "szerkesztett kép"
+        if QMessageBox.question(self, "Mentés", f"Mentés új képként ({mit}):\n\n{os.path.basename(cel)}\n\n"
+                                f"Mappa: {folder}\n(Az eredeti kép megmarad.)") != QMessageBox.StandardButton.Yes:
+            return
+        self.setCursor(Qt.CursorShape.WaitCursor)
+        try:
+            out = self.feldolgoz(self.orig)
+            out.save(cel, "JPEG", quality=92, optimize=True)
+        except Exception as e:
+            self.unsetCursor()
+            QMessageBox.warning(self, "Mentés", f"Nem sikerült menteni: {e}")
+            return
+        self.unsetCursor()
+        log_event(self.code, "FOTÓ SZERKESZTÉS", f"{os.path.basename(self.path)} → {os.path.basename(cel)} ({mit})")
+        self.accept()
 
 
 # G (Állapot) oszlop választható értékei az Excel Live munkalapon
@@ -10553,10 +11286,10 @@ class RaktarApp(QMainWindow):
 
         # 2. Excel-szerű Táblázat testreszabása
         self.excel_table = ExcelTableWidget()
-        self.excel_table.setColumnCount(17)
+        self.excel_table.setColumnCount(18)
         headers = ["A: F-Kód", "B: Vonalkód", "C: Márka", "D: Típus", "E: Cikkszám", "F: DB",
                    "G: Állapot", "H: Ár", "I: Páter", "J: Szabad", "K: Polc", "L: Raklap",
-                   "M: Súly", "N: eBay ID", "O: Megjegyzés", "P: Állapot részlet", "🖨️ Nyomtatás"]
+                   "M: Súly", "N: eBay ID", "O: Megjegyzés", "P: Állapot részlet", "🖨️ Nyomtatás", "📷 Fotó"]
         self.excel_table.setHorizontalHeaderLabels(headers)
         # KÉPERNYŐS oszlopsorrend: 🖨️, A-G, majd a leggyakrabban írt L (Raklap) és M (Súly), utána I, J, K, H, N, O, P.
         # Csak a megjelenítés változik (moveSection): a program és a mentés továbbra is a logikai
@@ -10649,7 +11382,11 @@ class RaktarApp(QMainWindow):
         self.excel_table.setItemDelegateForColumn(16, self.excel_print_delegate)
         self.excel_table.setMouseTracking(True)
         # a 🖨️ oszlop rögzítve: oldalra görgetéskor is mindig látszik a bal szélen
-        self.excel_print_frozen = FrozenColumn(self.excel_table, 16, PrintButtonDelegate(self.print_row_label, self.excel_table))
+        self.excel_camera_delegate = CameraButtonDelegate(self.open_photo_dialog_row, self.excel_table)
+        self.excel_table.setItemDelegateForColumn(17, self.excel_camera_delegate)
+        self.excel_print_frozen = FrozenColumn(self.excel_table, [16, 17],
+                                               {16: PrintButtonDelegate(self.print_row_label, self.excel_table),
+                                                17: CameraButtonDelegate(self.open_photo_dialog_row, self.excel_table)})
 
         # Az Excel Live tábla aktuális tartalma soronként (gyors összehasonlításhoz a háttérfrissítésnél)
         self._excel_rows_cache = []
@@ -10812,7 +11549,7 @@ class RaktarApp(QMainWindow):
         # -----------------------------------------------------------------
         # FIX OSZLOPSZÉLESSÉGEK (Villámgyors töltés, nincs fagyás sok ezres sornál!)
         # -----------------------------------------------------------------
-        col_widths = [110, 110, 150, 260, 250, 60, 100, 80, 80, 80, 100, 140, 80, 110, 150, 140, 140]
+        col_widths = [110, 110, 150, 260, 250, 60, 100, 80, 80, 80, 100, 140, 80, 110, 150, 140, 140, 120]
         for c_idx, w in enumerate(col_widths):
             self.excel_table.setColumnWidth(c_idx, w)
 
@@ -10956,6 +11693,19 @@ class RaktarApp(QMainWindow):
             self.excel_table.blockSignals(False)
         except Exception:
             self.excel_table.blockSignals(False)
+
+    def open_photo_dialog_row(self, row_idx):
+        """📷 gomb: a sor termékének fotói (átnevezés, szerkesztés, főfotó)."""
+        it = self.excel_table.item(row_idx, 0)
+        code = it.text().strip() if it else ""
+        if not code:
+            self.trigger_toast("⚠️ Ebben a sorban nincs R18 kód")
+            return
+        nev = " ".join(x for x in ((self.excel_table.item(row_idx, c).text().strip() if self.excel_table.item(row_idx, c) else "")
+                                    for c in (2, 3)) if x)
+        dlg = FotoDialog(code, nev, self)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.show()
 
     def print_row_label(self, row_idx):
         """🖨️ gomb: kattintás után bekéri a példányszámot (alap: 1, Enter = nyomtat), majd ZPL-lel nyomtat.
