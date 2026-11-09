@@ -600,6 +600,9 @@ REQUIRED_PACKAGES = [
 
 # Változásnapló (a legújabb legfelül). A VERZIÓK fülön ebből látszik, mi változott.
 VALTOZASNAPLO = [
+    ("v2026.11.09-foto3", "2026-11-09", [
+        "Főfotó: árnyék a termék alatt (be/ki, erősség, elmosás, eltolás állítható; a program megjegyzi a beállítást)",
+    ]),
     ("v2026.11.09-foto2", "2026-11-09", [
         "Főfotó: a DR Industrie sablon és a termék elhelyezése a saját főfotóitokhoz igazítva (méret, hely)",
         "Háttér eltávolítás: fehér, árnyékos fotóháttérhez; a fehér címke és a fényes acél részek megmaradnak",
@@ -1052,7 +1055,7 @@ def norm_code(code):
 
 # A USB-s vonalkód-olvasó amerikai billentyűzetként "gépel", de a gépen magyar
 # kiosztás van, ezért a '-' helyett 'ü', a '0' helyett 'ö' érkezik.
-APP_VERSION = "v2026.11.09-foto2"
+APP_VERSION = "v2026.11.09-foto3"
 
 _SCANNER_MAP = str.maketrans({"ü": "-", "Ü": "-", "ö": "0", "Ö": "0"})
 
@@ -4284,6 +4287,9 @@ class KepSzerkeszto(QDialog):
         self.proxy.thumbnail((1400, 1400))
         self.st = {"rot90": 0, "fok": 0.0, "vagas": None, "fenyero": 100, "kontraszt": 100, "feher": 255,
                    "hatter": bool(sablon), "tol": 28, "sablon": bool(sablon), "meret": 100}
+        ar = load_config_value("foto_arnyek") or {}
+        self.st.update({"arnyek": bool(ar.get("be", True)), "ar_ero": int(ar.get("ero", 60)),
+                        "ar_elmos": int(ar.get("elmos", 22)), "ar_eltol": int(ar.get("eltol", 10))})
         self._sablon_img = None
         root = QHBoxLayout(self)
         self.view = _VagoLabel()
@@ -4371,6 +4377,20 @@ class KepSzerkeszto(QDialog):
         self.sl_meret.setValue(self.st["meret"])
         self.sl_meret.valueChanged.connect(lambda v: self._set("meret", v))
         panel.addWidget(self.sl_meret)
+        self.cb_arnyek = QCheckBox("Árnyék a termék alatt")
+        self.cb_arnyek.setChecked(self.st["arnyek"])
+        self.cb_arnyek.toggled.connect(lambda v: self._set("arnyek", v))
+        panel.addWidget(self.cb_arnyek)
+        self.sl_ar = {}
+        for key, txt, lo, hi in (("ar_ero", "Árnyék erőssége", 0, 100), ("ar_elmos", "Árnyék elmosása", 0, 60),
+                                 ("ar_eltol", "Árnyék eltolása (jobbra-le)", 0, 60)):
+            panel.addWidget(QLabel(txt))
+            sl = QSlider(Qt.Orientation.Horizontal)
+            sl.setRange(lo, hi)
+            sl.setValue(self.st[key])
+            sl.valueChanged.connect(lambda v, k=key: self._set(k, v))
+            panel.addWidget(sl)
+            self.sl_ar[key] = sl
         self.lbl_sablon = QLabel("")
         self.lbl_sablon.setWordWrap(True)
         self.lbl_sablon.setStyleSheet("color:#aaa;font-size:11px")
@@ -4500,6 +4520,21 @@ class KepSzerkeszto(QDialog):
             prod = prod.resize((max(1, int(prod.width * sc)), max(1, int(prod.height * sc))), Image.Resampling.LANCZOS)
             px = bx0 + ((bx1 - bx0) - prod.width) // 2
             py = by0 + ((by1 - by0) - prod.height) // 2
+            if st.get("arnyek") and st.get("ar_ero", 0) > 0:
+                k = W / 1000.0                                  # a beállítások 1000 px-es sablonra értendők
+                blur, dy = max(0, int(st["ar_elmos"] * k)), int(st["ar_eltol"] * k)
+                dx = dy                                         # átlósan jobbra-le (mint a saját főfotókon)
+                pad = blur * 3 + 2
+                a = prod.split()[3].point(lambda v: int(v * st["ar_ero"] / 100))
+                sh = Image.new("RGBA", (prod.width + 2 * pad, prod.height + 2 * pad), (0, 0, 0, 0))
+                sh_a = Image.new("L", sh.size, 0)
+                sh_a.paste(a, (pad, pad))
+                if blur:
+                    sh_a = sh_a.filter(ImageFilter.GaussianBlur(blur))
+                sh.putalpha(sh_a)
+                tmp = Image.new("RGBA", sab.size, (0, 0, 0, 0))
+                tmp.paste(sh, (px + dx - pad, py + dy - pad))
+                sab.alpha_composite(tmp)
             sab.alpha_composite(prod, (px, py))
             return sab.convert("RGB")
         if alpha is not None:
@@ -4533,6 +4568,8 @@ class KepSzerkeszto(QDialog):
                                 f"Mappa: {folder}\n(Az eredeti kép megmarad.)") != QMessageBox.StandardButton.Yes:
             return
         self.setCursor(Qt.CursorShape.WaitCursor)
+        save_config_value("foto_arnyek", {"be": self.st["arnyek"], "ero": self.st["ar_ero"],
+                                          "elmos": self.st["ar_elmos"], "eltol": self.st["ar_eltol"]})
         try:
             out = self.feldolgoz(self.orig)
             out.save(cel, "JPEG", quality=92, optimize=True)
